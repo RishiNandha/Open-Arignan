@@ -1,57 +1,56 @@
 # Open-Arignan
 
-**Arignar** is the tamil word for the well-read / the knowledgeable / the scholar. **Arignan** is an open-source application that can help scholars, engineers, founders, etc... to maintain a local-first private knowledge base and get queries answered from it. 
+**Arignar** is the tamil word for the well-read / the knowledgeable / the scholar. **Arignan** is an application that can help scholars, engineers, founders, etc... to maintain a local-first private knowledge base and get queries answered from it.
 
 ## Key Points
 
 ### Behavioral
 
 - **Fully local RAG / Knowledge-base system**: Guilt-free caching of proprietary docs, or things under NDA, or unpublished material.
-
 - **Load and store knowledge over time**: Maybe software help docs as you discover them, research papers as you read them, personal notes, tutorial markdowns, textbooks, etc
-
 - **Session history**: For detailed prompting workflows where the user might choose to ask a series of questions
-
 - **User switches for topic/category**: For advanced users who might wear different "hats" and maintain different knowledge bases for each of them.
 
 ### Technical
 
 - **Fully local LLM**: _Gemma-4-31B-IT-NVFP4_ by default, reconfigurable in settings.json
-
 - **4-piece hybrid retreival system**:
-    - **map.md files** tell the LLM "where to find what" in the subdirectories
-    - **Semantic search** with a vectorDB RAG that fetches context from within the files
-    - **User auditable knowledge base** LLM-generated markdowns gives quick context/summary to the LLM. 
-    - **Keyword search** for retrieving exact keyword matches
 
+  - **map.md files** tell the LLM "where to find what" in the subdirectories
+  - **Semantic search** with a vectorDB RAG that fetches context from within the files
+  - **User auditable knowledge base** LLM-generated markdowns gives quick context/summary to the LLM.
+  - **Keyword search** for retrieving exact keyword matches
 - **Incrementally load and deleting of knowledge**:
-    - **Loading hook** appends the vector cache to the semantic RAG database, map.md for a quick lookup of "where to find what", and makes the LLM write a summary/knowledge-base markdown
-    - **Deleting** allows picking a past load and undoing it gracefully
-    - **Optional parameter "hat"** tells the load hook which subdirectory / subdivision of the knowledge base to write to.
+
+  - **Loading hook** appends the vector cache to the semantic RAG database, map.md for a quick lookup of "where to find what", and makes the LLM write a summary/knowledge-base markdown
+  - **Deleting** allows picking a past load and undoing it gracefully
+  - **Optional parameter "hat"** tells the load hook which subdirectory / subdivision of the knowledge base to write to.
 
 ### Entry Points
 
-- **CLI Entry Points**: 
-    - **Session resetting**: Each terminal starts it's own session of maintaining chat history. The user can reset it with this command. 
-    - **QnA with citations**: Questions can be asked based on the knowledge. Each question is also answered with citations of which directory and file were referred to. 
-    - **Optional parameter "hat" in QnA** that narrows down where to search thereby improving latency. Set to "auto" by default, which goes through everything
-    - **Loading Content**: Takes web url for a blog post / local address to a PDF or Markdown. Takes "hat" parameter which is "auto" by default.
-    - **Deleting Content**: First displays the ingestion history with load_IDs. Then user picks the load_IDs to undo the past ingestion.
-    - **Saving chat state**: Chat history has to be saved. Otherwise, it get's erase by default
-    - **Loading chat state**: To load the saved chat history
+- **CLI Entry Points**:
 
+  - **Session resetting**: Each terminal starts it's own session of maintaining chat history. The user can reset it with this command.
+  - **QnA with citations**: Questions can be asked based on the knowledge. Each question is also answered with citations of which directory and file were referred to.
+  - **Optional parameter "hat" in QnA** that narrows down where to search thereby improving latency. Set to "auto" by default, which goes through everything
+  - **Loading Content**: Takes web url for a blog post / local address to a PDF or Markdown. Takes "hat" parameter which is "auto" by default.
+  - **Deleting Content**: First displays the ingestion history with load_IDs. Then user picks the load_IDs to undo the past ingestion.
+  - **Saving chat state**: Chat history has to be saved. Otherwise, it get's erase by default
+  - **Loading chat state**: To load the saved chat history
 - **MCP Entry Points**:
-    - **Context Retreival tool**: A client such as copilot or codex or claude code can tap into the knowledge base and retrieve context
-    - **Global Map Resource**: The "map" given as a context, so that the MCP client has context of what all knowledge are available
-    - (To implement in future) **LLM Setting**: Toggle to use the local LLM in internal functions or start using the MCP Client's LLM
+
+  - **Context Retreival tool**: A client such as copilot or codex or claude code can tap into the knowledge base and retrieve context
+  - **Global Map Resource**: The "map" given as a context, so that the MCP client has context of what all knowledge are available
+  - (To implement in future) **LLM Setting**: Toggle to use the local LLM in internal functions or start using the MCP Client's LLM
 
 ## Quick-Start
 
-### Option 1: Git Clone 
+### Option 1: Git Clone
+
 0. Clone the repo
 1. Run the `setup.py`. This will:
-    - Download all the models needed
-    - Create a bin folder with executables
+   - Download all the models needed
+   - Create a bin folder with executables
 2. Add the bin folder to your PATH
 3. Try `arignan load "filename.pdf"`
 4. Try `arignan ask "relevant question"`
@@ -68,7 +67,7 @@ Open Arignan organizes knowledge into **namespaces called hats**, representing d
 
 - Vector Index
 - Keyword (BM25) Index
-- Summary knowledge base markdowns 
+- Summary knowledge base markdowns
 - Original files
 - map.md describing what to find where
 
@@ -76,7 +75,8 @@ A global map (global_map.md) provides a high-level view across all hats.
 
 #### Storage Layout
 
-The ingestion log allows for deleting any past loads. An LLM-generated global map describes which hat contains what knowledge. 
+The ingestion log allows for deleting any past loads. An LLM-generated global map describes which hat contains what knowledge.
+
 ```
 ~/.arignan/
 ├── settings.json
@@ -102,9 +102,11 @@ The ingestion log allows for deleting any past loads. An LLM-generated global ma
 ```
 
 #### Knowledge-base Organization
-The summaries/ directory is LLM-organized and human-auditable. Each subfolder represents a topic grouping and the folder name inferred by the LLM. 
+
+The summaries/ directory is LLM-organized and human-auditable. Each subfolder represents a topic grouping and the folder name inferred by the LLM.
 
 Each folder contains the original source file(s) and either a single markdown or a bunch of markdowns. The system gives the LLM the flexibility to do grouping based on size and semantic relatedness:
+
 - **Related documents can be grouped in one folder**: For example: multiple papers on a related coherent topic JEPA can be summarized into one markdown in one folder
 - **Large documents can have multiple markdowns**: For example: Behzad Razavi RFIC Design might typically one per section
 
@@ -133,8 +135,8 @@ Embedding model used is `BAAI/bge-base-en-v1.5`. This is fixed at build time and
 - The embedding vector
 - Canonical chunk text
 - Metadata to be used for:
-    - Citation: Path, Page Number / Section / Heading
-    - Deletion: Load_id
+  - Citation: Path, Page Number / Section / Heading
+  - Deletion: Load_id
 
 Vector Index is done using Qdrant and HNSW for storing both embedding and metadata. Lexical Index is using BM25
 
@@ -159,32 +161,32 @@ LLM is systematically prompted to update one markdown at a time.
 
 - Knowledge base markdowns: **wiki-styled** and **optimized tightly for token limits.**
 - `map.md` to be rich in the following information:
-    - Paths to files
-    - What to expect from the files, like "RF IC textbook"
-    - Any specific keywords, like "Calibre xRC"
-- The `global_map.md` to point to the relevant "hat" which would have the relevant map.md. It should have high-level keywords like "JEPA". 
+  - Paths to files
+  - What to expect from the files, like "RF IC textbook"
+  - Any specific keywords, like "Calibre xRC"
+- The `global_map.md` to point to the relevant "hat" which would have the relevant map.md. It should have high-level keywords like "JEPA".
 
-**Ingestion Log** is append-only, like commit history and each addition or deletion is logged with the path to reach the relevant changes made it so that the delete function can use this to lookup. 
+**Ingestion Log** is append-only, like commit history and each addition or deletion is logged with the path to reach the relevant changes made it so that the delete function can use this to lookup.
 
 ### Deletion
 
-Using the Ingestion log, the files are remove, map.md is updated and the vector and keyword indices are updated. The markdowns is deleted if standalone. If in a grouped setting, then it's regenerated from all the raw sources in the same group again. 
+Using the Ingestion log, the files are remove, map.md is updated and the vector and keyword indices are updated. The markdowns is deleted if standalone. If in a grouped setting, then it's regenerated from all the raw sources in the same group again.
 
 ### Retrieval Pipeline
 
 1. **Query Expansion**: LLM first normalizes the query and adds expansions of abbrievations used
 2. **Hat Classification**: When the hat is unspecified, the LLM first classifies which hat to descend down to
-3. **3-way Retrieval**: 
-    - Qdrant retrieves top-k chunks
-    - BM25 retrieves top-k chunks
-    - Descending down the maps retrieves the knowledge base markdown. (If the markdown is large, headings are treated as individual chunks).
+3. **3-way Retrieval**:
+   - Qdrant retrieves top-k chunks
+   - BM25 retrieves top-k chunks
+   - Descending down the maps retrieves the knowledge base markdown. (If the markdown is large, headings are treated as individual chunks).
 4. **Reciprocal Rank Fusion**: Chunks that appear in both Qdrant and BM25 are awarded higher score, and the rest are pruned
 5. **Cross-Encoder Reranking**: The chunks are reranked. This removes false positives, and removes irrelevant chunks from the markdown. Default cross-encoder used is `BAAI/bge-reranker-v2-m3` (can be changed in settings.json)
 6. (To implement in future): Adjacent Content Expansion.
 
 ### Session Scope
 
-Each time Arignan is called in a new terminal, it starts a new session and **associates the PID of the terminal with the session**. 
+Each time Arignan is called in a new terminal, it starts a new session and **associates the PID of the terminal with the session**.
 
 Each session has:
 
@@ -194,7 +196,7 @@ Each session has:
 
 KV Cache is managed by vLLM, and is reset either with a timeout, with a soft token limit or upon a session reset.
 
-Active context is maintained in a JSON while the session is active. This can be saved by the user with a command. A user can also load another JSON as the context. 
+Active context is maintained in a JSON while the session is active. This can be saved by the user with a command. A user can also load another JSON as the context.
 
 #### Self-Summary Rollover
 
@@ -203,10 +205,10 @@ When the chat history is becoming too long:
 - LLM rewrites the dialogue into a session summary
 - Older turns are removed from active prompt context
 - Session continues with:
-    - System prompt
-    - Session summary
-    - Recent turns
-    - Fresh retrieved context
+  - System prompt
+  - Session summary
+  - Recent turns
+  - Fresh retrieved context
 - The session JSON is overwritten with this summarized context (since unlike a chatbot, chat history holds no significance to us)
 
 ## License
