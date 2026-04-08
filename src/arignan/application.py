@@ -26,7 +26,7 @@ from arignan.markdown import MarkdownRepository, derive_keywords
 from arignan.markdown.writer import HeuristicArtifactWriter, LLMArtifactWriter
 from arignan.models import ChunkRecord, LoadEvent, LoadOperation, ParsedDocument, RetrievalHit, SessionState, SourceDocument
 from arignan.retrieval import HeuristicReranker, RetrievalPipeline
-from arignan.session import SessionExceptionLogger, SessionManager, SessionStore
+from arignan.session import SessionExceptionLogger, SessionManager, SessionModelCallLogger, SessionStore
 from arignan.storage import StorageLayout
 from arignan.tracing import ModelCallTrace, ModelTraceCollector
 
@@ -138,7 +138,8 @@ class ArignanApp:
         self.reranker = HeuristicReranker()
         self.session_manager = SessionManager(SessionStore(config.app_home), config.session)
         self.exception_logger = SessionExceptionLogger(self.session_manager.store, self.terminal_pid)
-        self.trace_collector = ModelTraceCollector()
+        self.model_call_logger = SessionModelCallLogger(self.session_manager.store, self.terminal_pid)
+        self.trace_collector = ModelTraceCollector(on_record=self.model_call_logger.log_call)
         self.local_text_generator = create_local_text_generator(config, progress_sink=self.progress_sink)
         self.light_text_generator = create_local_text_generator(
             config,

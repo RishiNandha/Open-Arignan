@@ -128,10 +128,72 @@ def test_transformers_text_generator_prefers_cuda_load_when_available(app_home, 
     )
     monkeypatch.setitem(sys.modules, "transformers", fake_module)
     monkeypatch.setattr("arignan.llm.runtime.preferred_torch_device", lambda: "cuda")
+    local_dir = app_home / "models" / "Qwen__Qwen3-1.7B"
+    local_dir.mkdir(parents=True, exist_ok=True)
 
-    generator = TransformersTextGenerator(AppConfig(app_home=app_home, local_llm_backend="transformers"))
+    generator = TransformersTextGenerator(
+        AppConfig(app_home=app_home, local_llm_backend="transformers", local_llm_model="Qwen/Qwen3-1.7B")
+    )
 
     generator._ensure_loaded()
 
+    assert captured["tokenizer_kwargs"]["local_files_only"] is True
     assert captured["model_kwargs"]["dtype"] == "auto"
     assert captured["moved_to"] == "cuda"
+
+
+def test_transformers_text_generator_downloads_missing_local_model_with_warning(app_home, monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    progress: list[str] = []
+
+    class FakeTokenizer:
+        pad_token_id = None
+        eos_token_id = 7
+
+        @staticmethod
+        def from_pretrained(source, **kwargs):
+            captured["tokenizer_source"] = source
+            captured["tokenizer_kwargs"] = kwargs
+            return FakeTokenizer()
+
+    class FakeModel:
+        def to(self, device: str):
+            captured["moved_to"] = device
+            return self
+
+    class FakeAutoModelForCausalLM:
+        @staticmethod
+        def from_pretrained(source, **kwargs):
+            captured["model_source"] = source
+            captured["model_kwargs"] = kwargs
+            return FakeModel()
+
+    fake_module = types.SimpleNamespace(
+        AutoTokenizer=FakeTokenizer,
+        AutoModelForCausalLM=FakeAutoModelForCausalLM,
+    )
+    monkeypatch.setitem(sys.modules, "transformers", fake_module)
+    monkeypatch.setattr("arignan.llm.runtime.preferred_torch_device", lambda: "cpu")
+
+    download_dir = app_home / "models" / "Qwen__Qwen3-1.7B"
+
+    def fake_download(config, *, progress_sink=None):
+        if progress_sink is not None:
+            progress_sink("Configured local LLM model 'Qwen/Qwen3-1.7B' is not cached locally yet. Downloading it now...")
+            progress_sink("Local LLM model 'Qwen/Qwen3-1.7B' is ready.")
+        download_dir.mkdir(parents=True, exist_ok=True)
+        return str(download_dir)
+
+    monkeypatch.setattr("arignan.llm.runtime._download_transformers_model", fake_download)
+
+    generator = TransformersTextGenerator(
+        AppConfig(app_home=app_home, local_llm_backend="transformers", local_llm_model="Qwen/Qwen3-1.7B"),
+        progress_sink=progress.append,
+    )
+
+    generator._ensure_loaded()
+
+    assert captured["tokenizer_source"] == str(download_dir)
+    assert captured["tokenizer_kwargs"]["local_files_only"] is True
+    assert "Downloading it now" in progress[0]
+    assert "is ready" in progress[-1]

@@ -25,6 +25,9 @@ class SessionStore:
     def active_exception_log_path(self, terminal_pid: int) -> Path:
         return self.active_session_dir(terminal_pid) / "exceptions.log"
 
+    def active_model_call_log_path(self, terminal_pid: int) -> Path:
+        return self.active_session_dir(terminal_pid) / "model_calls.log"
+
     def load_active(self, terminal_pid: int) -> SessionState | None:
         path = self.active_path(terminal_pid)
         if not path.exists():

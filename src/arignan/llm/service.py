@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -103,13 +104,20 @@ def ensure_model_available(
     ensure_service_running(app_home, endpoint, progress=progress)
     if model in list_available_models(endpoint):
         return
-    _emit(progress, f"Preparing local model ({model})...")
-    response = httpx.post(
-        endpoint.rstrip("/") + "/api/pull",
-        json={"model": model, "stream": False},
-        timeout=timeout_seconds,
-    )
-    response.raise_for_status()
+    _emit(progress, f"Configured local model '{model}' is not cached locally yet. Downloading it now...")
+    try:
+        with httpx.stream(
+            "POST",
+            endpoint.rstrip("/") + "/api/pull",
+            json={"model": model, "stream": True},
+            timeout=timeout_seconds,
+        ) as response:
+            response.raise_for_status()
+            _stream_ollama_pull_progress(response, model=model, progress=progress)
+    except httpx.HTTPError as exc:
+        details = exc.response.text if exc.response is not None else str(exc)
+        raise RuntimeError(f"Failed to prepare local model '{model}' from the local runtime: {details}") from exc
+    _emit(progress, f"Local model '{model}' is ready.")
 
 
 def list_available_models(endpoint: str) -> set[str]:
@@ -182,3 +190,38 @@ def _wait_for_service(endpoint: str, timeout_seconds: float) -> bool:
 def _emit(progress: Callable[[str], None] | None, message: str) -> None:
     if progress is not None:
         progress(message)
+
+
+def _stream_ollama_pull_progress(
+    response,
+    *,
+    model: str,
+    progress: Callable[[str], None] | None = None,
+) -> None:
+    last_status: str | None = None
+    last_percent = -1
+    for line in response.iter_lines():
+        if not line:
+            continue
+        if isinstance(line, bytes):
+            line = line.decode("utf-8", errors="replace")
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        status = str(payload.get("status", "")).strip()
+        completed = payload.get("completed")
+        total = payload.get("total")
+        percent = None
+        if isinstance(completed, int) and isinstance(total, int) and total > 0:
+            percent = int((completed / total) * 100)
+        if percent is not None:
+            bucket = percent // 10
+            if bucket != last_percent:
+                _emit(progress, f"Downloading local model ({model})... {percent}%")
+                last_percent = bucket
+                last_status = status or last_status
+                continue
+        if status and status != last_status:
+            _emit(progress, f"Downloading local model ({model})... {status}")
+            last_status = status

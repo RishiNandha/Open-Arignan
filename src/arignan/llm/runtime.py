@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any
 from typing import Callable, Protocol
 
@@ -116,6 +117,7 @@ class OllamaTextGenerator:
 @dataclass(slots=True)
 class TransformersTextGenerator:
     config: AppConfig
+    progress_sink: Callable[[str], None] | None = None
     model_name: str = field(init=False)
     backend_name: str = field(init=False)
     _tokenizer: object | None = None
@@ -161,10 +163,13 @@ class TransformersTextGenerator:
         except ImportError as exc:  # pragma: no cover
             raise RuntimeError("transformers is required for local LLM generation") from exc
 
-        source = resolve_local_model_source(self.config)
+        source, local_files_only = _resolve_transformers_model_source(self.config)
+        if not local_files_only:
+            source = _download_transformers_model(self.config, progress_sink=self.progress_sink)
+            local_files_only = True
         load_kwargs = {
             "trust_remote_code": True,
-            "local_files_only": True,
+            "local_files_only": local_files_only,
         }
         tokenizer = AutoTokenizer.from_pretrained(source, **load_kwargs)
         if getattr(tokenizer, "pad_token_id", None) is None and getattr(tokenizer, "eos_token_id", None) is not None:
@@ -246,7 +251,7 @@ def create_local_text_generator(
     if backend == "ollama":
         return OllamaTextGenerator(generator_config, progress_sink=progress_sink)
     if backend in {"transformers", "huggingface"}:
-        return TransformersTextGenerator(generator_config)
+        return TransformersTextGenerator(generator_config, progress_sink=progress_sink)
     raise ValueError(f"unsupported local_llm_backend: {generator_config.local_llm_backend}")
 
 
@@ -256,6 +261,42 @@ def resolve_local_model_source(config: AppConfig) -> str:
     if model_dir.exists():
         return str(model_dir)
     return repo_id
+
+
+def _resolve_transformers_model_source(config: AppConfig) -> tuple[str, bool]:
+    repo_id = resolve_model_repo_id(config.local_llm_model)
+    model_dir = resolve_model_storage_dir(config.app_home, config.local_llm_model)
+    if model_dir.exists():
+        return str(model_dir), True
+    return repo_id, False
+
+
+def _download_transformers_model(
+    config: AppConfig,
+    *,
+    progress_sink: Callable[[str], None] | None = None,
+) -> str:
+    repo_id = resolve_model_repo_id(config.local_llm_model)
+    model_dir = resolve_model_storage_dir(config.app_home, config.local_llm_model)
+    if progress_sink is not None:
+        progress_sink(
+            f"Configured local LLM model '{config.local_llm_model}' is not cached locally yet. Downloading it now..."
+        )
+    try:
+        from huggingface_hub import snapshot_download
+        from huggingface_hub.errors import GatedRepoError, HfHubHTTPError, RepositoryNotFoundError
+    except ImportError as exc:  # pragma: no cover
+        raise RuntimeError("huggingface_hub is required for local transformers model downloads") from exc
+
+    try:
+        snapshot_download(repo_id=repo_id, local_dir=model_dir, local_dir_use_symlinks=False)
+    except (RepositoryNotFoundError, GatedRepoError, HfHubHTTPError) as exc:
+        raise RuntimeError(
+            f"Failed to download local LLM model '{config.local_llm_model}' into {model_dir}: {exc}"
+        ) from exc
+    if progress_sink is not None:
+        progress_sink(f"Local LLM model '{config.local_llm_model}' is ready.")
+    return str(model_dir)
 
 
 def _model_device(model):

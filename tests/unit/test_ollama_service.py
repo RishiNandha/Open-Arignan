@@ -103,6 +103,7 @@ def test_is_service_ready_returns_false_on_http_error(monkeypatch) -> None:
 def test_ensure_model_available_pulls_when_model_missing(monkeypatch, tmp_path: Path) -> None:
     ensured: list[str] = []
     pulled: list[dict[str, object]] = []
+    progress: list[str] = []
 
     monkeypatch.setattr(
         "arignan.llm.service.ensure_service_running",
@@ -110,23 +111,47 @@ def test_ensure_model_available_pulls_when_model_missing(monkeypatch, tmp_path: 
     )
     monkeypatch.setattr("arignan.llm.service.list_available_models", lambda endpoint: set())
 
-    class FakeResponse:
+    class FakeStream:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
         @staticmethod
         def raise_for_status() -> None:
             return None
 
+        @staticmethod
+        def iter_lines():
+            return iter(
+                [
+                    '{"status":"pulling manifest"}',
+                    '{"status":"pulling layers","completed":25,"total":100}',
+                    '{"status":"pulling layers","completed":100,"total":100}',
+                    '{"status":"success"}',
+                ]
+            )
+
     monkeypatch.setattr(
-        "arignan.llm.service.httpx.post",
-        lambda url, json, timeout: pulled.append({"url": url, "json": json, "timeout": timeout}) or FakeResponse(),
+        "arignan.llm.service.httpx.stream",
+        lambda method, url, json, timeout: pulled.append(
+            {"method": method, "url": url, "json": json, "timeout": timeout}
+        )
+        or FakeStream(),
     )
 
-    ensure_model_available(tmp_path, "http://127.0.0.1:11434", "qwen3:4b-q4_K_M")
+    ensure_model_available(tmp_path, "http://127.0.0.1:11434", "qwen3:4b-q4_K_M", progress=progress.append)
 
     assert ensured == ["http://127.0.0.1:11434"]
     assert pulled == [
         {
+            "method": "POST",
             "url": "http://127.0.0.1:11434/api/pull",
-            "json": {"model": "qwen3:4b-q4_K_M", "stream": False},
+            "json": {"model": "qwen3:4b-q4_K_M", "stream": True},
             "timeout": 1800.0,
         }
     ]
+    assert "is not cached locally yet" in progress[0]
+    assert any("25%" in message or "100%" in message for message in progress)
+    assert progress[-1] == "Local model 'qwen3:4b-q4_K_M' is ready."
