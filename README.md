@@ -30,7 +30,7 @@ soon tm ;)
 
 ### Technical
 
-- **Fully local LLM**: `Qwen/Qwen3-1.7B` by default, reconfigurable in settings.json
+- **Fully local LLM**: `qwen3:4b-q4_K_M` by default, with `qwen3:0.6b` also provisioned as a lighter answer mode option. Reconfigurable in settings.json
 - **4-piece hybrid retreival system**:
 
   - **map.md files** tell the LLM "where to find what" in the subdirectories
@@ -143,7 +143,7 @@ Vector Index is done using Qdrant and HNSW for storing both embedding and metada
 
 #### Topic Grouping and Segmentation
 
-Grouping of files into a single markdown or segmentation of a single file into multiple markdowns is decided by the main LLM (Qwen 3 by default). The decisions are mostly driven by semantics, but there is also a `max_md_length` for assisting the decision.
+Grouping of files into a single markdown or segmentation of a single file into multiple markdowns is currently decided by local heuristics, with `max_md_length` assisting the decision. The architecture is still intended to be LLM-guided at this boundary.
 
 **Grouping:**
 
@@ -175,8 +175,8 @@ Using the Ingestion log, the files are remove, map.md is updated and the vector 
 
 ### Retrieval Pipeline
 
-1. **Query Expansion**: LLM first normalizes the query and adds expansions of abbrievations used
-2. **Hat Classification**: When the hat is unspecified, the LLM first classifies which hat to descend down to
+1. **Query Expansion**: The system first normalizes the query and adds expansions of abbreviations used
+2. **Hat Classification**: When the hat is unspecified, the system first classifies which hat to descend down to
 3. **3-way Retrieval**:
    - Qdrant retrieves top-k chunks
    - BM25 retrieves top-k chunks
@@ -196,7 +196,7 @@ Each session has:
 - A conversation history JSON
 - A session ID
 
-KV Cache is managed by vLLM, and is reset either with a timeout, with a soft token limit or upon a session reset.
+KV Cache reset behavior is currently represented in session metadata and is reset either with a timeout, with a soft token limit or upon a session reset.
 
 Active context is maintained in a JSON while the session is active. This can be saved by the user with a command. A user can also load another JSON as the context.
 
