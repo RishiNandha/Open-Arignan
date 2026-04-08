@@ -7,3 +7,4 @@ pytest-cache-files-*/
 build/
 docs/
 build/
+bin/

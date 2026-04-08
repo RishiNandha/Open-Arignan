@@ -50,8 +50,9 @@
 0. Clone the repo
 1. Run the `python setup.py --app-home <install dir>`. This will:
    - Download all the models needed
-   - Create a `<install dir/bin/` folder with executables
-2. Add the `<install dir/bin/` folder to your PATH
+   - Create a **bin directory** folder with executables
+   - Print the bin directory for your reference
+2. Add the bin directory folder to your PATH
 3. Try `arignan load "filename.pdf"`
 4. Try `arignan ask "relevant question"`
 
@@ -216,8 +217,8 @@ When the chat history is becoming too long:
 
 ### For Users
 
-1. Setup: `python setup.py --app-home <install dir>`
-2. Add `<install dir>/bin/` to PATH
+1. Setup: `python setup.py --app-home <install dir>`. We will call this the **App home** from now.
+2. Add **Bin directory** to PATH. The setup.py will automatically print the bin directory for you.
 2. Help: `arignan --help`
 3. Load: `arignan load "filename.pdf"`
 4. Load with hat: `arignan load "flename.pdf" --hat psychology`
@@ -233,7 +234,12 @@ When the chat history is becoming too long:
 
 1. Install dependencies: `python -m pip install -e .[dev]`
 2. Run tests: `python -m pytest`
-3. CLI smoke tests: `python -m pytest tests/integration/test_cli_smoke.py`
+3. Debug Load Command: `arignan load "filepath" --debug`
+4. Debug Ask Command: `arignan ask "question" --debug`
+
+## Declaration
+
+Some parts of the repository were generated using LLM-assisted coding applications. There may be potential mismatches between the features described in the README and the implementation. If you come across any, please raise an issue in the github repository!
 
 ## License
 

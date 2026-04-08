@@ -1,0 +1,61 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from arignan.config import AppConfig, load_config, write_default_settings
+
+
+def test_load_config_uses_defaults_when_settings_missing(app_home: Path) -> None:
+    config = load_config(app_home=app_home, environ={})
+
+    assert isinstance(config, AppConfig)
+    assert config.app_home == app_home.resolve()
+    assert config.local_llm_model == "Qwen/Qwen3-1.7B"
+    assert config.embedding_model == "BAAI/bge-base-en-v1.5"
+    assert config.chunking.chunk_size == 1500
+    assert config.chunking.chunk_overlap == 80
+
+
+def test_load_config_merges_nested_overrides(app_home: Path) -> None:
+    settings_path = app_home / "settings.json"
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings_path.write_text(
+        json.dumps(
+            {
+                "local_llm_model": "custom-llm",
+                "retrieval": {"dense_top_k": 12},
+                "session": {"soft_token_limit": 4096},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_config(app_home=app_home)
+
+    assert config.local_llm_model == "custom-llm"
+    assert config.retrieval.dense_top_k == 12
+    assert config.session.soft_token_limit == 4096
+    assert config.embedding_model == "BAAI/bge-base-en-v1.5"
+
+
+def test_load_config_rejects_embedding_override(app_home: Path) -> None:
+    settings_path = app_home / "settings.json"
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings_path.write_text(json.dumps({"embedding_model": "different"}), encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        load_config(app_home=app_home)
+
+
+def test_write_default_settings_creates_file(app_home: Path) -> None:
+    settings_path = write_default_settings(app_home=app_home)
+
+    assert settings_path.exists()
+    payload = json.loads(settings_path.read_text(encoding="utf-8"))
+    assert payload["app_home"] == str(app_home.resolve())
+    assert payload["chunking"]["chunk_size"] == 1500
+    assert payload["chunking"]["chunk_overlap"] == 80
+    assert payload["markdown"]["max_md_length"] == 4000
