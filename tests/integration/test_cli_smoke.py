@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 
 from arignan.cli import main
+from arignan.ingestion.parsers import DocumentParser, PdfOcrRequired
+from arignan.models import ParsedDocument, SourceDocument, SourceType
 
 
 class FakeLocalGenerator:
@@ -19,6 +21,7 @@ class FakeLocalGenerator:
         user_prompt: str,
         max_new_tokens: int = 800,
         temperature: float = 0.1,
+        response_format=None,
     ) -> str:
         if "Return strict JSON only" in system_prompt:
             return json.dumps(
@@ -85,6 +88,9 @@ def test_cli_load_ask_and_delete_smoke(tmp_path: Path, capsys, monkeypatch) -> N
     assert "Chunks:" in load_output
     assert "Markdown segments:" in load_output
     assert "[arignan] Scanning input for load into hat 'default'..." in load_progress
+    assert "[arignan] Found 1 supported source(s) to load." in load_progress
+    assert "[arignan] [1/1] Parsing 'notes.md'..." in load_progress
+    assert "[arignan] [1/1] Finished loading 'notes.md' into topic 'jepa-notes'." in load_progress
     assert "[arignan] Refreshing map.md for hat 'default'..." in load_progress
 
     assert main(["--app-home", str(app_home), "--pid", "1234", "ask", "What is JEPA?", "--hat", "default"]) == 0
@@ -260,3 +266,87 @@ def test_cli_hat_delete_can_be_cancelled(tmp_path: Path, capsys, monkeypatch) ->
 
     assert "Cancelled hat deletion." in cancel_output
     assert (app_home / "hats" / "SNNs").exists()
+
+
+def test_cli_load_continues_after_pdf_failure_and_lists_failed_files(tmp_path: Path, capsys, monkeypatch) -> None:
+    _patch_local_generator(monkeypatch)
+    app_home = tmp_path / ".arignan"
+    folder = tmp_path / "batch"
+    folder.mkdir()
+    good_markdown = folder / "a-good.md"
+    bad_pdf = folder / "z-bad.pdf"
+    good_markdown.write_text("# Good Notes\n\nUseful local content.\n", encoding="utf-8")
+    bad_pdf.write_text("placeholder", encoding="utf-8")
+
+    original_parse = DocumentParser.parse
+
+    def flaky_parse(self, source, load_id: str, hat: str, allow_ocr: bool = True):
+        if source.source_uri == str(bad_pdf.resolve()):
+            raise ValueError("ocr fallback failed for scanned PDF")
+        return original_parse(self, source, load_id=load_id, hat=hat, allow_ocr=allow_ocr)
+
+    monkeypatch.setattr(DocumentParser, "parse", flaky_parse)
+
+    assert main(["--app-home", str(app_home), "--pid", "6000", "load", str(folder), "--hat", "default"]) == 0
+    capture = capsys.readouterr()
+    output = capture.out
+    progress = capture.err
+    log_path = app_home / "sessions" / "active" / "pid-6000" / "exceptions.log"
+
+    assert "Loaded 1 document(s) into hat 'default'" in output
+    assert "Failed files: 1." in output
+    assert f"- {bad_pdf.resolve()}" in output
+    assert "[arignan] Found 2 supported source(s) to load." in progress
+    assert "[arignan] [1/2] Parsing 'a-good.md'..." in progress
+    assert "[arignan] [2/2] Parsing 'z-bad.pdf'..." in progress
+    assert "[arignan] [1/1] Finished loading 'a-good.md' into topic 'good-notes'." in progress
+    assert "continuing with remaining sources" in progress
+    assert str(log_path) in progress
+    assert log_path.exists()
+    log_text = log_path.read_text(encoding="utf-8")
+    assert '"source_uri"' in log_text
+    assert "z-bad.pdf" in log_text
+    assert "ocr fallback failed for scanned PDF" in log_text
+
+
+def test_cli_load_defers_ocr_heavy_pdf_until_after_other_files(tmp_path: Path, capsys, monkeypatch) -> None:
+    _patch_local_generator(monkeypatch)
+    app_home = tmp_path / ".arignan"
+    folder = tmp_path / "batch"
+    folder.mkdir()
+    good_markdown = folder / "a-good.md"
+    scan_pdf = folder / "z-scan.pdf"
+    good_markdown.write_text("# Good Notes\n\nUseful local content.\n", encoding="utf-8")
+    scan_pdf.write_text("placeholder", encoding="utf-8")
+
+    original_parse = DocumentParser.parse
+
+    def deferred_ocr_parse(self, source, load_id: str, hat: str, allow_ocr: bool = True):
+        if source.source_uri == str(scan_pdf.resolve()) and not allow_ocr:
+            raise PdfOcrRequired("no embedded text found")
+        if source.source_uri == str(scan_pdf.resolve()) and allow_ocr:
+            return ParsedDocument(
+                load_id=load_id,
+                hat=hat,
+                source=SourceDocument(
+                    source_type=SourceType.PDF,
+                    source_uri=source.source_uri,
+                    local_path=scan_pdf,
+                    title="z-scan",
+                    metadata={"parser": "pdf+ocr"},
+                ),
+                full_text="Scanned OCR text.",
+                sections=[],
+                keywords=[],
+            )
+        return original_parse(self, source, load_id=load_id, hat=hat, allow_ocr=allow_ocr)
+
+    monkeypatch.setattr(DocumentParser, "parse", deferred_ocr_parse)
+
+    assert main(["--app-home", str(app_home), "load", str(folder), "--hat", "default"]) == 0
+    capture = capsys.readouterr()
+    progress = capture.err
+
+    assert "No embedded text found in 'z-scan.pdf'; deferring OCR until after other files." in progress
+    assert "1 source(s) need OCR and may take longer." in progress
+    assert "No embedded text found in 'z-scan.pdf'; trying OCR now, this may take a while..." in progress

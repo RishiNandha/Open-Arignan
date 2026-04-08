@@ -21,6 +21,7 @@ class FakeLocalGenerator:
         user_prompt: str,
         max_new_tokens: int = 800,
         temperature: float = 0.1,
+        response_format=None,
     ) -> str:
         if "Return strict JSON only" in system_prompt:
             return json.dumps(

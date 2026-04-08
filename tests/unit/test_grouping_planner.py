@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from arignan.grouping import GroupingDecision, GroupingPlanner
+from arignan.grouping import GroupingDecision, GroupingHint, GroupingPlanner, MergeCandidate
 from arignan.models import ChunkMetadata, DocumentSection, ParsedDocument, RetrievalHit, RetrievalSource, SourceDocument, SourceType
 
 
@@ -92,3 +92,36 @@ def test_grouping_planner_keeps_compact_pdf_in_single_markdown() -> None:
 
     assert plan.decision is GroupingDecision.STANDALONE
     assert not plan.segments
+
+
+def test_grouping_planner_prefers_merge_when_light_llm_votes_for_candidate() -> None:
+    document = ParsedDocument(
+        load_id="load-5",
+        hat="default",
+        source=SourceDocument(
+            source_type=SourceType.MARKDOWN,
+            source_uri="latent-prediction.md",
+            local_path=Path("latent-prediction.md"),
+            title="Latent Prediction Note",
+        ),
+        full_text="Notes on predictive representation learning and latent target prediction.",
+        sections=[DocumentSection(text="Notes on predictive representation learning.", heading="Latent Prediction Note")],
+    )
+
+    candidate = MergeCandidate(
+        topic_folder="jepa",
+        score=0.24,
+        length_estimate=250,
+        keywords=["JEPA", "latent target prediction"],
+        title="JEPA",
+    )
+
+    plan = GroupingPlanner(max_md_length=1000).plan(
+        document,
+        merge_candidates=[candidate],
+        llm_merge_hint=GroupingHint(topic_folder="jepa", confidence=0.85, rationale="same predictive representation family"),
+    )
+
+    assert plan.decision is GroupingDecision.MERGE
+    assert plan.merge_target_topic == "jepa"
+    assert any("Light LLM grouping vote" in item for item in plan.rationale)

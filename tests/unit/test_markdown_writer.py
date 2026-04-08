@@ -15,6 +15,7 @@ class FakeGenerator:
     def __init__(self, outputs: list[str]) -> None:
         self.outputs = outputs
         self.calls: list[tuple[str, str]] = []
+        self.response_formats: list[object] = []
         self.model_name = "fake-llm"
         self.backend_name = "fake-backend"
 
@@ -25,8 +26,10 @@ class FakeGenerator:
         user_prompt: str,
         max_new_tokens: int = 800,
         temperature: float = 0.1,
+        response_format=None,
     ) -> str:
         self.calls.append((system_prompt, user_prompt))
+        self.response_formats.append(response_format)
         return self.outputs.pop(0)
 
 
@@ -43,6 +46,7 @@ class FailingGenerator:
         user_prompt: str,
         max_new_tokens: int = 800,
         temperature: float = 0.1,
+        response_format=None,
     ) -> str:
         raise RuntimeError(self.message)
 
@@ -85,16 +89,17 @@ def test_resolve_local_model_source_prefers_downloaded_model_dir(tmp_path: Path)
 
 def test_llm_artifact_writer_uses_json_response_for_topic_render(tmp_path: Path) -> None:
     document = _document(tmp_path)
+    generator = FakeGenerator(
+        [
+            (
+                '{"title":"V-JEPA 2","description":"Video representation notes.","locator":"paper on world models and latent prediction",'
+                '"keywords":["V-JEPA","world model","latent prediction"],'
+                '"summary_markdown":"# V-JEPA 2\\n\\nA concise lead.\\n\\n## Summary\\nShort summary.\\n\\n## Key Ideas\\n- World models\\n- Latent prediction\\n\\n## Sources\\n| Source | What To Find | Key Sections | File |\\n| --- | --- | --- | --- |\\n| V-JEPA 2 | Video representation notes | Overview | `notes.md` |\\n\\n## Keywords\\nV-JEPA, world model, latent prediction"}'
+            )
+        ]
+    )
     writer = LLMArtifactWriter(
-        generator=FakeGenerator(
-            [
-                (
-                    '{"title":"V-JEPA 2","description":"Video representation notes.","locator":"paper on world models and latent prediction",'
-                    '"keywords":["V-JEPA","world model","latent prediction"],'
-                    '"summary_markdown":"# V-JEPA 2\\n\\nA concise lead.\\n\\n## Summary\\nShort summary.\\n\\n## Key Ideas\\n- World models\\n- Latent prediction\\n\\n## Sources\\n| Source | What To Find | Key Sections | File |\\n| --- | --- | --- | --- |\\n| V-JEPA 2 | Video representation notes | Overview | `notes.md` |\\n\\n## Keywords\\nV-JEPA, world model, latent prediction"}'
-                )
-            ]
-        ),
+        generator=generator,
         fallback=HeuristicArtifactWriter(),
     )
 
@@ -108,7 +113,13 @@ def test_llm_artifact_writer_uses_json_response_for_topic_render(tmp_path: Path)
     assert rendered.locator == "paper on world models and latent prediction"
     assert rendered.keywords == ["V-JEPA", "world model", "latent prediction"]
     assert rendered.summary_markdown.startswith("# V-JEPA 2")
+    assert "## Related Threads" in rendered.summary_markdown
     assert "## Sources" in rendered.summary_markdown
+    assert generator.response_formats[0] is not None
+    assert generator.response_formats[0]["type"] == "object"
+    assert "Example of a good summary_markdown shape:" in generator.calls[0][1]
+    assert "rich lookup article" in generator.calls[0][1]
+    assert "one coherent topic page" in generator.calls[0][1]
 
 
 def test_llm_artifact_writer_falls_back_on_invalid_json(tmp_path: Path) -> None:
@@ -125,6 +136,7 @@ def test_llm_artifact_writer_falls_back_on_invalid_json(tmp_path: Path) -> None:
 
     assert rendered.title == "V-JEPA 2"
     assert rendered.summary_markdown.startswith("# V-JEPA 2")
+    assert "## Related Threads" in rendered.summary_markdown
 
 
 def test_llm_artifact_writer_renders_map_and_global_map(tmp_path: Path) -> None:
@@ -239,6 +251,7 @@ def test_llm_artifact_writer_logs_full_traceback_to_session_log(app_home: Path, 
     log_text = log_path.read_text(encoding="utf-8")
 
     assert rendered.summary_markdown.startswith("# V-JEPA 2")
+    assert "## Related Threads" in rendered.summary_markdown
     assert log_path.exists()
     assert '"component": "llm"' in log_text
     assert '"task": "topic summary markdown"' in log_text

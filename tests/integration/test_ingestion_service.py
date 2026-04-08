@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from arignan.ingestion import FetchedUrl, IngestionLog, IngestionService
+from arignan.ingestion.parsers import DocumentParser
 
 
 class FakeUrlFetcher:
@@ -65,3 +66,39 @@ def test_ingestion_service_ingests_url_with_custom_fetcher(tmp_path: Path) -> No
 
     assert batch.documents[0].source.title == "Blog"
     assert batch.documents[0].full_text == "Web text."
+
+
+def test_ingestion_service_continues_past_parse_failures(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    folder = tmp_path / "folder"
+    folder.mkdir()
+    good_markdown = folder / "a-good.md"
+    bad_pdf = folder / "z-bad.pdf"
+    good_markdown.write_text("# Good\n\nUsable notes.", encoding="utf-8")
+    bad_pdf.write_text("placeholder", encoding="utf-8")
+
+    original_parse = DocumentParser.parse
+
+    def flaky_parse(self, source, load_id: str, hat: str, allow_ocr: bool = True):
+        if source.source_uri == str(bad_pdf.resolve()):
+            raise ValueError("simulated parse failure")
+        return original_parse(self, source, load_id=load_id, hat=hat, allow_ocr=allow_ocr)
+
+    monkeypatch.setattr(DocumentParser, "parse", flaky_parse)
+    log = IngestionLog(tmp_path / "ingestion_log.jsonl")
+    service = IngestionService(log)
+    failures: list[tuple[str, str]] = []
+
+    batch = service.ingest(
+        folder,
+        hat="research",
+        load_id="load-mixed",
+        on_parse_error=lambda source, exc: failures.append((source.source_uri, str(exc))),
+    )
+
+    assert [document.source.source_uri for document in batch.documents] == [str(good_markdown.resolve())]
+    assert [failure.source_uri for failure in batch.failures] == [str(bad_pdf.resolve())]
+    assert failures == [(str(bad_pdf.resolve()), "simulated parse failure")]
+    assert log.find_by_load_id("load-mixed")[0].source_items == [str(good_markdown.resolve())]

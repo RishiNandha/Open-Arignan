@@ -12,13 +12,21 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from arignan.config import AppConfig
-from arignan.grouping import GroupingDecision, GroupingPlan, GroupingPlanner, estimate_markdown_length
+from arignan.grouping import (
+    GroupingDecision,
+    GroupingHint,
+    GroupingPlan,
+    GroupingPlanner,
+    MergeCandidate,
+    derive_topic_folder,
+    estimate_markdown_length,
+)
 from arignan.indexing import Chunker, DenseIndexer, HashingEmbedder, LexicalIndex, LexicalIndexer, LocalDenseIndex, tokenize
-from arignan.ingestion import IngestionLog, IngestionService
+from arignan.ingestion import IngestionFailure, IngestionLog, IngestionService
 from arignan.llm import LocalTextGenerator, create_local_text_generator
-from arignan.markdown import MarkdownRepository
+from arignan.markdown import MarkdownRepository, derive_keywords
 from arignan.markdown.writer import HeuristicArtifactWriter, LLMArtifactWriter
-from arignan.models import ChunkRecord, LoadEvent, LoadOperation, ParsedDocument, RetrievalHit, SessionState
+from arignan.models import ChunkRecord, LoadEvent, LoadOperation, ParsedDocument, RetrievalHit, SessionState, SourceDocument
 from arignan.retrieval import HeuristicReranker, RetrievalPipeline
 from arignan.session import SessionExceptionLogger, SessionManager, SessionStore
 from arignan.storage import StorageLayout
@@ -46,6 +54,7 @@ class LoadResult:
     artifact_paths: list[Path]
     total_chunks: int
     total_markdown_segments: int
+    failures: list[IngestionFailure]
     traces: list[LoadDocumentTrace]
     model_calls: list[ModelCallTrace]
 
@@ -117,9 +126,10 @@ class ArignanApp:
             progress_sink=self.progress_sink,
             model_name=config.local_llm_light_model,
         )
+        self.heuristic_artifact_writer = HeuristicArtifactWriter()
         artifact_writer = LLMArtifactWriter(
             generator=self.local_text_generator,
-            fallback=HeuristicArtifactWriter(),
+            fallback=self.heuristic_artifact_writer,
             trace_sink=self.trace_collector,
             progress_sink=self.progress_sink,
             exception_logger=self.exception_logger,
@@ -131,8 +141,20 @@ class ArignanApp:
         target_hat = self.config.default_hat if hat == "auto" else hat
         self._emit_progress(f"Scanning input for load into hat '{target_hat}'...")
         self.layout.hat(target_hat).ensure()
-        batch = self.ingestion_service.ingest(input_ref, hat=target_hat, log_event=False)
-        self._emit_progress(f"Discovered {len(batch.documents)} document(s).")
+        batch = self.ingestion_service.ingest(
+            input_ref,
+            hat=target_hat,
+            log_event=False,
+            on_parse_error=lambda source, exc: self._handle_load_parse_error(
+                source=source,
+                exc=exc,
+                hat=target_hat,
+            ),
+            on_progress=self._emit_progress,
+        )
+        self._emit_progress(
+            f"Discovered {len(batch.documents)} loadable document(s); failed sources: {len(batch.failures)}."
+        )
         artifact_paths: list[Path] = []
         topic_folders: list[str] = []
         total_chunks = 0
@@ -141,27 +163,29 @@ class ArignanApp:
 
         for index, document in enumerate(batch.documents, start=1):
             label = document.source.title or Path(document.source.source_uri).name
-            self._emit_progress(f"[{index}/{len(batch.documents)}] Checking related material for '{label}'...")
-            related_hits = self._related_hits_for_document(document)
-            self._emit_progress(f"[{index}/{len(batch.documents)}] Planning grouping for '{label}'...")
-            plan = self.grouping_planner.plan(document, related_hits=related_hits)
-            existing_docs = self._existing_topic_documents(target_hat, plan.topic_folder) if plan.decision is GroupingDecision.MERGE else []
-            documents_for_topic = existing_docs + [document]
-            normalized_plan = self._normalize_plan(plan, documents_for_topic)
+            self._emit_progress(f"[{index}/{len(batch.documents)}] Planning provisional topic for '{label}'...")
+            plan = self.grouping_planner.plan(
+                document,
+                related_hits=[],
+                merge_candidates=[],
+                llm_merge_hint=None,
+            )
+            documents_for_topic = [document]
+            final_plan = self._normalize_plan(plan, documents_for_topic)
 
             self._emit_progress(f"[{index}/{len(batch.documents)}] Chunking and indexing '{label}'...")
             chunks = self.chunker.chunk_document(document)
-            chunks = self._assign_topic_folder(chunks, normalized_plan.topic_folder)
+            chunks = self._assign_topic_folder(chunks, final_plan.topic_folder)
             self._dense_indexer(target_hat).index_chunks(chunks)
             self._lexical_indexer(target_hat).index_chunks(chunks)
             total_chunks += len(chunks)
 
-            self._emit_progress(f"[{index}/{len(batch.documents)}] Writing topic '{normalized_plan.topic_folder}'...")
+            self._emit_progress(f"[{index}/{len(batch.documents)}] Writing topic '{final_plan.topic_folder}'...")
             artifact = self.markdown_repository.write_topic(
                 self.layout,
                 hat=target_hat,
                 documents=documents_for_topic,
-                plan=normalized_plan,
+                plan=final_plan,
                 refresh_maps=False,
             )
             artifact_paths.extend(artifact.markdown_paths)
@@ -173,33 +197,44 @@ class ArignanApp:
                     source_uri=document.source.source_uri,
                     title=document.source.title or Path(document.source.source_uri).name,
                     topic_folder=artifact.topic_folder,
-                    grouping_decision=normalized_plan.decision.value,
+                    grouping_decision=final_plan.decision.value,
                     chunk_count=len(chunks),
                     markdown_segment_count=len(artifact.markdown_paths),
-                    rationale=list(normalized_plan.rationale),
-                    segment_titles=[segment.title for segment in normalized_plan.segments],
+                    rationale=list(final_plan.rationale),
+                    segment_titles=[segment.title for segment in final_plan.segments],
                 )
+            )
+            self._emit_progress(
+                f"[{index}/{len(batch.documents)}] Finished loading '{Path(document.source.source_uri).name}' into topic '{artifact.topic_folder}'."
             )
 
         if batch.documents:
+            self._emit_progress("Reviewing completed topic summaries for regrouping...")
+            topic_folders, artifact_paths, total_markdown_segments, traces = self._post_load_regroup(
+                hat=target_hat,
+                load_id=batch.load_id,
+                topic_folders=topic_folders,
+                traces=traces,
+            )
             self._emit_progress(f"Refreshing map.md for hat '{target_hat}'...")
             self.markdown_repository.update_hat_map(self.layout, target_hat)
             self._emit_progress("Refreshing global_map.md...")
             self.markdown_repository.update_global_map(self.layout)
 
-        self._emit_progress("Recording ingestion log...")
-        self.ingestion_log.append(
-            LoadEvent(
-                load_id=batch.load_id,
-                operation=LoadOperation.INGEST,
-                hat=target_hat,
-                created_at=datetime.now(timezone.utc).isoformat(),
-                source_items=batch.source_items,
-                artifact_paths=artifact_paths,
-                topic_folders=topic_folders,
-                metadata={"input_ref": batch.input_ref},
+        if batch.documents:
+            self._emit_progress("Recording ingestion log...")
+            self.ingestion_log.append(
+                LoadEvent(
+                    load_id=batch.load_id,
+                    operation=LoadOperation.INGEST,
+                    hat=target_hat,
+                    created_at=datetime.now(timezone.utc).isoformat(),
+                    source_items=batch.source_items,
+                    artifact_paths=artifact_paths,
+                    topic_folders=topic_folders,
+                    metadata={"input_ref": batch.input_ref},
+                )
             )
-        )
         return LoadResult(
             load_id=batch.load_id,
             hat=target_hat,
@@ -208,6 +243,7 @@ class ArignanApp:
             artifact_paths=artifact_paths,
             total_chunks=total_chunks,
             total_markdown_segments=total_markdown_segments,
+            failures=batch.failures,
             traces=traces,
             model_calls=self.trace_collector.snapshot(),
         )
@@ -253,6 +289,7 @@ class ArignanApp:
             question,
             answer_hits,
             answer_mode=answer_mode,
+            context_limit=self.config.retrieval.answer_context_top_k,
             expanded_query=bundle.expanded_query,
             selected_hat=bundle.selected_hat,
             default_generator=self.local_text_generator,
@@ -412,10 +449,25 @@ class ArignanApp:
         return self.session_manager.reset_session(pid)
 
     def _related_hits_for_document(self, document: ParsedDocument) -> list[RetrievalHit]:
-        query = f"{document.source.title or ''} {document.full_text[:200]}".strip()
+        keywords = derive_keywords([document], limit=6)
+        headings = [
+            section.heading.strip()
+            for section in document.sections
+            if section.heading and not re.fullmatch(r"page\s+\d+", section.heading.strip(), flags=re.IGNORECASE)
+        ][:6]
+        query = " ".join(
+            part
+            for part in [
+                document.source.title or "",
+                " ".join(keywords),
+                " ".join(headings),
+                document.full_text[:500],
+            ]
+            if part.strip()
+        ).strip()
         dense = self._dense_indexer(document.hat)
         lexical = self._lexical_indexer(document.hat)
-        return dense.search(query, 3) + lexical.search(query, 3)
+        return dense.search(query, 5) + lexical.search(query, 5)
 
     def _existing_topic_documents(self, hat: str, topic_folder: str) -> list[ParsedDocument]:
         manifest_path = self.layout.hat(hat).summaries_dir / topic_folder / ".topic_manifest.json"
@@ -423,6 +475,156 @@ class ArignanApp:
             return []
         payload = json.loads(manifest_path.read_text(encoding="utf-8"))
         return [ParsedDocument.from_dict(item) for item in payload.get("documents", [])]
+
+    def _topic_merge_candidates(
+        self,
+        hat: str,
+        document: ParsedDocument,
+        related_hits: list[RetrievalHit],
+    ) -> list[MergeCandidate]:
+        candidates: dict[str, MergeCandidate] = {}
+        for hit in related_hits:
+            topic_folder = hit.metadata.topic_folder
+            if not topic_folder or hit.metadata.source_uri == document.source.source_uri:
+                continue
+            candidate = candidates.setdefault(
+                topic_folder,
+                MergeCandidate(topic_folder=topic_folder, score=0.0, length_estimate=0),
+            )
+            candidate.score += hit.score
+            candidate.length_estimate = max(
+                candidate.length_estimate,
+                int(hit.extras.get("topic_length_estimate", estimate_markdown_length(hit.text))),
+            )
+            candidate.related_chunk_ids.append(hit.chunk_id)
+
+        doc_keywords = derive_keywords([document], limit=8)
+        doc_headings = [
+            section.heading.strip()
+            for section in document.sections
+            if section.heading and not re.fullmatch(r"page\s+\d+", section.heading.strip(), flags=re.IGNORECASE)
+        ][:8]
+        doc_text = " ".join(
+            part
+            for part in [
+                document.source.title or "",
+                " ".join(doc_keywords),
+                " ".join(doc_headings),
+                document.full_text[:1800],
+            ]
+            if part.strip()
+        )
+        normalized_doc_text = " ".join(doc_text.lower().split())
+        doc_terms = set(tokenize(doc_text))
+
+        for manifest_path in sorted(self.layout.hat(hat).summaries_dir.glob("*/.topic_manifest.json")):
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            topic_folder = payload["topic_folder"]
+            documents = [ParsedDocument.from_dict(item) for item in payload.get("documents", [])]
+            if any(item.source.source_uri == document.source.source_uri for item in documents):
+                continue
+            title = payload.get("title") or topic_folder.replace("-", " ")
+            locator = payload.get("locator") or ""
+            description = payload.get("description") or ""
+            keywords = list(payload.get("keywords", []))
+            summary_excerpt = _read_topic_summary_excerpt(manifest_path.parent / "markdown_tree" / "summary.md")
+            topic_text = " ".join([title, locator, description, summary_excerpt, " ".join(keywords)])
+            topic_terms = set(tokenize(topic_text))
+            shared_terms = doc_terms & topic_terms
+            title_overlap = len(set(tokenize(title)) & doc_terms)
+            keyword_matches = sum(
+                1
+                for keyword in keywords
+                if keyword.strip() and _phrase_in_text(keyword, normalized_doc_text)
+            )
+            overlap_bonus = min(
+                1.1,
+                (0.08 * len(shared_terms))
+                + (0.26 * keyword_matches)
+                + (0.18 if title_overlap >= 2 else 0.0),
+            )
+            candidate = candidates.setdefault(
+                topic_folder,
+                MergeCandidate(topic_folder=topic_folder, score=0.0, length_estimate=0),
+            )
+            candidate.score += overlap_bonus
+            candidate.length_estimate = max(
+                candidate.length_estimate,
+                sum(estimate_markdown_length(item.full_text) for item in documents) or 0,
+            )
+            candidate.title = title
+            candidate.locator = locator
+            candidate.description = description
+            candidate.keywords = keywords
+            candidate.summary_excerpt = summary_excerpt
+            candidate.source_count = len(documents)
+
+        return sorted(
+            (
+                candidate
+                for candidate in candidates.values()
+                if candidate.length_estimate > 0
+            ),
+            key=lambda item: (item.score, item.source_count, len(item.related_chunk_ids), item.topic_folder),
+            reverse=True,
+        )
+
+    def _grouping_hint(
+        self,
+        document: ParsedDocument,
+        candidates: list[MergeCandidate],
+        incoming_summary_markdown: str,
+        *,
+        index: int,
+        total: int,
+    ) -> GroupingHint | None:
+        if not candidates:
+            return None
+
+        title = document.source.title or Path(document.source.source_uri).name
+        self._emit_progress(
+            f"[{index}/{total}] Reviewing '{title}' against {len(candidates)} existing topic summaries with the light LLM..."
+        )
+        prompt = _build_grouping_prompt(document, candidates, incoming_summary_markdown)
+        try:
+            raw = self.light_text_generator.generate(
+                system_prompt=GROUPING_SYSTEM_PROMPT,
+                user_prompt=prompt,
+                max_new_tokens=180,
+                temperature=0.0,
+                response_format=GROUPING_RESPONSE_FORMAT,
+            )
+            hint = _parse_grouping_hint(raw, candidates)
+        except Exception as exc:
+            log_path = self.log_exception(
+                component="llm",
+                task="grouping decision",
+                exc=exc,
+                context={"source_uri": document.source.source_uri, "candidate_count": len(candidates)},
+            )
+            self.trace_collector.record(
+                component="llm",
+                task="grouping decision",
+                model_name=self.light_text_generator.model_name,
+                backend=self.light_text_generator.backend_name,
+                status="fallback",
+                item_count=len(candidates),
+                detail=f"{title} | exception | {log_path.resolve()}",
+            )
+            return None
+
+        status = "ok" if hint is not None else "fallback"
+        detail = title if hint is None else f"{title} -> {hint.topic_folder} ({hint.confidence:.2f})"
+        self.trace_collector.record(
+            component="llm",
+            task="grouping decision",
+            model_name=self.light_text_generator.model_name,
+            backend=self.light_text_generator.backend_name,
+            status=status,
+            item_count=len(candidates),
+            detail=detail,
+        )
+        return hint
 
     def _normalize_plan(self, plan: GroupingPlan, documents: list[ParsedDocument]) -> GroupingPlan:
         if plan.decision is GroupingDecision.SEGMENT:
@@ -436,6 +638,141 @@ class ArignanApp:
             related_chunk_ids=plan.related_chunk_ids,
             rationale=plan.rationale,
         )
+
+    def _post_load_regroup(
+        self,
+        *,
+        hat: str,
+        load_id: str,
+        topic_folders: list[str],
+        traces: list[LoadDocumentTrace],
+    ) -> tuple[list[str], list[Path], int, list[LoadDocumentTrace]]:
+        if not topic_folders:
+            return topic_folders, [], 0, traces
+
+        trace_by_source = {trace.source_uri: trace for trace in traces}
+
+        for index, topic_folder in enumerate(list(topic_folders), start=1):
+            manifest = self._read_topic_manifest(hat, topic_folder)
+            if manifest is None:
+                continue
+            payload, documents = manifest
+            if payload.get("decision") == GroupingDecision.SEGMENT.value:
+                continue
+            if not any(document.load_id == load_id for document in documents):
+                continue
+
+            current_document = next((document for document in documents if document.load_id == load_id), documents[0])
+            summary_path = self.layout.hat(hat).summaries_dir / topic_folder / "markdown_tree" / "summary.md"
+            incoming_summary_markdown = summary_path.read_text(encoding="utf-8") if summary_path.exists() else ""
+            candidates = self._topic_merge_candidates(hat, current_document, related_hits=[])
+            if not candidates:
+                continue
+            hint = self._grouping_hint(
+                current_document,
+                candidates,
+                incoming_summary_markdown,
+                index=index,
+                total=len(topic_folders),
+            )
+            if hint is None or hint.topic_folder == topic_folder:
+                continue
+
+            target_docs = self._existing_topic_documents(hat, hint.topic_folder)
+            if not target_docs:
+                continue
+            merged_documents = _merge_documents(target_docs, documents)
+            final_plan = GroupingPlan(
+                decision=GroupingDecision.MERGE,
+                topic_folder=hint.topic_folder,
+                estimated_length=sum(estimate_markdown_length(document.full_text) for document in merged_documents),
+                merge_target_topic=hint.topic_folder,
+                rationale=[
+                    f"Post-load regrouping merged '{topic_folder}' into '{hint.topic_folder}'.",
+                    hint.rationale or "Light LLM judged the existing topic to be the better conceptual home.",
+                ],
+            )
+            self._emit_progress(
+                f"[{index}/{len(topic_folders)}] Regrouping topic '{topic_folder}' into '{hint.topic_folder}'..."
+            )
+            for document in documents:
+                trace = trace_by_source.get(document.source.source_uri)
+                if trace is not None:
+                    trace.topic_folder = hint.topic_folder
+                    trace.grouping_decision = GroupingDecision.MERGE.value
+                    trace.markdown_segment_count = 1
+                    trace.rationale = list(dict.fromkeys([*trace.rationale, *final_plan.rationale]))
+            self.markdown_repository.regenerate_topic(
+                self.layout,
+                hat=hat,
+                documents=merged_documents,
+                plan=final_plan,
+                refresh_maps=False,
+            )
+            current_topic_dir = self.layout.hat(hat).summaries_dir / topic_folder
+            if current_topic_dir.exists() and topic_folder != hint.topic_folder:
+                shutil.rmtree(current_topic_dir)
+
+        self._reindex_load_topics(hat, load_id)
+        final_topic_folders, artifact_paths, total_markdown_segments = self._final_load_artifacts(hat, load_id, traces)
+        return final_topic_folders, artifact_paths, total_markdown_segments, traces
+
+    def _final_load_artifacts(
+        self,
+        hat: str,
+        load_id: str,
+        traces: list[LoadDocumentTrace],
+    ) -> tuple[list[str], list[Path], int]:
+        trace_by_source = {trace.source_uri: trace for trace in traces}
+        topic_folders: list[str] = []
+        artifact_paths: list[Path] = []
+        total_markdown_segments = 0
+        for manifest_path in sorted(self.layout.hat(hat).summaries_dir.glob("*/.topic_manifest.json")):
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            documents = [ParsedDocument.from_dict(item) for item in payload.get("documents", [])]
+            selected = [document for document in documents if document.load_id == load_id]
+            if not selected:
+                continue
+            topic_folder = payload["topic_folder"]
+            if topic_folder not in topic_folders:
+                topic_folders.append(topic_folder)
+            markdown_paths = [Path(path) for path in payload.get("markdown_paths", [])]
+            artifact_paths.extend(markdown_paths)
+            total_markdown_segments += len(markdown_paths)
+            for document in selected:
+                trace = trace_by_source.get(document.source.source_uri)
+                if trace is None:
+                    continue
+                trace.topic_folder = topic_folder
+                trace.markdown_segment_count = len(markdown_paths)
+        return topic_folders, artifact_paths, total_markdown_segments
+
+    def _read_topic_manifest(self, hat: str, topic_folder: str) -> tuple[dict[str, object], list[ParsedDocument]] | None:
+        manifest_path = self.layout.hat(hat).summaries_dir / topic_folder / ".topic_manifest.json"
+        if not manifest_path.exists():
+            return None
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        documents = [ParsedDocument.from_dict(item) for item in payload.get("documents", [])]
+        return payload, documents
+
+    def _reindex_load_topics(self, hat: str, load_id: str) -> None:
+        dense = self._dense_indexer(hat, trace=False)
+        lexical = self._lexical_indexer(hat)
+        dense.delete_load(load_id)
+        lexical.delete_load(load_id)
+        chunks: list[ChunkRecord] = []
+        for manifest_path in sorted(self.layout.hat(hat).summaries_dir.glob("*/.topic_manifest.json")):
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            topic_folder = payload["topic_folder"]
+            documents = [ParsedDocument.from_dict(item) for item in payload.get("documents", [])]
+            for document in documents:
+                if document.load_id != load_id:
+                    continue
+                document_chunks = self._assign_topic_folder(self.chunker.chunk_document(document), topic_folder)
+                chunks.extend(document_chunks)
+        if chunks:
+            dense.index_chunks(chunks)
+            lexical.index_chunks(chunks)
 
     @staticmethod
     def _assign_topic_folder(chunks: list[ChunkRecord], topic_folder: str) -> list[ChunkRecord]:
@@ -457,6 +794,28 @@ class ArignanApp:
     def _emit_progress(self, message: str) -> None:
         if self.progress_sink is not None:
             self.progress_sink(message)
+
+    def _handle_load_parse_error(
+        self,
+        *,
+        source: SourceDocument,
+        exc: BaseException,
+        hat: str,
+    ) -> None:
+        label = source.local_path.name if source.local_path is not None else source.source_uri
+        log_path = self.log_exception(
+            component="ingestion",
+            task="parse source during load",
+            exc=exc,
+            context={
+                "hat": hat,
+                "source_uri": source.source_uri,
+                "source_type": source.source_type.value,
+            },
+        )
+        self._emit_progress(
+            f"Failed to parse '{label}'; continuing with remaining sources. Log: {log_path.resolve()}"
+        )
 
     def log_exception(
         self,
@@ -485,6 +844,7 @@ def compose_answer(
     hits: list[RetrievalHit],
     *,
     answer_mode: Literal["default", "light", "none", "raw"],
+    context_limit: int,
     expanded_query: str,
     selected_hat: str,
     default_generator: LocalTextGenerator,
@@ -497,7 +857,7 @@ def compose_answer(
     if answer_mode == "raw":
         if progress_sink is not None:
             progress_sink("Composing raw retrieval output...")
-        return render_raw_hits(hits), []
+        return render_raw_hits(hits, limit=context_limit), []
     if answer_mode == "none":
         if progress_sink is not None:
             progress_sink("Composing retrieval synthesis answer...")
@@ -507,6 +867,7 @@ def compose_answer(
     answer = generate_answer(
         question,
         hits,
+        context_limit=context_limit,
         expanded_query=expanded_query,
         selected_hat=selected_hat,
         generator=generator,
@@ -523,13 +884,19 @@ Use only the provided retrieved context and prior session context.
 If the retrieved context is insufficient, say that the local knowledge base does not contain enough information.
 Write a direct, technically accurate answer in concise natural language.
 Do not mention retrieval, chunks, prompts, or hidden system behavior.
-Do not add a citations, sources, or references section; citations are handled separately outside your answer."""
+Do not add a citations, sources, or references section; citations are handled separately outside your answer.
+Follow this answering discipline:
+- Answer the question in the first sentence whenever possible.
+- Prefer a short explanatory paragraph, optionally followed by a second short paragraph for nuance.
+- If the context supports a definition or expansion, state it directly before elaborating.
+- If multiple retrieved passages disagree, briefly describe the uncertainty instead of guessing."""
 
 
 def generate_answer(
     question: str,
     hits: list[RetrievalHit],
     *,
+    context_limit: int,
     expanded_query: str,
     selected_hat: str,
     generator: LocalTextGenerator,
@@ -553,6 +920,7 @@ def generate_answer(
     prompt = _build_answer_prompt(
         question,
         hits,
+        context_limit=context_limit,
         expanded_query=expanded_query,
         selected_hat=selected_hat,
         session=session,
@@ -561,7 +929,7 @@ def generate_answer(
         raw = generator.generate(
             system_prompt=ANSWER_SYSTEM_PROMPT,
             user_prompt=prompt,
-            max_new_tokens=280,
+            max_new_tokens=420,
             temperature=0.1,
         )
         answer = _normalize_generated_answer(raw)
@@ -684,13 +1052,13 @@ def _truncate_text(text: str, max_length: int) -> str:
     return normalized[: max_length - 3].rstrip() + "..."
 
 
-def render_raw_hits(hits: list[RetrievalHit], limit: int = 5) -> str:
+def render_raw_hits(hits: list[RetrievalHit], limit: int = 8) -> str:
     if not hits:
         return "No relevant local knowledge was found for that question."
     lines = ["Top retrieved context:"]
     for index, hit in enumerate(hits[:limit], start=1):
         score = float(hit.extras.get("rerank_score", hit.extras.get("rrf_score", hit.score)))
-        snippet = _truncate_text(hit.text, 360)
+        snippet = _truncate_text(hit.text, 520)
         lines.append(f"{index}. [{score:.3f}] {format_citation(hit)}")
         lines.append(f"   {snippet}")
         if index < min(len(hits), limit):
@@ -702,20 +1070,37 @@ def _build_answer_prompt(
     question: str,
     hits: list[RetrievalHit],
     *,
+    context_limit: int,
     expanded_query: str,
     selected_hat: str,
     session: SessionState | None,
 ) -> str:
     lines = [
+        "<task>",
+        "Answer the user's question using only the retrieved context.",
+        "Produce a concise, well-structured final answer for an end user.",
+        "</task>",
+        "",
+        "<answer_requirements>",
+        "- First sentence should answer the question directly when possible.",
+        "- Organize the answer into 1 to 2 short paragraphs.",
+        "- Prefer synthesis over quotation.",
+        "- Use the strongest evidence first.",
+        "- If the answer is incomplete from the context, say so plainly.",
+        "- Do not mention sources, citations, retrieval, passages, or the prompt.",
+        "</answer_requirements>",
+        "",
+        "<query>",
         f"Hat: {selected_hat}",
         f"Question: {question}",
         f"Expanded query: {expanded_query}",
+        "</query>",
         "",
-        "Instructions:",
-        "- Answer from the retrieved context only.",
-        "- Be concise but intelligent.",
-        "- Prefer the strongest direct evidence.",
-        "- If the answer is uncertain or missing, say so plainly.",
+        "<example>",
+        "Question: What does TTFS stand for?",
+        "Retrieved context: TTFS is short for Time To First Spike and is used in spiking neural network discussions.",
+        "Good answer: TTFS stands for Time To First Spike. In this context it refers to a spiking-neural-network timing scheme that represents information through the latency of the first spike.",
+        "</example>",
     ]
 
     summary = (session.summary or "").strip() if session is not None else ""
@@ -723,35 +1108,45 @@ def _build_answer_prompt(
         lines.extend(
             [
                 "",
-                "Session summary:",
+                "<session_summary>",
                 summary,
+                "</session_summary>",
             ]
         )
 
     recent_turns = _recent_turns_for_prompt(session, question=question)
     if recent_turns:
         lines.append("")
-        lines.append("Recent dialogue:")
+        lines.append("<recent_dialogue>")
         for turn in recent_turns:
             role = "User" if turn.role.lower() == "user" else "Assistant"
             lines.append(f"{role}: {turn.content.strip()}")
+        lines.append("</recent_dialogue>")
 
     lines.extend(
         [
             "",
-            "Retrieved context:",
+            "<retrieved_passages>",
         ]
     )
-    for index, hit in enumerate(hits[:5], start=1):
+    for index, hit in enumerate(hits[:context_limit], start=1):
         score = hit.extras.get("rerank_score", hit.extras.get("rrf_score", hit.score))
         lines.extend(
             [
-                f"[{index}] {format_citation(hit)}",
-                f"Score: {float(score):.3f}",
-                _truncate_text(hit.text, 900),
-                "",
+                f"<passage rank=\"{index}\" score=\"{float(score):.3f}\" citation=\"{format_citation(hit)}\">",
+                _truncate_text(hit.text, 1200),
+                "</passage>",
             ]
         )
+    lines.extend(
+        [
+            "</retrieved_passages>",
+            "",
+            "<final_instruction>",
+            "Write only the final answer for the user.",
+            "</final_instruction>",
+        ]
+    )
     return "\n".join(lines).rstrip()
 
 
@@ -826,6 +1221,141 @@ def _answer_fallback_message(log_path: Path | None) -> str:
     if log_path is None:
         return message
     return f"{message} Log: {log_path.resolve()}"
+
+
+GROUPING_SYSTEM_PROMPT = """You decide whether a newly loaded document should merge into an existing topic folder.
+You are given the incoming topic summary plus the existing topic summaries for the hat.
+Prefer merge when the incoming document belongs to the same broader concept family, subtopic cluster, or line of ideas as an existing folder.
+Avoid creating tiny standalone folders if one listed topic already covers the same conceptual neighborhood.
+Only keep the document standalone when no listed topic is a coherent home for it.
+Return strict JSON only with these keys:
+- "decision": "merge" or "standalone"
+- "topic_folder": the chosen topic folder when decision is "merge", otherwise ""
+- "confidence": number between 0 and 1
+- "rationale": one short sentence"""
+
+
+GROUPING_RESPONSE_FORMAT = {
+    "type": "object",
+    "properties": {
+        "decision": {"type": "string", "enum": ["merge", "standalone"]},
+        "topic_folder": {"type": "string"},
+        "confidence": {"type": "number"},
+        "rationale": {"type": "string"},
+    },
+    "required": ["decision", "topic_folder", "confidence", "rationale"],
+}
+
+
+def _build_grouping_prompt(
+    document: ParsedDocument,
+    candidates: list[MergeCandidate],
+    incoming_summary_markdown: str,
+) -> str:
+    keywords = derive_keywords([document], limit=8)
+    headings = [
+        section.heading.strip()
+        for section in document.sections
+        if section.heading and not re.fullmatch(r"page\s+\d+", section.heading.strip(), flags=re.IGNORECASE)
+    ][:6]
+    lines = [
+        "<incoming_document>",
+        f"Title: {document.source.title or Path(document.source.source_uri).name}",
+        f"Keywords: {', '.join(keywords) or 'none'}",
+        f"Headings: {', '.join(headings) or 'none'}",
+        f"Summary: {_truncate_text(' '.join(document.full_text.split()), 700)}",
+        "</incoming_document>",
+        "",
+        "<incoming_topic_summary>",
+        _truncate_text(_flatten_markdown_for_grouping(incoming_summary_markdown), 1200) or "none",
+        "</incoming_topic_summary>",
+        "",
+        "<existing_topic_summaries>",
+    ]
+    for index, candidate in enumerate(candidates, start=1):
+        lines.extend(
+            [
+                f"<candidate rank=\"{index}\" topic_folder=\"{candidate.topic_folder}\">",
+                f"Title: {candidate.title or candidate.topic_folder}",
+                f"Locator: {candidate.locator or 'n/a'}",
+                f"Keywords: {', '.join(candidate.keywords) or 'none'}",
+                f"Description: {candidate.description or 'n/a'}",
+                f"Summary excerpt: {candidate.summary_excerpt or candidate.description or 'n/a'}",
+                f"Source count: {candidate.source_count}",
+                f"Heuristic score: {candidate.score:.2f}",
+                "</candidate>",
+            ]
+        )
+    lines.extend(
+        [
+            "</existing_topic_summaries>",
+            "",
+            "Choose merge when one existing topic is the best conceptual home for the incoming topic page.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _parse_grouping_hint(raw: str, candidates: list[MergeCandidate]) -> GroupingHint | None:
+    normalized = raw.strip()
+    fenced = re.match(r"```(?:json)?\s*(.*?)\s*```$", normalized, re.DOTALL)
+    if fenced:
+        normalized = fenced.group(1).strip()
+    payload = json.loads(normalized)
+    if payload.get("decision") != "merge":
+        return None
+    topic_folder = str(payload.get("topic_folder", "")).strip()
+    valid_topics = {candidate.topic_folder for candidate in candidates}
+    if topic_folder not in valid_topics:
+        return None
+    try:
+        confidence = float(payload.get("confidence", 0.0))
+    except (TypeError, ValueError):
+        confidence = 0.0
+    rationale = str(payload.get("rationale", "")).strip()
+    return GroupingHint(topic_folder=topic_folder, confidence=confidence, rationale=rationale)
+
+
+def _phrase_in_text(phrase: str, text: str) -> bool:
+    normalized_phrase = " ".join(phrase.lower().split())
+    if not normalized_phrase:
+        return False
+    return normalized_phrase in text
+
+
+def _read_topic_summary_excerpt(summary_path: Path) -> str:
+    if not summary_path.exists():
+        return ""
+    try:
+        raw = summary_path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    return _truncate_text(_flatten_markdown_for_grouping(raw), 700)
+
+
+def _flatten_markdown_for_grouping(text: str) -> str:
+    normalized = text.strip()
+    if not normalized:
+        return ""
+    normalized = re.sub(r"^#{1,6}\s*", "", normalized, flags=re.MULTILINE)
+    normalized = re.sub(r"^\|\s*---.*$", "", normalized, flags=re.MULTILINE)
+    normalized = re.sub(r"^\|", "", normalized, flags=re.MULTILINE)
+    normalized = re.sub(r"\|", " ", normalized)
+    normalized = re.sub(r"^\s*-\s+", "", normalized, flags=re.MULTILINE)
+    normalized = re.sub(r"`", "", normalized)
+    return " ".join(normalized.split())
+
+
+def _merge_documents(existing: list[ParsedDocument], incoming: list[ParsedDocument]) -> list[ParsedDocument]:
+    merged: list[ParsedDocument] = []
+    seen: set[tuple[str, str]] = set()
+    for document in [*existing, *incoming]:
+        key = (document.load_id, document.source.source_uri)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(document)
+    return merged
 
 
 def format_citation(hit: RetrievalHit) -> str:

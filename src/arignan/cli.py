@@ -20,9 +20,7 @@ class LineProgressReporter:
         self.stream = stream or sys.stderr
 
     def emit(self, message: str) -> None:
-        print(file=self.stream, flush=True)
         print(f"[arignan] {message}", file=self.stream, flush=True)
-        print(file=self.stream, flush=True)
 
     def finish(self) -> None:
         return None
@@ -309,16 +307,29 @@ def _print_output_block(text: str) -> None:
 
 
 def _format_load_summary(result: LoadResult) -> str:
-    return (
+    lines = [
         f"Loaded {result.document_count} document(s) into hat '{result.hat}' "
         f"with load_id {result.load_id}. Topics: {', '.join(result.topic_folders) or 'none'}. "
-        f"Chunks: {result.total_chunks}. Markdown segments: {result.total_markdown_segments}."
-    )
+        f"Chunks: {result.total_chunks}. Markdown segments: {result.total_markdown_segments}. "
+        f"Failed files: {len(result.failures)}."
+    ]
+    if result.failures:
+        lines.append("")
+        lines.append("Failed files:")
+        for failure in result.failures:
+            lines.append(f"- {failure.source_uri}")
+    return "\n".join(lines)
 
 
 def _format_load_debug(result: LoadResult) -> str:
     lines = ["Debug: load details"]
     lines.extend(_format_model_calls(result.model_calls))
+    if result.failures:
+        lines.append(f"Failures ({len(result.failures)}):")
+        for index, failure in enumerate(result.failures, start=1):
+            lines.append(f"  {index}. {failure.source_uri}")
+            lines.append(f"     {failure.message}")
+        lines.append("")
     for index, trace in enumerate(result.traces, start=1):
         lines.extend(
             [

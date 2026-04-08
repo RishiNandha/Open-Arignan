@@ -8,3 +8,6 @@ build/
 docs/
 build/
 bin/
+.tmp-test-home/ingestion_log.jsonl
+.tmp-test-home/hats/global_map.md
+.tmp-test-home/hats/default/map.md

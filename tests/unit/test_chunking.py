@@ -121,3 +121,29 @@ def test_chunker_preserves_page_metadata() -> None:
     assert chunk.metadata.page_number == 1
     assert chunk.metadata.source_path == Path("book.pdf")
     assert chunk.metadata.section == "Page 1"
+
+
+def test_chunker_merges_adjacent_page_sections_into_larger_span() -> None:
+    document = ParsedDocument(
+        load_id="load-4",
+        hat="default",
+        source=SourceDocument(source_type=SourceType.PDF, source_uri="paper.pdf", local_path=Path("paper.pdf")),
+        full_text=(
+            "Page one introduces JEPA as a predictive architecture for latent targets.\n\n"
+            "Page two explains temporal context and representation quality.\n\n"
+            "Page three connects the objective to downstream understanding tasks."
+        ),
+        sections=[
+            DocumentSection(text="Page one introduces JEPA as a predictive architecture for latent targets.", page_number=1, heading="Page 1"),
+            DocumentSection(text="Page two explains temporal context and representation quality.", page_number=2, heading="Page 2"),
+            DocumentSection(text="Page three connects the objective to downstream understanding tasks.", page_number=3, heading="Page 3"),
+        ],
+    )
+
+    chunks = Chunker(chunk_size=260, chunk_overlap=40).chunk_document(document)
+
+    assert len(chunks) == 1
+    assert "Page one introduces JEPA" in chunks[0].text
+    assert "Page three connects the objective" in chunks[0].text
+    assert chunks[0].metadata.page_number is None
+    assert chunks[0].metadata.section == "Pages 1-3"

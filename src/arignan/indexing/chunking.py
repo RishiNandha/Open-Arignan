@@ -26,8 +26,16 @@ class ChunkingResult:
     chunks: list[ChunkRecord]
 
 
+@dataclass(slots=True)
+class _SectionSpan:
+    text: str
+    heading: str | None
+    page_number: int | None
+    section_label: str
+
+
 class Chunker:
-    def __init__(self, chunk_size: int = 1500, chunk_overlap: int = 80) -> None:
+    def __init__(self, chunk_size: int = 2800, chunk_overlap: int = 160) -> None:
         if chunk_size <= 0:
             raise ValueError("chunk_size must be positive")
         if chunk_overlap < 0:
@@ -38,7 +46,7 @@ class Chunker:
         self.chunk_overlap = chunk_overlap
 
     def chunk_document(self, document: ParsedDocument) -> list[ChunkRecord]:
-        sections = self._relevant_sections(document)
+        sections = self._section_spans(self._relevant_sections(document))
         chunks: list[ChunkRecord] = []
         for section_index, section in enumerate(sections):
             section_chunks = self._chunk_section_text(section.text)
@@ -49,7 +57,7 @@ class Chunker:
                     source_uri=document.source.source_uri,
                     source_path=document.source.local_path,
                     page_number=section.page_number,
-                    section=self._section_label(section, section_index),
+                    section=section.section_label or self._fallback_section_label(section_index),
                     heading=section.heading,
                     keywords=list(document.keywords),
                 )
@@ -72,6 +80,39 @@ class Chunker:
             return [DocumentSection(text=document.full_text)]
         relevant = [section for section in document.sections if not self._is_reference_section(section)]
         return relevant or document.sections
+
+    def _section_spans(self, sections: list[DocumentSection]) -> list[_SectionSpan]:
+        if not sections:
+            return []
+        spans: list[_SectionSpan] = []
+        buffered_sections: list[DocumentSection] = []
+        buffered_length = 0
+        merge_target = max(900, int(self.chunk_size * 0.7))
+
+        def flush() -> None:
+            nonlocal buffered_sections, buffered_length
+            if not buffered_sections:
+                return
+            spans.append(self._build_section_span(buffered_sections, len(spans)))
+            buffered_sections = []
+            buffered_length = 0
+
+        for section in sections:
+            section_length = len(self._normalize_text(self._clean_text_for_chunking(section.text)))
+            if not buffered_sections:
+                buffered_sections = [section]
+                buffered_length = section_length
+                continue
+            if self._should_merge_span(buffered_sections, section, buffered_length, section_length, merge_target):
+                buffered_sections.append(section)
+                buffered_length += 2 + section_length
+                continue
+            flush()
+            buffered_sections = [section]
+            buffered_length = section_length
+
+        flush()
+        return spans
 
     def _chunk_section_text(self, text: str) -> list[str]:
         cleaned = self._clean_text_for_chunking(text)
@@ -187,6 +228,54 @@ class Chunker:
             length += extra
         return overlap_words
 
+    def _should_merge_span(
+        self,
+        buffered_sections: list[DocumentSection],
+        next_section: DocumentSection,
+        current_length: int,
+        next_length: int,
+        merge_target: int,
+    ) -> bool:
+        if current_length >= merge_target:
+            return False
+        if current_length + 2 + next_length > self.chunk_size:
+            return False
+
+        last_section = buffered_sections[-1]
+        if self._is_soft_boundary(last_section, next_section):
+            return True
+        return False
+
+    def _build_section_span(self, sections: list[DocumentSection], span_index: int) -> _SectionSpan:
+        text = "\n\n".join(section.text.strip() for section in sections if section.text.strip())
+        headings = [
+            section.heading.strip()
+            for section in sections
+            if section.heading and not self._is_page_heading(section.heading)
+        ]
+        headings = list(dict.fromkeys(headings))
+        page_numbers = [section.page_number for section in sections if section.page_number is not None]
+
+        heading = headings[0] if len(headings) == 1 else None
+        if len(page_numbers) == 1:
+            return _SectionSpan(text=text, heading=heading, page_number=page_numbers[0], section_label=f"Page {page_numbers[0]}")
+        if len(page_numbers) > 1:
+            return _SectionSpan(text=text, heading=heading, page_number=None, section_label=f"Pages {page_numbers[0]}-{page_numbers[-1]}")
+        if len(headings) == 1:
+            return _SectionSpan(text=text, heading=headings[0], page_number=None, section_label=headings[0])
+        if len(headings) > 1:
+            return _SectionSpan(text=text, heading=headings[0], page_number=None, section_label=f"{headings[0]} -> {headings[-1]}")
+        return _SectionSpan(text=text, heading=None, page_number=None, section_label=self._fallback_section_label(span_index))
+
+    def _is_soft_boundary(self, current: DocumentSection, following: DocumentSection) -> bool:
+        current_heading = (current.heading or "").strip()
+        following_heading = (following.heading or "").strip()
+        if self._is_page_heading(current_heading) or self._is_page_heading(following_heading):
+            return True
+        if not current_heading or not following_heading:
+            return True
+        return current_heading.lower() == following_heading.lower()
+
     def _is_reference_section(self, section: DocumentSection) -> bool:
         heading = (section.heading or "").strip()
         if heading and REFERENCE_HEADING_PATTERN.fullmatch(heading):
@@ -199,12 +288,14 @@ class Chunker:
         stripped = REFERENCE_BLOCK_PATTERN.sub("\n", text)
         return stripped
 
-    def _section_label(self, section: DocumentSection, section_index: int) -> str:
-        if section.heading:
-            return section.heading
-        if section.page_number is not None:
-            return f"Page {section.page_number}"
+    @staticmethod
+    def _fallback_section_label(section_index: int) -> str:
         return f"Section {section_index + 1}"
+
+    @staticmethod
+    def _is_page_heading(heading: str) -> bool:
+        normalized = heading.strip().lower()
+        return bool(re.fullmatch(r"page\s+\d+", normalized))
 
     def _chunk_id(
         self,

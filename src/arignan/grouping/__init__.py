@@ -2,8 +2,10 @@
 
 from arignan.grouping.planner import (
     GroupingDecision,
+    GroupingHint,
     GroupingPlan,
     GroupingPlanner,
+    MergeCandidate,
     SegmentPlan,
     derive_topic_folder,
     estimate_markdown_length,
@@ -12,8 +14,10 @@ from arignan.grouping.planner import (
 
 __all__ = [
     "GroupingDecision",
+    "GroupingHint",
     "GroupingPlan",
     "GroupingPlanner",
+    "MergeCandidate",
     "SegmentPlan",
     "derive_topic_folder",
     "estimate_markdown_length",

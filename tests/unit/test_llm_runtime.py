@@ -78,11 +78,18 @@ def test_ollama_text_generator_posts_chat_request_and_strips_think_blocks(app_ho
     generator._model_ready = True
     generator._client = FakeClient()  # type: ignore[assignment]
 
-    output = generator.generate(system_prompt="System prompt", user_prompt="User prompt", max_new_tokens=256, temperature=0.0)
+    output = generator.generate(
+        system_prompt="System prompt",
+        user_prompt="User prompt",
+        max_new_tokens=256,
+        temperature=0.0,
+        response_format={"type": "object"},
+    )
 
     assert output == "Visible answer."
     assert captured["url"] == "http://127.0.0.1:11434/api/chat"
     payload = captured["json"]
     assert payload["model"] == "qwen3:4b-q4_K_M"
     assert payload["options"]["num_predict"] == 256
+    assert payload["format"] == {"type": "object"}
     assert payload["think"] is False

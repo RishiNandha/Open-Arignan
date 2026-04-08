@@ -55,6 +55,7 @@ def test_markdown_repository_writes_topic_and_updates_maps(app_home: Path) -> No
     assert "JEPA Notes" in summary_text
     assert "## Summary" in summary_text
     assert "## Key Ideas" in summary_text
+    assert "## Related Threads" in summary_text
     assert "## Sources" in summary_text
     assert "## Keywords" in summary_text
     assert "Decision:" not in summary_text
@@ -128,7 +129,8 @@ def test_markdown_repository_writes_summary_in_neutral_wiki_voice(app_home: Path
 
     assert "# V-JEPA 2" in summary_text
     assert "We propose" not in summary_text
-    assert "The work proposes" in summary_text
+    assert "V-JEPA 2 proposes" in summary_text
+    assert "## Related Threads" in summary_text
     assert "| Source | What To Find | Key Sections | File |" in summary_text
 
 
@@ -164,6 +166,44 @@ def test_markdown_repository_regenerates_grouped_topic_after_removal(app_home: P
     assert source_names == {"doc1.md"}
     assert "JEPA Paper 1" in summary_text
     assert "JEPA Paper 2" not in summary_text
+
+
+def test_markdown_repository_grouped_topic_summary_reads_like_lookup_page(app_home: Path) -> None:
+    layout = StorageLayout.from_home(app_home).ensure()
+    first = _document(
+        app_home / "doc-a.md",
+        load_id="load-a",
+        title="JEPA Overview",
+        text=(
+            "Joint embedding predictive architecture learns representations through latent prediction. "
+            "The approach emphasizes semantic structure and predictive world models."
+        ),
+        heading="Overview",
+    )
+    second = _document(
+        app_home / "doc-b.md",
+        load_id="load-b",
+        title="Positional Encoding Notes",
+        text=(
+            "Positional encoding choices affect temporal context and token relationships in predictive video models. "
+            "These notes connect encoding design to retrieval-friendly abstractions and temporal reasoning."
+        ),
+        heading="Temporal Context",
+    )
+    plan = GroupingPlan(
+        decision=GroupingDecision.MERGE,
+        topic_folder="jepa",
+        estimated_length=500,
+        merge_target_topic="jepa",
+    )
+
+    MarkdownRepository().write_topic(layout, hat="default", documents=[first, second], plan=plan)
+
+    summary_text = (layout.hat("default").summaries_dir / "jepa" / "markdown_tree" / "summary.md").read_text(encoding="utf-8")
+
+    assert "## Related Threads" in summary_text
+    assert "one shared page" in summary_text
+    assert "Useful entry points" in summary_text or "Useful entry points inside the topic include" in summary_text
 
 
 def test_derive_keywords_filters_page_noise_and_numbers() -> None:

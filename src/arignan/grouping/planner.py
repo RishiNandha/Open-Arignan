@@ -24,6 +24,27 @@ class SegmentPlan:
 
 
 @dataclass(slots=True)
+class MergeCandidate:
+    topic_folder: str
+    score: float
+    length_estimate: int
+    related_chunk_ids: list[str] = field(default_factory=list)
+    title: str = ""
+    locator: str = ""
+    keywords: list[str] = field(default_factory=list)
+    description: str = ""
+    summary_excerpt: str = ""
+    source_count: int = 0
+
+
+@dataclass(slots=True)
+class GroupingHint:
+    topic_folder: str
+    confidence: float
+    rationale: str = ""
+
+
+@dataclass(slots=True)
 class GroupingPlan:
     decision: GroupingDecision
     topic_folder: str
@@ -35,11 +56,18 @@ class GroupingPlan:
 
 
 class GroupingPlanner:
-    def __init__(self, max_md_length: int = 4000, min_merge_score: float = 0.7) -> None:
+    def __init__(self, max_md_length: int = 4000, min_merge_score: float = 0.55) -> None:
         self.max_md_length = max_md_length
         self.min_merge_score = min_merge_score
 
-    def plan(self, document: ParsedDocument, related_hits: list[RetrievalHit] | None = None) -> GroupingPlan:
+    def plan(
+        self,
+        document: ParsedDocument,
+        related_hits: list[RetrievalHit] | None = None,
+        *,
+        merge_candidates: list[MergeCandidate] | None = None,
+        llm_merge_hint: GroupingHint | None = None,
+    ) -> GroupingPlan:
         related_hits = related_hits or []
         estimated_length = estimate_markdown_length(document.full_text)
 
@@ -56,20 +84,24 @@ class GroupingPlanner:
                 ],
             )
 
-        merge_target = self._best_merge_target(document, related_hits, estimated_length)
+        candidates = merge_candidates or self._candidates_from_related_hits(related_hits)
+        merge_target = self._best_merge_target(candidates, estimated_length, llm_merge_hint=llm_merge_hint)
         if merge_target is not None:
-            topic_folder, candidate_score, candidate_length, related_chunk_ids = merge_target
+            topic_folder, candidate_score, candidate_length, related_chunk_ids, hint_rationale = merge_target
+            rationale = [
+                "Related indexed material suggests semantic overlap with an existing topic folder.",
+                f"Combined estimated markdown length ({candidate_length}) stays within max_md_length.",
+                f"Aggregate merge evidence score: {candidate_score:.2f}.",
+            ]
+            if hint_rationale:
+                rationale.append(f"Light LLM grouping vote: {hint_rationale}")
             return GroupingPlan(
                 decision=GroupingDecision.MERGE,
                 topic_folder=topic_folder,
                 merge_target_topic=topic_folder,
                 estimated_length=estimated_length,
                 related_chunk_ids=related_chunk_ids,
-                rationale=[
-                    "Related indexed material suggests semantic overlap with an existing topic folder.",
-                    f"Combined estimated markdown length ({candidate_length}) stays within max_md_length.",
-                    f"Aggregate merge evidence score: {candidate_score:.2f}.",
-                ],
+                rationale=rationale,
             )
 
         return GroupingPlan(
@@ -131,39 +163,53 @@ class GroupingPlanner:
             estimated_length=estimated_length,
         )
 
-    def _best_merge_target(
-        self,
-        document: ParsedDocument,
-        related_hits: list[RetrievalHit],
-        estimated_length: int,
-    ) -> tuple[str, float, int, list[str]] | None:
-        candidates: dict[str, dict[str, object]] = {}
+    def _candidates_from_related_hits(self, related_hits: list[RetrievalHit]) -> list[MergeCandidate]:
+        candidates: dict[str, MergeCandidate] = {}
         for hit in related_hits:
             topic_folder = hit.metadata.topic_folder
-            if not topic_folder or hit.metadata.source_uri == document.source.source_uri:
+            if not topic_folder:
                 continue
             candidate = candidates.setdefault(
                 topic_folder,
-                {"score": 0.0, "length": 0, "chunk_ids": []},
+                MergeCandidate(topic_folder=topic_folder, score=0.0, length_estimate=0),
             )
-            candidate["score"] = float(candidate["score"]) + hit.score
-            candidate["length"] = max(
-                int(candidate["length"]),
+            candidate.score += hit.score
+            candidate.length_estimate = max(
+                candidate.length_estimate,
                 int(hit.extras.get("topic_length_estimate", estimate_markdown_length(hit.text))),
             )
-            candidate["chunk_ids"] = list(candidate["chunk_ids"]) + [hit.chunk_id]
+            candidate.related_chunk_ids.append(hit.chunk_id)
+        return sorted(candidates.values(), key=lambda item: item.score, reverse=True)
 
-        best: tuple[str, float, int, list[str]] | None = None
-        for topic_folder, details in candidates.items():
-            candidate_score = float(details["score"])
-            candidate_length = estimated_length + int(details["length"])
-            related_chunk_ids = list(details["chunk_ids"])
-            if candidate_score < self.min_merge_score:
-                continue
+    def _best_merge_target(
+        self,
+        candidates: list[MergeCandidate],
+        estimated_length: int,
+        llm_merge_hint: GroupingHint | None = None,
+    ) -> tuple[str, float, int, list[str], str | None] | None:
+        best: tuple[str, float, int, list[str], str | None] | None = None
+        for candidate in candidates:
+            candidate_score = candidate.score
+            hint_rationale: str | None = None
+            if llm_merge_hint is not None and candidate.topic_folder == llm_merge_hint.topic_folder:
+                candidate_score += 0.8 + (max(0.0, min(llm_merge_hint.confidence, 1.0)) * 0.4)
+                hint_rationale = llm_merge_hint.rationale or (
+                    f"merge with '{candidate.topic_folder}' (confidence {llm_merge_hint.confidence:.2f})"
+                )
+            candidate_length = estimated_length + candidate.length_estimate
             if candidate_length > self.max_md_length:
                 continue
+            min_score = 0.2 if hint_rationale else self.min_merge_score
+            if candidate_score < min_score:
+                continue
             if best is None or candidate_score > best[1]:
-                best = (topic_folder, candidate_score, candidate_length, related_chunk_ids)
+                best = (
+                    candidate.topic_folder,
+                    candidate_score,
+                    candidate_length,
+                    list(candidate.related_chunk_ids),
+                    hint_rationale,
+                )
         return best
 
 

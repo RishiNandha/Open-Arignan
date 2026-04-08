@@ -162,6 +162,7 @@ Implemented MCP surface:
 - `src/arignan/indexing/chunking.py`
   - heading-aware chunking with overlap
   - current defaults favor larger chunks and fewer fragments
+  - adjacent page-like sections can now be merged into one chunk-sized span instead of being forced into one chunk per PDF page
 - `src/arignan/indexing/embedding.py`
   - `HashingEmbedder` for deterministic local behavior
   - sentence-transformer boundary is present for future real embedding runtime
@@ -177,10 +178,12 @@ Implemented MCP surface:
 
 - `src/arignan/grouping/planner.py`
   - decides standalone vs merge vs segment
-  - deterministic heuristic replacement for an LLM grouping policy
+  - deterministic length/segmentation guardrail around the grouping policy
+  - the topic folder chosen here now remains the active topic folder; there is no second-stage canonical renaming pass
 - `src/arignan/markdown/rendering.py`
   - shared deterministic rendering helpers
   - shared keyword extraction / text cleanup / markdown table helpers
+  - fallback topic summaries are meant to read like retrieval-facing wiki lookup pages, not source note dumps
   - active deterministic source for exported markdown helpers
 - `src/arignan/markdown/generator.py`
   - repository/storage layer for topic folders
@@ -192,6 +195,7 @@ Implemented MCP surface:
   - artifact rendering boundary
   - heuristic fallback rendering
   - local-LLM-backed artifact generation
+  - topic-summary prompting now emphasizes grouped-topic coherence and `## Related Threads` for retrieval-oriented wiki pages
   - progress reporting for LLM calls
   - session-local traceback logging for swallowed LLM failures
 - `src/arignan/llm/runtime.py`
@@ -224,6 +228,7 @@ Topic folder invariant:
   - lexical search
   - markdown/map retrieval
   - reciprocal rank fusion
+  - current defaults intentionally pull a larger candidate set so more context can survive into reranking and final answers
   - progress reporting for multi-step retrieval
 - `src/arignan/retrieval/reranking.py`
   - heuristic reranker
@@ -260,8 +265,12 @@ Active session log invariant:
   - centralizes dense and lexical indexer construction
   - batches map regeneration during `load` and grouped-topic regeneration to avoid redundant LLM calls
   - owns user-facing progress emission for multi-step operations
+  - `load` now writes provisional topic summaries first, then runs one post-load regroup pass over the finished topic summaries in the hat
+  - after regrouping, the current load is reindexed once from the final manifests so the CLI summary and retrieval state reflect final grouped topics rather than provisional folders
+  - grouping now compares the incoming document’s provisional topic summary against every existing topic summary in the hat before deciding merge vs standalone
   - `ask()` supports four answer modes: default LLM, light LLM, deterministic synthesis, and raw reranked context
   - `ask()` calls the shared local text generator for default answers and a separate lightweight generator for `--answer-mode light`
+  - final answer prompting now uses a wider reranked-context budget than earlier revisions
   - raw mode returns filtered reranked context directly instead of generating a prose answer
 
 ## Behavior That Is Intentionally Simplified

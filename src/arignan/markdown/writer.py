@@ -9,8 +9,10 @@ from typing import Callable, Protocol
 from arignan.grouping import GroupingPlan
 from arignan.llm import LocalTextGenerator
 from arignan.markdown.rendering import (
+    compose_document_summary,
     compose_topic_locator,
     compose_topic_markdown,
+    topic_related_threads,
     markdown_table_cell,
     describe_documents,
     derive_keywords,
@@ -144,6 +146,7 @@ class LLMArtifactWriter:
                 user_prompt=prompt,
                 max_new_tokens=1100,
                 temperature=0.1,
+                response_format=TOPIC_RESPONSE_SCHEMA,
             )
             payload = _extract_json_payload(raw)
         except Exception as exc:
@@ -166,7 +169,12 @@ class LLMArtifactWriter:
         locator = _coerce_text(payload.get("locator")) or fallback.locator
         keywords = _coerce_keywords(payload.get("keywords")) or fallback.keywords
         raw_summary_markdown = _coerce_text(payload.get("summary_markdown")) or fallback.summary_markdown
-        summary_markdown = _normalize_summary_markdown(raw_summary_markdown, title=title, fallback=fallback.summary_markdown)
+        summary_markdown = _normalize_summary_markdown(
+            raw_summary_markdown,
+            title=title,
+            fallback=fallback.summary_markdown,
+            documents=documents,
+        )
         status = "ok" if summary_markdown != fallback.summary_markdown or raw_summary_markdown == fallback.summary_markdown else "fallback"
         self._record(
             task="topic summary markdown",
@@ -319,7 +327,12 @@ TOPIC_SYSTEM_PROMPT = """You write compact knowledge-base markdown for a local p
 Return strict JSON only, with no code fences and no commentary.
 The markdown must be neatly rewritten for human auditability.
 Never mention chunks, extraction, parsing, prompt instructions, or the existence of an LLM.
-Preserve technical acronyms and paper names exactly when possible."""
+Preserve technical acronyms and paper names exactly when possible.
+Use a neutral, reference-style voice like a concise internal wiki page.
+Prefer definition-first lead sentences, compact explanatory paragraphs, and crisp bullets.
+Write each page as a durable lookup surface for later LLM retrieval, not as a compressed abstract.
+Make conceptual relationships, adjacent ideas, and source-to-source connections easy to scan.
+When sources are grouped, rewrite them into one coherent article rather than a pile of per-source mini-summaries."""
 
 HAT_MAP_SYSTEM_PROMPT = """You write concise lookup-table markdown for a knowledge-base hat map.
 Return markdown only.
@@ -333,13 +346,18 @@ Do not add prose paragraphs before or after the table."""
 
 
 def _build_topic_prompt(documents: list[ParsedDocument], plan: GroupingPlan, fallback: TopicRender) -> str:
+    related_threads = topic_related_threads(documents, limit=4)
     lines = [
-        "Write the topic summary for the following topic.",
+        "Task: write a clean wiki-style knowledge-base page for the topic below.",
+        "The page should act like a rich lookup article for future retrieval, not just a short summary.",
+        "When multiple sources are grouped, draw clear lines between adjacent ideas, complementary angles, and recurring themes.",
+        "Write it as one coherent topic page that helps a future reader or LLM quickly orient, retrieve, and connect ideas.",
         "",
-        f"Topic folder: {plan.topic_folder}",
-        f"Suggested title: {fallback.title}",
-        f"Grouping decision: {plan.decision.value}",
-        f"Source count: {len(documents)}",
+        "Topic metadata:",
+        f"- Topic folder: {plan.topic_folder}",
+        f"- Suggested title: {fallback.title}",
+        f"- Grouping decision: {plan.decision.value}",
+        f"- Source count: {len(documents)}",
         "",
         "Return JSON with exactly these keys:",
         '- "title": short topic title',
@@ -348,21 +366,67 @@ def _build_topic_prompt(documents: list[ParsedDocument], plan: GroupingPlan, fal
         '- "keywords": 4 to 8 specific technical keywords or phrases',
         '- "summary_markdown": wiki-style markdown only',
         "",
-        "Rules for summary_markdown:",
+        "Writing rules for summary_markdown:",
         "- Start with '# <title>'",
-        "- Then one short lead paragraph",
-        "- Then '## Summary' with one short paragraph",
-        "- Then '## Key Ideas' with 3 to 6 bullets",
+        "- Then one short lead paragraph that defines the topic immediately and reads like an internal wiki article",
+        "- Then '## Summary' with one short paragraph that explains scope, significance, and why grouped sources belong together",
+        "- Then '## Key Ideas' with 3 to 6 bullets that rewrite the ideas cleanly instead of copying source sentences",
+        "- Then '## Related Threads' with 3 to 6 bullets that connect adjacent ideas, subthemes, contrasts, dependencies, extensions, or useful lookup paths inside this topic",
         "- Then '## Sources' with this exact table header:",
         "  | Source | What To Find | Key Sections | File |",
         "- Then '## Keywords' with a comma-separated line",
-        "- Keep it concise and readable",
+        "- Keep it concise, readable, and neutral",
+        "- Make the markdown useful as a future lookup page for an LLM that will retrieve this topic later",
+        "- If several sources are grouped, explain how they fit together instead of summarizing each source in isolation",
+        "- Make each section feel like a stable reference entry, not reading notes or extracted chunks",
+        "- Prefer declarative sentences over promotional or first-person phrasing",
         "- Do not paste raw chunks or long quotations",
         "- Do not mention page numbers unless they are semantically important",
         "- Keywords must not include generic junk like page, section, paper, notes, method, work, or standalone digits",
         "",
-        "Topic context:",
+        "Bad patterns to avoid:",
+        "- Do not say 'this document discusses' or 'these notes contain' unless unavoidable",
+        "- Do not sound like an extraction pipeline or a paper abstract pasted verbatim",
+        "- Do not write one bullet per source file when the topic is clearly unified",
+        "- Do not produce fragmented bullets where a paragraph would be clearer",
+        "",
+        "Example of a good summary_markdown shape:",
+        "# Temporal Sparse Attention",
+        "",
+        "Temporal Sparse Attention is an attention strategy that focuses computation on selected time-local interactions.",
+        "",
+        "## Summary",
+        "This page covers the main idea behind temporal sparsity, the practical tradeoff it makes, and the kinds of sequence-modeling tasks where it is useful.",
+        "",
+        "## Key Ideas",
+        "- Restricts attention computation to selected temporal neighborhoods instead of every pairwise interaction.",
+        "- Trades full-context coverage for lower compute and clearer locality bias.",
+        "- Commonly appears in discussions of efficient long-sequence modeling and event streams.",
+        "",
+        "## Related Threads",
+        "- Closely tied to sparse attention patterns, event-based sequence modeling, and efficient temporal context handling.",
+        "- Often contrasted with dense attention because it prioritizes selective connectivity over uniform global coverage.",
+        "- Useful for connecting architecture choices, compute tradeoffs, and downstream sequence behavior within one page.",
+        "- Serves as a bridge page when questions move between model efficiency, temporal structure, and representation quality.",
+        "",
+        "## Sources",
+        "| Source | What To Find | Key Sections | File |",
+        "| --- | --- | --- | --- |",
+        "| Sparse Attention Notes | Core idea and tradeoffs | Overview, Tradeoffs | `notes.md` |",
+        "",
+        "## Keywords",
+        "temporal sparse attention, efficient sequence modeling, event stream, locality bias",
+        "",
+        "Helpful related-thread cues for this topic:",
     ]
+    for item in related_threads:
+        lines.append(f"- {item}")
+    lines.extend(
+        [
+            "",
+        "Topic context:",
+        ]
+    )
     for index, document in enumerate(documents, start=1):
         lines.extend(_document_digest_lines(document, index=index))
     return "\n".join(lines)
@@ -420,6 +484,7 @@ def _build_global_map_prompt(entries: list[HatMapEntry]) -> str:
 def _document_digest_lines(document: ParsedDocument, index: int) -> list[str]:
     headings = collect_semantic_headings([document], limit=5)
     overview = topic_overview_sentences([document], limit=3)
+    keywords = derive_keywords([document], limit=6)
     source_ref = source_name(document)
     lines = [
         f"Document {index}:",
@@ -427,6 +492,8 @@ def _document_digest_lines(document: ParsedDocument, index: int) -> list[str]:
         f"- File: {source_ref}",
         f"- Type: {document.source.source_type.value}",
         f"- Structure: {natural_join(headings) if headings else document_outline(document)}",
+        f"- Keywords: {', '.join(keywords) if keywords else 'none'}",
+        f"- Contribution to topic page: {compose_document_summary(document)}",
         "- Key material:",
     ]
     material = overview or [summarize_text(document.full_text, max_length=280)]
@@ -447,14 +514,21 @@ def _extract_json_payload(text: str) -> dict[str, object]:
     return json.loads(normalized[start : end + 1])
 
 
-def _normalize_summary_markdown(markdown: str, *, title: str, fallback: str) -> str:
+def _normalize_summary_markdown(markdown: str, *, title: str, fallback: str, documents: list[ParsedDocument]) -> str:
     normalized = _normalize_markdown_output(markdown)
     if not normalized:
         return fallback
     if not normalized.startswith("# "):
         normalized = f"# {title}\n\n{normalized}"
-    if "## Sources" not in normalized or "## Keywords" not in normalized:
+    required_sections = ("## Summary", "## Key Ideas", "## Sources", "## Keywords")
+    if any(section not in normalized for section in required_sections):
         return fallback
+    if "## Related Threads" not in normalized:
+        threads = topic_related_threads(documents, limit=4)
+        if threads:
+            insertion = ["## Related Threads", *[f"- {item}" for item in threads], ""]
+            if "## Sources" in normalized:
+                normalized = normalized.replace("## Sources", "\n".join(insertion) + "## Sources", 1)
     return normalized
 
 
@@ -494,3 +568,21 @@ def _coerce_keywords(value: object) -> list[str]:
         seen.add(key)
         deduped.append(keyword)
     return deduped[:8]
+
+
+TOPIC_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "title": {"type": "string"},
+        "description": {"type": "string"},
+        "locator": {"type": "string"},
+        "keywords": {
+            "type": "array",
+            "items": {"type": "string"},
+            "minItems": 4,
+            "maxItems": 8,
+        },
+        "summary_markdown": {"type": "string"},
+    },
+    "required": ["title", "description", "locator", "keywords", "summary_markdown"],
+}

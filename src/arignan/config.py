@@ -14,17 +14,18 @@ APP_HOME_ENV = "ARIGNAN_HOME"
 
 @dataclass(slots=True)
 class ChunkingConfig:
-    chunk_size: int = 1500
-    chunk_overlap: int = 80
+    chunk_size: int = 2800
+    chunk_overlap: int = 160
 
 
 @dataclass(slots=True)
 class RetrievalConfig:
-    dense_top_k: int = 8
-    lexical_top_k: int = 8
-    map_top_k: int = 6
-    fused_top_k: int = 10
-    rerank_top_k: int = 8
+    dense_top_k: int = 14
+    lexical_top_k: int = 14
+    map_top_k: int = 8
+    fused_top_k: int = 20
+    rerank_top_k: int = 14
+    answer_context_top_k: int = 8
 
 
 @dataclass(slots=True)

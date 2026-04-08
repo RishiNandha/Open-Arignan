@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from typing import Any
 from typing import Callable, Protocol
 
 import httpx
@@ -31,6 +32,7 @@ class LocalTextGenerator(Protocol):
         user_prompt: str,
         max_new_tokens: int = 800,
         temperature: float = 0.1,
+        response_format: dict[str, Any] | None = None,
     ) -> str:
         """Generate text from a local model."""
 
@@ -55,6 +57,7 @@ class OllamaTextGenerator:
         user_prompt: str,
         max_new_tokens: int = 800,
         temperature: float = 0.1,
+        response_format: dict[str, Any] | None = None,
     ) -> str:
         if not self._model_ready:
             ensure_model_available(
@@ -78,6 +81,8 @@ class OllamaTextGenerator:
                 "num_predict": max_new_tokens,
             },
         }
+        if response_format is not None:
+            payload["format"] = response_format
         if _supports_no_think(self.model_name):
             payload["think"] = False
         try:
@@ -126,6 +131,7 @@ class TransformersTextGenerator:
         user_prompt: str,
         max_new_tokens: int = 800,
         temperature: float = 0.1,
+        response_format: dict[str, Any] | None = None,
     ) -> str:
         tokenizer, model = self._ensure_loaded()
         prompt = self._build_prompt(tokenizer, system_prompt=system_prompt, user_prompt=user_prompt)

@@ -145,6 +145,13 @@ def compose_topic_markdown(documents: list[ParsedDocument], plan: GroupingPlan) 
             lines.append(f"- {compose_key_point(sentence)}")
         lines.append("")
 
+    related_threads = topic_related_threads(documents, limit=4)
+    if related_threads:
+        lines.append("## Related Threads")
+        for thread in related_threads:
+            lines.append(f"- {thread}")
+        lines.append("")
+
     lines.append("## Sources")
     lines.append("| Source | What To Find | Key Sections | File |")
     lines.append("| --- | --- | --- | --- |")
@@ -298,10 +305,58 @@ def topic_core_ideas(documents: list[ParsedDocument], limit: int = 4) -> list[st
     return overview[start_index : start_index + limit]
 
 
+def topic_related_threads(documents: list[ParsedDocument], limit: int = 4) -> list[str]:
+    threads: list[str] = []
+    keywords = derive_keywords(documents, limit=6)
+    headings = collect_semantic_headings(documents, limit=6)
+    titles = dedupe_preserve_order([document.source.title for document in documents if document.source.title])
+
+    if len(documents) > 1:
+        if keywords:
+            threads.append(
+                f"This grouped page keeps {natural_join(keywords[:3])} together so related questions land on one shared page."
+            )
+        if len(titles) > 1:
+            threads.append(
+                f"Source emphasis varies across {natural_join(titles[:3])}, which makes the topic useful for comparison as well as lookup."
+            )
+    elif keywords:
+        threads.append(f"Nearby lines of thought around this topic include {natural_join(keywords[:3])}.")
+
+    if headings:
+        threads.append(f"Useful entry points inside the topic include {natural_join(headings[:3])}.")
+    if len(keywords) >= 4:
+        threads.append(f"Recurring nearby ideas include {natural_join(keywords[1:4])}.")
+    if headings and len(keywords) >= 2:
+        threads.append(
+            f"The page helps bridge section-level material such as {headings[0]} with higher-level themes like {natural_join(keywords[:2])}."
+        )
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for thread in threads:
+        cleaned = normalize_wiki_sentence(thread)
+        key = cleaned.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(cleaned)
+        if len(normalized) >= limit:
+            break
+    return normalized
+
+
 def compose_topic_lead(title: str, documents: list[ParsedDocument]) -> str:
     overview = topic_overview_sentences(documents, limit=1)
     if overview:
-        return overview[0]
+        promoted = _promote_sentence_to_topic_lead(title, overview[0])
+        if promoted:
+            return promoted
+    keywords = derive_keywords(documents, limit=4)
+    if keywords:
+        if len(documents) > 1:
+            return f"{title} brings together material on {natural_join(keywords[:3])} from multiple related sources."
+        return f"{title} covers {natural_join(keywords[:3])}."
     headings = collect_semantic_headings(documents, limit=4)
     if headings:
         return f"{title} covers {natural_join(headings)}."
@@ -310,15 +365,23 @@ def compose_topic_lead(title: str, documents: list[ParsedDocument]) -> str:
 
 def compose_topic_summary(documents: list[ParsedDocument]) -> str:
     sentences = topic_overview_sentences(documents, limit=5)
-    remainder = sentences[1:3]
     parts: list[str] = []
+    if len(documents) > 1:
+        keywords = derive_keywords(documents, limit=4)
+        if keywords:
+            parts.append(
+                f"This grouped page keeps {natural_join(keywords[:3])} in one place so adjacent questions can retrieve a shared view of the topic."
+            )
+        else:
+            parts.append(f"This grouped page combines {len(documents)} related sources into one retrieval-friendly topic article.")
+    remainder = sentences[1:3]
     if remainder:
         parts.append(" ".join(remainder))
     headings = collect_semantic_headings(documents, limit=4)
     if headings:
-        parts.append(f"Key sections cover {natural_join(headings)}.")
+        parts.append(f"Useful entry points include {natural_join(headings)}.")
     elif len(documents) > 1:
-        parts.append(f"The topic is assembled from {len(documents)} related sources.")
+        parts.append(f"The grouped material spans {len(documents)} related sources with complementary emphasis.")
     return " ".join(parts).strip()
 
 
@@ -689,6 +752,31 @@ def _keyword_overlap_key(term: str) -> str:
     return " ".join(words)
 
 
+def _promote_sentence_to_topic_lead(title: str, sentence: str) -> str:
+    cleaned = normalize_wiki_sentence(sentence).strip()
+    if not cleaned:
+        return ""
+    action_match = re.match(
+        r"^The (?:paper|work|method|model)\s+"
+        r"(proposes|presents|introduces|describes|studies|investigates|analyzes|explores|shows|evaluates)\s+(.+)$",
+        cleaned,
+        re.IGNORECASE,
+    )
+    if action_match:
+        verb = action_match.group(1).lower()
+        tail = action_match.group(2).rstrip(".")
+        return f"{title} {verb} {tail}."
+    focus_match = re.match(
+        r"^(?:It|This approach|This method|The approach|The method)\s+(.+)$",
+        cleaned,
+        re.IGNORECASE,
+    )
+    if focus_match:
+        tail = focus_match.group(1).rstrip(".")
+        return f"{title} {tail}."
+    return cleaned
+
+
 __all__ = [
     "clean_source_text",
     "collect_semantic_headings",
@@ -696,6 +784,7 @@ __all__ = [
     "compose_segment_markdown",
     "compose_topic_locator",
     "compose_topic_markdown",
+    "topic_related_threads",
     "dedupe_preserve_order",
     "describe_documents",
     "derive_keywords",
