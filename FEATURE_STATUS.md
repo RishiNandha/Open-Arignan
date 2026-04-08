@@ -7,6 +7,7 @@
 - `arignan load "JEPA\V-JEPA2.1.pdf" --hat "SNNs" --debug`: Works as expected.
 - `arignan ask "what is the full form of jepa"`: Works as expected
 
-# Improvements
+# Known Issues
 - Answering quality can be improved with better more structured prompt given to the LLM instead of just plainly adding context and question
 - Summary markdown quality can be improved with better examples of how a wiki-style knowledge base should look
+- Topic grouping is still not intelligent. Most topics end up landing in their own folders anyways
