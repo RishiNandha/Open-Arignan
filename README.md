@@ -2,6 +2,23 @@
 
 **Arignar** is the tamil word for the well-read / the knowledgeable / the scholar. **Arignan** is an application that can help scholars, engineers, founders, etc... to maintain a local-first private knowledge base and get queries answered from it.
 
+## Quick-Start
+
+### Option 1: Git Clone + CLI
+
+0. Clone the repo
+1. Run the `python setup.py --app-home <install dir>`. This will:
+   - Download all the models needed, including the default local answer model and a lighter fallback answer model
+   - Create a **bin directory** folder with executables
+   - Print the bin directory for your reference
+2. Add the bin directory folder to your PATH
+3. Try `arignan load "filename.pdf"`
+4. Try `arignan ask "relevant question"`
+
+### Option 2: GUI
+
+soon tm ;)
+
 ## Key Points
 
 ### Behavioral
@@ -42,24 +59,6 @@
   - **Context Retreival tool**: A client such as copilot or codex or claude code can tap into the knowledge base and retrieve context
   - **Global Map Resource**: The "map" given as a context, so that the MCP client has context of what all knowledge are available
   - (To implement in future) **LLM Setting**: Toggle to use the local LLM in internal functions or start using the MCP Client's LLM
-
-## Quick-Start
-
-### Option 1: Git Clone
-
-0. Clone the repo
-1. Run the `python setup.py --app-home <install dir>`. This will:
-   - Download all the models needed, including the default local answer model and a lighter fallback answer model
-   - Create a **bin directory** folder with executables
-   - Print the bin directory for your reference
-2. Add the bin directory folder to your PATH
-3. Try `arignan load "filename.pdf"`
-4. Try `arignan ask "relevant question"`
-
-### Option 2: Pip Install
-
-1. Pip install: `python -m pip install -e .`
-2. Add `bin/` to PATH
 
 ## Detailed Description
 
@@ -242,6 +241,10 @@ When the chat history is becoming too long:
 ## Declaration
 
 Some parts of the repository were generated using LLM-assisted coding applications. There may be potential mismatches between the features described in the README and the implementation. If you come across any, please raise an issue in the github repository!
+
+## Feedback
+
+Please write to me or raise a github issue on any feedback! I would love to hear the pain points while using this, and patch it up!
 
 ## License
 
