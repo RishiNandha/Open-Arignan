@@ -10,17 +10,18 @@ This file is a fast orientation guide for agents that need to patch the reposito
 - hat-based storage namespaces under one app-home
 - ingestion for markdown, PDFs, folders, and URLs
 - hybrid retrieval across dense, lexical, and markdown/map artifacts
-- local-LLM-authored `summary.md`, `map.md`, and `global_map.md`
-- deterministic local stand-ins for answer generation, embedding, reranking, and session summarization
+- local-LLM-authored `summary.md`, `map.md`, `global_map.md`, and final `ask` answers
+- deterministic local stand-ins for embedding, reranking, and session summarization
 
 Important current reality:
 
-- setup provisions a managed local text-model runtime and runtime uses it for markdown artifacts
-- `ask` answer generation is still deterministic
+- setup provisions a managed local text-model runtime and runtime uses it for markdown artifacts and final `ask` answers
 - the default local text model is `qwen3:4b-q4_K_M`
+- the lightweight local answer model is `qwen3:0.6b`
 - on Windows, setup bundles the local model runtime inside the app-home so users do not need a separate install/serve step
 - dense retrieval prefers local Qdrant storage when available and falls back to JSON storage otherwise
-- long-running CLI operations now print progress messages to `stderr`
+- normal `ask` runs now use a compact in-place status line on `stderr`
+- `ask --debug` still prints detailed retrieval/model trace output
 - swallowed LLM failures now write full tracebacks to a session-local `exceptions.log`
 
 ## Top-Level Layout
@@ -97,6 +98,8 @@ Commands currently implemented:
 CLI behavior worth remembering:
 
 - progress messages print to `stderr` with an `[arignan] ...` prefix
+- normal `ask` uses a compact spinner-style status reporter instead of line-by-line progress spam
+- `ask` supports `--answer-mode default|light|none|raw`
 - `load --debug` and `ask --debug` print model-call traces and internal details
 - uncaught CLI exceptions are logged to the active session log before being re-raised
 
@@ -121,6 +124,7 @@ Implemented MCP surface:
   - owns `AppConfig`
   - writes and loads `settings.json`
   - defaults the local markdown-generation backend to the managed local runtime
+  - stores both the default local answer model and the lightweight local answer model
   - infers `local_llm_backend` for older settings files that only stored a model string
   - enforces that `embedding_model` is fixed and cannot be overridden in settings
 - `src/arignan/paths.py`
@@ -191,13 +195,13 @@ Implemented MCP surface:
   - progress reporting for LLM calls
   - session-local traceback logging for swallowed LLM failures
 - `src/arignan/llm/runtime.py`
-  - provides the managed local generation adapter used by default for markdown artifacts
+  - provides the managed local generation adapter used by default for markdown artifacts and final answers
   - still contains an explicit transformers runtime path for non-default/back-compat use
   - strips reasoning blocks from managed-runtime output before markdown validation
 - `src/arignan/llm/service.py`
   - provisions the managed local runtime bundle during setup
   - auto-starts the local runtime in the background on first use
-  - pulls the configured local model into `<app_home>/models`
+  - pulls both configured answer models into `<app_home>/models`
 - `src/arignan/runtime_env.py`
   - forces Arignan's process into the text-only Transformers path
   - disables TensorFlow and Flax backends so local LLM calls do not drift into unused backend imports
@@ -256,13 +260,22 @@ Active session log invariant:
   - centralizes dense and lexical indexer construction
   - batches map regeneration during `load` and grouped-topic regeneration to avoid redundant LLM calls
   - owns user-facing progress emission for multi-step operations
+  - `ask()` supports four answer modes: default LLM, light LLM, deterministic synthesis, and raw reranked context
+  - `ask()` calls the shared local text generator for default answers and a separate lightweight generator for `--answer-mode light`
+  - raw mode returns filtered reranked context directly instead of generating a prose answer
 
 ## Behavior That Is Intentionally Simplified
 
 These are common places where an agent may assume there is a real model/runtime when there is not yet one:
 
+- `src/arignan/application.py:generate_answer`
+  - primary final-answer path
+  - builds the LLM prompt from session summary, recent turns, and top retrieved hits
+  - falls back to deterministic synthesis on local-runtime failure
+- `src/arignan/application.py:compose_answer`
+  - answer-mode switch for `default`, `light`, `none`, and `raw`
 - `src/arignan/application.py:synthesize_answer`
-  - answers are assembled deterministically from retrieval hits
+  - deterministic fallback for final answers when the local LLM is unavailable
 - `src/arignan/indexing/embedding.py:HashingEmbedder`
   - used for deterministic embedding behavior in tests and local flows
 - `src/arignan/retrieval/reranking.py:HeuristicReranker`
@@ -281,6 +294,10 @@ Touch:
 - `src/arignan/cli.py`
 - `src/arignan/application.py`
 - relevant integration tests in `tests/integration/test_cli_smoke.py`
+
+Remember:
+
+- normal `ask` progress is intentionally compressed; if you add new internal progress events, decide whether they belong in the compact reporter or only in debug mode
 
 ### Change setup/bootstrap behavior
 

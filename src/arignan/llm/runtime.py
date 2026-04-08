@@ -1,13 +1,19 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable, Protocol
 
 import httpx
 
 from arignan.config import AppConfig
 from arignan.llm.service import ensure_model_available
-from arignan.model_registry import resolve_model_repo_id, resolve_model_storage_dir, resolve_ollama_model_id, sanitize_model_id
+from arignan.model_registry import (
+    infer_local_llm_backend,
+    resolve_model_repo_id,
+    resolve_model_storage_dir,
+    resolve_ollama_model_id,
+    sanitize_model_id,
+)
 from arignan.runtime_env import configure_text_runtime_environment
 
 
@@ -200,13 +206,26 @@ class TransformersTextGenerator:
         return model_inputs, prompt_length
 
 
-def create_local_text_generator(config: AppConfig, progress_sink=None) -> LocalTextGenerator:
-    backend = config.local_llm_backend.strip().lower()
+def create_local_text_generator(
+    config: AppConfig,
+    progress_sink=None,
+    *,
+    model_name: str | None = None,
+    backend: str | None = None,
+) -> LocalTextGenerator:
+    selected_model = model_name or config.local_llm_model
+    selected_backend = (backend or infer_local_llm_backend(selected_model, default=config.local_llm_backend)).strip().lower()
+    generator_config = replace(
+        config,
+        local_llm_backend=selected_backend,
+        local_llm_model=selected_model,
+    )
+    backend = generator_config.local_llm_backend.strip().lower()
     if backend == "ollama":
-        return OllamaTextGenerator(config, progress_sink=progress_sink)
+        return OllamaTextGenerator(generator_config, progress_sink=progress_sink)
     if backend in {"transformers", "huggingface"}:
-        return TransformersTextGenerator(config)
-    raise ValueError(f"unsupported local_llm_backend: {config.local_llm_backend}")
+        return TransformersTextGenerator(generator_config)
+    raise ValueError(f"unsupported local_llm_backend: {generator_config.local_llm_backend}")
 
 
 def resolve_local_model_source(config: AppConfig) -> str:

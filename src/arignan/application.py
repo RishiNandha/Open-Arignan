@@ -7,6 +7,7 @@ import shutil
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Literal
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -14,10 +15,10 @@ from arignan.config import AppConfig
 from arignan.grouping import GroupingDecision, GroupingPlan, GroupingPlanner, estimate_markdown_length
 from arignan.indexing import Chunker, DenseIndexer, HashingEmbedder, LexicalIndex, LexicalIndexer, LocalDenseIndex, tokenize
 from arignan.ingestion import IngestionLog, IngestionService
-from arignan.llm import create_local_text_generator
+from arignan.llm import LocalTextGenerator, create_local_text_generator
 from arignan.markdown import MarkdownRepository
 from arignan.markdown.writer import HeuristicArtifactWriter, LLMArtifactWriter
-from arignan.models import ChunkRecord, LoadEvent, LoadOperation, ParsedDocument, RetrievalHit
+from arignan.models import ChunkRecord, LoadEvent, LoadOperation, ParsedDocument, RetrievalHit, SessionState
 from arignan.retrieval import HeuristicReranker, RetrievalPipeline
 from arignan.session import SessionExceptionLogger, SessionManager, SessionStore
 from arignan.storage import StorageLayout
@@ -51,6 +52,7 @@ class LoadResult:
 
 @dataclass(slots=True)
 class AskDebug:
+    answer_mode: str
     expanded_query: str
     selected_hat: str
     dense_hits: list[RetrievalHit]
@@ -65,6 +67,7 @@ class AskDebug:
 class AskResult:
     question: str
     selected_hat: str
+    answer_mode: str
     answer: str
     citations: list[str]
     debug: AskDebug
@@ -108,8 +111,14 @@ class ArignanApp:
         self.session_manager = SessionManager(SessionStore(config.app_home), config.session)
         self.exception_logger = SessionExceptionLogger(self.session_manager.store, self.terminal_pid)
         self.trace_collector = ModelTraceCollector()
+        self.local_text_generator = create_local_text_generator(config, progress_sink=self.progress_sink)
+        self.light_text_generator = create_local_text_generator(
+            config,
+            progress_sink=self.progress_sink,
+            model_name=config.local_llm_light_model,
+        )
         artifact_writer = LLMArtifactWriter(
-            generator=create_local_text_generator(config, progress_sink=self.progress_sink),
+            generator=self.local_text_generator,
             fallback=HeuristicArtifactWriter(),
             trace_sink=self.trace_collector,
             progress_sink=self.progress_sink,
@@ -203,10 +212,16 @@ class ArignanApp:
             model_calls=self.trace_collector.snapshot(),
         )
 
-    def ask(self, question: str, hat: str = "auto", terminal_pid: int | None = None) -> AskResult:
+    def ask(
+        self,
+        question: str,
+        hat: str = "auto",
+        terminal_pid: int | None = None,
+        answer_mode: Literal["default", "light", "none", "raw"] = "default",
+    ) -> AskResult:
         self.trace_collector.clear()
         pid = terminal_pid or self.terminal_pid
-        self.session_manager.append_turn(pid, role="user", content=question)
+        session = self.session_manager.append_turn(pid, role="user", content=question)
         self._emit_progress("Running retrieval pipeline...")
         bundle = RetrievalPipeline(
             self.layout,
@@ -234,11 +249,22 @@ class ArignanApp:
             min_score=0.05,
         )
         answer_hits = _content_hits(reranked)
-        self._emit_progress("Composing final answer...")
-        answer = synthesize_answer(question, answer_hits, expanded_query=bundle.expanded_query)
+        answer, citations = compose_answer(
+            question,
+            answer_hits,
+            answer_mode=answer_mode,
+            expanded_query=bundle.expanded_query,
+            selected_hat=bundle.selected_hat,
+            default_generator=self.local_text_generator,
+            light_generator=self.light_text_generator,
+            trace_sink=self.trace_collector,
+            exception_logger=self.exception_logger,
+            progress_sink=self.progress_sink,
+            session=session,
+        )
         self.session_manager.append_turn(pid, role="assistant", content=answer)
-        citations = _unique_citations(answer_hits, limit=3)
         debug = AskDebug(
+            answer_mode=answer_mode,
             expanded_query=bundle.expanded_query,
             selected_hat=bundle.selected_hat,
             dense_hits=bundle.dense_hits,
@@ -248,7 +274,14 @@ class ArignanApp:
             reranked_hits=reranked,
             model_calls=self.trace_collector.snapshot(),
         )
-        return AskResult(question=question, selected_hat=bundle.selected_hat, answer=answer, citations=citations, debug=debug)
+        return AskResult(
+            question=question,
+            selected_hat=bundle.selected_hat,
+            answer_mode=answer_mode,
+            answer=answer,
+            citations=citations,
+            debug=debug,
+        )
 
     def list_events(self) -> list[LoadEvent]:
         return self.ingestion_log.read_all()
@@ -447,6 +480,129 @@ def synthesize_answer(question: str, hits: list[RetrievalHit], expanded_query: s
     return _synthesize_answer(question, hits, expanded_query=expanded_query or question)
 
 
+def compose_answer(
+    question: str,
+    hits: list[RetrievalHit],
+    *,
+    answer_mode: Literal["default", "light", "none", "raw"],
+    expanded_query: str,
+    selected_hat: str,
+    default_generator: LocalTextGenerator,
+    light_generator: LocalTextGenerator,
+    trace_sink: ModelTraceCollector | None = None,
+    exception_logger: SessionExceptionLogger | None = None,
+    progress_sink: Callable[[str], None] | None = None,
+    session: SessionState | None = None,
+) -> tuple[str, list[str]]:
+    if answer_mode == "raw":
+        if progress_sink is not None:
+            progress_sink("Composing raw retrieval output...")
+        return render_raw_hits(hits), []
+    if answer_mode == "none":
+        if progress_sink is not None:
+            progress_sink("Composing retrieval synthesis answer...")
+        return synthesize_answer(question, hits, expanded_query=expanded_query), _unique_citations(hits, limit=3)
+
+    generator = default_generator if answer_mode == "default" else light_generator
+    answer = generate_answer(
+        question,
+        hits,
+        expanded_query=expanded_query,
+        selected_hat=selected_hat,
+        generator=generator,
+        trace_sink=trace_sink,
+        exception_logger=exception_logger,
+        progress_sink=progress_sink,
+        session=session,
+    )
+    return answer, _unique_citations(hits, limit=3)
+
+
+ANSWER_SYSTEM_PROMPT = """You answer questions for a private local knowledge base.
+Use only the provided retrieved context and prior session context.
+If the retrieved context is insufficient, say that the local knowledge base does not contain enough information.
+Write a direct, technically accurate answer in concise natural language.
+Do not mention retrieval, chunks, prompts, or hidden system behavior.
+Do not add a citations, sources, or references section; citations are handled separately outside your answer."""
+
+
+def generate_answer(
+    question: str,
+    hits: list[RetrievalHit],
+    *,
+    expanded_query: str,
+    selected_hat: str,
+    generator: LocalTextGenerator,
+    trace_sink: ModelTraceCollector | None = None,
+    exception_logger: SessionExceptionLogger | None = None,
+    progress_sink: Callable[[str], None] | None = None,
+    session: SessionState | None = None,
+) -> str:
+    if not hits:
+        _record_answer_trace(
+            trace_sink,
+            generator=generator,
+            status="skipped",
+            item_count=0,
+            detail=f"{selected_hat} (no context)",
+        )
+        return "No relevant local knowledge was found for that question."
+
+    if progress_sink is not None:
+        progress_sink(f"Hitting local LLM for answer generation ({generator.model_name})...")
+    prompt = _build_answer_prompt(
+        question,
+        hits,
+        expanded_query=expanded_query,
+        selected_hat=selected_hat,
+        session=session,
+    )
+    try:
+        raw = generator.generate(
+            system_prompt=ANSWER_SYSTEM_PROMPT,
+            user_prompt=prompt,
+            max_new_tokens=280,
+            temperature=0.1,
+        )
+        answer = _normalize_generated_answer(raw)
+    except Exception as exc:
+        log_path = _log_answer_exception(
+            exception_logger,
+            exc=exc,
+            selected_hat=selected_hat,
+            hit_count=len(hits),
+        )
+        if progress_sink is not None:
+            progress_sink(_answer_fallback_message(log_path))
+        _record_answer_trace(
+            trace_sink,
+            generator=generator,
+            status="fallback",
+            item_count=len(hits),
+            detail=f"{selected_hat} (exception)",
+        )
+        return synthesize_answer(question, hits, expanded_query=expanded_query)
+
+    if not answer:
+        _record_answer_trace(
+            trace_sink,
+            generator=generator,
+            status="fallback",
+            item_count=len(hits),
+            detail=f"{selected_hat} (empty output)",
+        )
+        return synthesize_answer(question, hits, expanded_query=expanded_query)
+
+    _record_answer_trace(
+        trace_sink,
+        generator=generator,
+        status="ok",
+        item_count=len(hits),
+        detail=selected_hat,
+    )
+    return answer
+
+
 def _synthesize_answer(question: str, hits: list[RetrievalHit], expanded_query: str) -> str:
     key_points = _best_supporting_sentences(expanded_query, hits, limit=4)
     if not key_points:
@@ -526,6 +682,150 @@ def _truncate_text(text: str, max_length: int) -> str:
     if len(normalized) <= max_length:
         return normalized
     return normalized[: max_length - 3].rstrip() + "..."
+
+
+def render_raw_hits(hits: list[RetrievalHit], limit: int = 5) -> str:
+    if not hits:
+        return "No relevant local knowledge was found for that question."
+    lines = ["Top retrieved context:"]
+    for index, hit in enumerate(hits[:limit], start=1):
+        score = float(hit.extras.get("rerank_score", hit.extras.get("rrf_score", hit.score)))
+        snippet = _truncate_text(hit.text, 360)
+        lines.append(f"{index}. [{score:.3f}] {format_citation(hit)}")
+        lines.append(f"   {snippet}")
+        if index < min(len(hits), limit):
+            lines.append("")
+    return "\n".join(lines)
+
+
+def _build_answer_prompt(
+    question: str,
+    hits: list[RetrievalHit],
+    *,
+    expanded_query: str,
+    selected_hat: str,
+    session: SessionState | None,
+) -> str:
+    lines = [
+        f"Hat: {selected_hat}",
+        f"Question: {question}",
+        f"Expanded query: {expanded_query}",
+        "",
+        "Instructions:",
+        "- Answer from the retrieved context only.",
+        "- Be concise but intelligent.",
+        "- Prefer the strongest direct evidence.",
+        "- If the answer is uncertain or missing, say so plainly.",
+    ]
+
+    summary = (session.summary or "").strip() if session is not None else ""
+    if summary:
+        lines.extend(
+            [
+                "",
+                "Session summary:",
+                summary,
+            ]
+        )
+
+    recent_turns = _recent_turns_for_prompt(session, question=question)
+    if recent_turns:
+        lines.append("")
+        lines.append("Recent dialogue:")
+        for turn in recent_turns:
+            role = "User" if turn.role.lower() == "user" else "Assistant"
+            lines.append(f"{role}: {turn.content.strip()}")
+
+    lines.extend(
+        [
+            "",
+            "Retrieved context:",
+        ]
+    )
+    for index, hit in enumerate(hits[:5], start=1):
+        score = hit.extras.get("rerank_score", hit.extras.get("rrf_score", hit.score))
+        lines.extend(
+            [
+                f"[{index}] {format_citation(hit)}",
+                f"Score: {float(score):.3f}",
+                _truncate_text(hit.text, 900),
+                "",
+            ]
+        )
+    return "\n".join(lines).rstrip()
+
+
+def _recent_turns_for_prompt(session: SessionState | None, *, question: str) -> list:
+    if session is None or not session.turns:
+        return []
+    turns = list(session.turns)
+    if turns and turns[-1].role.lower() == "user" and turns[-1].content == question:
+        turns = turns[:-1]
+    return turns[-4:]
+
+
+def _normalize_generated_answer(text: str) -> str:
+    normalized = text.strip()
+    fenced = re.match(r"```(?:markdown|text)?\s*(.*?)\s*```$", normalized, re.DOTALL)
+    if fenced:
+        normalized = fenced.group(1).strip()
+    normalized = re.sub(r"^(?:answer|response)\s*:\s*", "", normalized, flags=re.IGNORECASE)
+    cleaned_lines: list[str] = []
+    for raw_line in normalized.splitlines():
+        stripped = raw_line.strip()
+        if re.match(r"^(?:citations?|sources?|references?)\s*:?$", stripped, flags=re.IGNORECASE):
+            break
+        if re.match(r"^(?:citations?|sources?|references?)\s*:", stripped, flags=re.IGNORECASE):
+            break
+        cleaned_lines.append(raw_line.rstrip())
+    cleaned = "\n".join(cleaned_lines).strip()
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned
+
+
+def _record_answer_trace(
+    trace_sink: ModelTraceCollector | None,
+    *,
+    generator: LocalTextGenerator,
+    status: str,
+    item_count: int | None,
+    detail: str | None,
+) -> None:
+    if trace_sink is None:
+        return
+    trace_sink.record(
+        component="llm",
+        task="answer generation",
+        model_name=getattr(generator, "model_name", type(generator).__name__),
+        backend=getattr(generator, "backend_name", type(generator).__name__),
+        status=status,
+        item_count=item_count,
+        detail=detail,
+    )
+
+
+def _log_answer_exception(
+    exception_logger: SessionExceptionLogger | None,
+    *,
+    exc: BaseException,
+    selected_hat: str,
+    hit_count: int,
+) -> Path | None:
+    if exception_logger is None:
+        return None
+    return exception_logger.log_exception(
+        component="llm",
+        task="answer generation",
+        exc=exc,
+        context={"hat": selected_hat, "hit_count": hit_count},
+    )
+
+
+def _answer_fallback_message(log_path: Path | None) -> str:
+    message = "Local LLM unavailable for answer generation; using retrieval synthesis fallback."
+    if log_path is None:
+        return message
+    return f"{message} Log: {log_path.resolve()}"
 
 
 def format_citation(hit: RetrievalHit) -> str:

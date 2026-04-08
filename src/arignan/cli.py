@@ -4,7 +4,7 @@ import argparse
 import os
 import sys
 from pathlib import Path
-from typing import Sequence
+from typing import Sequence, TextIO
 
 from arignan.application import ArignanApp, AskResult, LoadResult, format_citation
 from arignan.config import load_config
@@ -13,6 +13,81 @@ from arignan.config import load_config
 class ArignanHelpFormatter(argparse.HelpFormatter):
     def __init__(self, prog: str) -> None:
         super().__init__(prog, max_help_position=30, width=100)
+
+
+class LineProgressReporter:
+    def __init__(self, stream: TextIO | None = None) -> None:
+        self.stream = stream or sys.stderr
+
+    def emit(self, message: str) -> None:
+        print(file=self.stream, flush=True)
+        print(f"[arignan] {message}", file=self.stream, flush=True)
+        print(file=self.stream, flush=True)
+
+    def finish(self) -> None:
+        return None
+
+
+class AskStatusReporter:
+    _spinner_frames = "|/-\\"
+
+    def __init__(self, stream: TextIO | None = None) -> None:
+        self.stream = stream or sys.stderr
+        self._spinner_index = 0
+        self._last_length = 0
+        self._active = False
+
+    def emit(self, message: str) -> None:
+        if message.startswith("Local LLM unavailable"):
+            self._emit_line(message)
+            return
+        status = self._map_status(message)
+        if status is None:
+            return
+        frame = self._spinner_frames[self._spinner_index % len(self._spinner_frames)]
+        self._spinner_index += 1
+        payload = f"[arignan] {frame} {status}"
+        padding = " " * max(self._last_length - len(payload), 0)
+        print(f"\r{payload}{padding}", end="", file=self.stream, flush=True)
+        self._last_length = len(payload)
+        self._active = True
+
+    def finish(self) -> None:
+        if not self._active:
+            return
+        clear = " " * self._last_length
+        print(f"\r{clear}\r", end="", file=self.stream, flush=True)
+        self._last_length = 0
+        self._active = False
+
+    def _emit_line(self, message: str) -> None:
+        self.finish()
+        print(f"[arignan] {message}", file=self.stream, flush=True)
+
+    @staticmethod
+    def _map_status(message: str) -> str | None:
+        if message.startswith("Hat chosen:"):
+            return message
+        if any(
+            token in message
+            for token in (
+                "Running retrieval pipeline",
+                "Expanding query",
+                "Selecting hat",
+                "Searching dense index",
+                "Searching lexical index",
+                "Searching map context",
+                "Fusing retrieval candidates",
+            )
+        ):
+            return "Retrieval in progress"
+        if "Reranking" in message or "rerank" in message.lower():
+            return "Reranking"
+        if "Hitting local LLM" in message:
+            return "Hitting LLM"
+        if "Composing raw retrieval output" in message or "Composing retrieval synthesis answer" in message:
+            return "Composing answer"
+        return None
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -53,6 +128,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ask_parser.add_argument("question", help="Question to answer.")
     ask_parser.add_argument("--hat", default="auto", help="Restrict retrieval to a hat. Defaults to auto.")
+    ask_parser.add_argument(
+        "--answer-mode",
+        choices=["default", "light", "none", "raw"],
+        default="default",
+        help="Choose how the final answer is produced: default LLM, light LLM, deterministic summary, or raw reranked context.",
+    )
     ask_parser.add_argument("--debug", action="store_true", help="Print retrieval and reranking context details.")
 
     delete_parser = subparsers.add_parser(
@@ -101,27 +182,30 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     resolved_pid = args.pid or os.getppid() or os.getpid()
     config = load_config(settings_path=args.settings, app_home=args.app_home)
-    app = ArignanApp(config, progress_sink=_emit_progress, terminal_pid=resolved_pid)
+    reporter = _build_progress_reporter(command=args.command, debug=getattr(args, "debug", False))
+    app = ArignanApp(config, progress_sink=reporter.emit, terminal_pid=resolved_pid)
 
     try:
         if args.command == "load":
             result = app.load(args.input_ref, hat=args.hat)
-            print(_format_load_summary(result))
+            reporter.finish()
+            _print_output_block(_format_load_summary(result))
             if args.debug:
-                print()
-                print(_format_load_debug(result))
+                _print_output_block(_format_load_debug(result))
             return 0
 
         if args.command == "ask":
-            result = app.ask(args.question, hat=args.hat, terminal_pid=resolved_pid)
-            print(result.answer)
+            result = app.ask(args.question, hat=args.hat, terminal_pid=resolved_pid, answer_mode=args.answer_mode)
+            reporter.finish()
+            ask_lines = [result.answer]
             if result.citations:
-                print("\nCitations:")
+                ask_lines.append("")
+                ask_lines.append("Citations:")
                 for citation in result.citations:
-                    print(f"- {citation}")
+                    ask_lines.append(f"- {citation}")
+            _print_output_block("\n".join(ask_lines))
             if args.debug:
-                print()
-                print(_format_ask_debug(result))
+                _print_output_block(_format_ask_debug(result))
             return 0
 
         if args.command == "delete":
@@ -132,13 +216,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                     f"Delete entire hat '{args.hat}'? This will remove all indexes, summaries, and source copies for that hat. [y/N]: "
                 ).strip()
                 if confirmation.lower() not in {"y", "yes"}:
-                    print("Cancelled hat deletion.")
+                    _print_output_block("Cancelled hat deletion.")
                     return 0
                 result = app.delete_hat(args.hat)
                 if not result.existed:
-                    print(f"Hat '{args.hat}' was not found.")
+                    reporter.finish()
+                    _print_output_block(f"Hat '{args.hat}' was not found.")
                     return 0
-                print(
+                reporter.finish()
+                _print_output_block(
                     f"Deleted hat '{result.hat}'. "
                     f"Loads removed: {len(result.deleted_load_ids)}. "
                     f"Topics removed: {len(result.deleted_topics)}."
@@ -146,14 +232,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return 0
             if not args.load_ids:
                 events = app.list_ingestions()
+                reporter.finish()
                 if not events:
-                    print("No ingestions found.")
+                    _print_output_block("No ingestions found.")
                     return 0
-                for event in events:
-                    print(f"{event.load_id}\t{event.hat}\t{', '.join(event.source_items)}")
+                _print_output_block(
+                    "\n".join(f"{event.load_id}\t{event.hat}\t{', '.join(event.source_items)}" for event in events)
+                )
                 return 0
             result = app.delete(args.load_ids)
-            print(
+            reporter.finish()
+            _print_output_block(
                 f"Deleted loads: {', '.join(result.deleted_load_ids) or 'none'}. "
                 f"Missing: {', '.join(result.missing_load_ids) or 'none'}."
             )
@@ -162,31 +251,40 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "save-session":
             destination = Path(args.destination) if args.destination else None
             path = app.save_session(terminal_pid=resolved_pid, destination=destination)
-            print(path)
+            reporter.finish()
+            _print_output_block(str(path))
             return 0
 
         if args.command == "load-session":
             session = app.load_session(Path(args.source), terminal_pid=resolved_pid)
-            print(f"Loaded session {session.session_id} into pid {session.terminal_pid}.")
+            reporter.finish()
+            _print_output_block(f"Loaded session {session.session_id} into pid {session.terminal_pid}.")
             return 0
 
         if args.command == "reset-session":
             session = app.reset_session(terminal_pid=resolved_pid)
-            print(f"Reset session. New session_id: {session.session_id}")
+            reporter.finish()
+            _print_output_block(f"Reset session. New session_id: {session.session_id}")
             return 0
 
         if args.command == "list-loads":
             events = app.list_events()
+            reporter.finish()
             if not events:
-                print("No log events found.")
+                _print_output_block("No log events found.")
                 return 0
-            for event in events:
-                print(f"{event.created_at}\t{event.operation.value}\t{event.load_id}\t{event.hat}\t{', '.join(event.source_items)}")
+            _print_output_block(
+                "\n".join(
+                    f"{event.created_at}\t{event.operation.value}\t{event.load_id}\t{event.hat}\t{', '.join(event.source_items)}"
+                    for event in events
+                )
+            )
             return 0
 
         parser.error(f"unsupported command: {args.command}")
         return 2
     except Exception as exc:
+        reporter.finish()
         log_path = app.log_exception(
             component="cli",
             task=f"{args.command} command",
@@ -197,8 +295,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise
 
 
-def _emit_progress(message: str) -> None:
-    print(f"[arignan] {message}", file=sys.stderr)
+def _build_progress_reporter(*, command: str, debug: bool):
+    if command == "ask" and not debug:
+        return AskStatusReporter()
+    return LineProgressReporter()
+
+
+def _print_output_block(text: str) -> None:
+    print()
+    if text:
+        print(text)
+    print()
 
 
 def _format_load_summary(result: LoadResult) -> str:
@@ -236,6 +343,7 @@ def _format_ask_debug(result: AskResult) -> str:
     debug = result.debug
     lines = [
         "Debug: ask retrieval",
+        f"Answer mode: {debug.answer_mode}",
         f"Selected hat: {debug.selected_hat}",
         f"Expanded query: {debug.expanded_query}",
         (

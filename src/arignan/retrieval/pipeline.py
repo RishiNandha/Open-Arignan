@@ -149,6 +149,7 @@ class RetrievalPipeline:
         expanded_query = self.expander.expand(query)
         self._emit_progress("Selecting hat...")
         selected_hat = self.selector.select(expanded_query, hat=hat)
+        self._emit_progress(f"Hat chosen: {selected_hat}")
         dense = DenseIndexer(
             self.embedder,
             LocalDenseIndex(self.layout.hat(selected_hat).vector_index_dir),

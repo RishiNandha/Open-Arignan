@@ -58,6 +58,7 @@ def test_render_summary_mentions_next_steps(tmp_path: Path) -> None:
         models_dir=tmp_path / ".arignan" / "models",
         local_llm_backend="ollama",
         local_llm_model="qwen3:4b-q4_K_M",
+        local_llm_light_model="qwen3:0.6b",
         bin_dir=tmp_path / "bin",
         windows_launcher=tmp_path / "bin" / "arignan.cmd",
         posix_launcher=tmp_path / "bin" / "arignan",
@@ -95,6 +96,7 @@ def test_initialize_local_state_can_override_local_llm_model(tmp_path: Path) -> 
         assert app_home == (tmp_path / ".arignan").resolve()
         assert payload["local_llm_backend"] == "ollama"
         assert payload["local_llm_model"] == "qwen3:4b-q4_K_M"
+        assert payload["local_llm_light_model"] == "qwen3:0.6b"
         assert read_persisted_app_home() == (tmp_path / ".arignan").resolve()
     finally:
         Path.home = original_home
@@ -116,6 +118,7 @@ def test_initialize_local_state_migrates_legacy_transformers_default(tmp_path: P
         migrated = json.loads(migrated_settings_path.read_text(encoding="utf-8"))
         assert migrated["local_llm_backend"] == "ollama"
         assert migrated["local_llm_model"] == "qwen3:4b-q4_K_M"
+        assert migrated["local_llm_light_model"] == "qwen3:0.6b"
     finally:
         Path.home = original_home
 
@@ -143,9 +146,16 @@ def test_download_required_models_pulls_default_ollama_model(tmp_path: Path, mon
 
     assert models_dir == app_home / "models"
     assert provisioned == [app_home]
-    assert ensured == [(app_home, "http://127.0.0.1:11434", "qwen3:4b-q4_K_M", 1800.0)]
+    assert ensured == [
+        (app_home, "http://127.0.0.1:11434", "qwen3:4b-q4_K_M", 1800.0),
+        (app_home, "http://127.0.0.1:11434", "qwen3:0.6b", 1800.0),
+    ]
     manifest = json.loads((models_dir / "local_llm_manifest.json").read_text(encoding="utf-8"))
-    assert manifest == {"local_llm_backend": "ollama", "local_llm_model": "qwen3:4b-q4_K_M"}
+    assert manifest == {
+        "local_llm_backend": "ollama",
+        "local_llm_model": "qwen3:4b-q4_K_M",
+        "local_llm_light_model": "qwen3:0.6b",
+    }
 
 
 def test_download_required_models_surfaces_managed_runtime_provision_error(tmp_path: Path, monkeypatch) -> None:
@@ -184,6 +194,8 @@ def test_download_required_models_supports_transformers_backend(tmp_path: Path, 
         GatedRepoError = type("FakeGatedRepoError", (Exception,), {})
         HfHubHTTPError = type("FakeHfHubHTTPError", (Exception,), {})
 
+    monkeypatch.setattr("arignan.setup_flow.provision_managed_runtime", lambda app_home_arg, progress=None: app_home_arg / "runtime" / "local_llm" / "ollama.exe")
+    monkeypatch.setattr("arignan.setup_flow.ensure_model_available", lambda *args, **kwargs: None)
     monkeypatch.setitem(sys.modules, "huggingface_hub", FakeHubModule())
     monkeypatch.setitem(sys.modules, "huggingface_hub.errors", FakeErrorsModule)
 

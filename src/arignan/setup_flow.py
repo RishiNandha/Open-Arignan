@@ -14,6 +14,8 @@ from arignan.llm.service import ensure_model_available, provision_managed_runtim
 from arignan.model_registry import (
     DEFAULT_LOCAL_LLM_DISPLAY_NAME,
     DEFAULT_LOCAL_LLM_REPO_ID,
+    DEFAULT_LIGHT_LOCAL_LLM_DISPLAY_NAME,
+    DEFAULT_LIGHT_LOCAL_LLM_REPO_ID,
     LEGACY_TRANSFORMERS_LOCAL_LLM_DISPLAY_NAME,
     LEGACY_TRANSFORMERS_LOCAL_LLM_REPO_ID,
     infer_local_llm_backend,
@@ -31,6 +33,7 @@ class SetupResult:
     models_dir: Path
     local_llm_backend: str
     local_llm_model: str
+    local_llm_light_model: str
     bin_dir: Path
     windows_launcher: Path
     posix_launcher: Path
@@ -104,43 +107,53 @@ def download_required_models(app_home: Path, progress: Callable[[str], None] | N
     config = load_config(app_home=app_home)
     models_dir = app_home / "models"
     models_dir.mkdir(parents=True, exist_ok=True)
-    backend = (config.local_llm_backend or infer_local_llm_backend(config.local_llm_model)).strip().lower()
-    if backend == "ollama":
-        resolved_model = resolve_ollama_model_id(config.local_llm_model)
+    requested_models = _configured_local_models(config)
+    backends = {
+        backend: models
+        for backend, models in _group_models_by_backend(requested_models, default_backend=config.local_llm_backend).items()
+        if models
+    }
+    if "ollama" in backends:
         provision_managed_runtime(app_home, progress=progress)
-        ensure_model_available(
-            app_home,
-            config.local_llm_endpoint,
-            resolved_model,
-            progress=progress,
-            timeout_seconds=1800.0,
-        )
-        _write_runtime_manifest(models_dir, backend=backend, model=resolved_model)
-        return models_dir
-    if backend in {"transformers", "huggingface"}:
+        for model in backends["ollama"]:
+            ensure_model_available(
+                app_home,
+                config.local_llm_endpoint,
+                model,
+                progress=progress,
+                timeout_seconds=1800.0,
+            )
+    if any(backend in {"transformers", "huggingface"} for backend in backends):
         try:
             from huggingface_hub import snapshot_download
             from huggingface_hub.errors import GatedRepoError, HfHubHTTPError, RepositoryNotFoundError
         except ImportError as exc:  # pragma: no cover
             raise RuntimeError("huggingface_hub is required to bootstrap the local model bundle") from exc
 
-        model_ids = [config.local_llm_model]
-        for model_id in model_ids:
+        for model_id in backends.get("transformers", []) + backends.get("huggingface", []):
             repo_id = resolve_model_repo_id(model_id)
             target_dir = models_dir / sanitize_model_id(repo_id)
             try:
                 snapshot_download(repo_id=repo_id, local_dir=target_dir, local_dir_use_symlinks=False)
             except (RepositoryNotFoundError, GatedRepoError, HfHubHTTPError) as exc:
                 raise RuntimeError(_format_model_download_error(app_home, model_id, repo_id, exc)) from exc
-        _write_runtime_manifest(models_dir, backend=backend, model=config.local_llm_model)
-        return models_dir
-    raise RuntimeError(f"Unsupported local_llm_backend '{config.local_llm_backend}'")
+    unsupported = [backend for backend in backends if backend not in {"ollama", "transformers", "huggingface"}]
+    if unsupported:
+        raise RuntimeError(f"Unsupported local_llm_backend '{', '.join(unsupported)}'")
+    _write_runtime_manifest(
+        models_dir,
+        backend=config.local_llm_backend,
+        model=config.local_llm_model,
+        light_model=config.local_llm_light_model,
+    )
+    return models_dir
 
 
-def _write_runtime_manifest(models_dir: Path, *, backend: str, model: str) -> None:
+def _write_runtime_manifest(models_dir: Path, *, backend: str, model: str, light_model: str) -> None:
     payload = {
         "local_llm_backend": backend,
         "local_llm_model": model,
+        "local_llm_light_model": light_model,
     }
     (models_dir / "local_llm_manifest.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
@@ -160,6 +173,7 @@ def _migrate_legacy_local_llm_defaults(settings_path: Path) -> None:
         return
     payload["local_llm_backend"] = "ollama"
     payload["local_llm_model"] = DEFAULT_LOCAL_LLM_REPO_ID
+    payload.setdefault("local_llm_light_model", DEFAULT_LIGHT_LOCAL_LLM_REPO_ID)
     settings_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
@@ -222,6 +236,7 @@ def run_setup(
         models_dir=models_dir,
         local_llm_backend=config.local_llm_backend,
         local_llm_model=config.local_llm_model,
+        local_llm_light_model=config.local_llm_light_model,
         bin_dir=bin_dir,
         windows_launcher=windows_launcher,
         posix_launcher=posix_launcher,
@@ -239,6 +254,7 @@ def render_summary(result: SetupResult) -> str:
         f"- Models directory: {result.models_dir}",
         f"- Local LLM backend: {result.local_llm_backend}",
         f"- Local LLM model: {result.local_llm_model}",
+        f"- Light local LLM model: {result.local_llm_light_model}",
         f"- Bin directory: {result.bin_dir}",
         f"- Windows launcher: {result.windows_launcher}",
         f"- POSIX launcher: {result.posix_launcher}",
@@ -271,3 +287,24 @@ def _format_model_download_error(app_home: Path, configured_model: str, repo_id:
 
 def _quote_posix_argument(value: str) -> str:
     return "'" + value.replace("'", "'\"'\"'") + "'"
+
+
+def _configured_local_models(config) -> list[str]:
+    models: list[str] = []
+    for model in [config.local_llm_model, config.local_llm_light_model]:
+        candidate = str(model).strip()
+        if not candidate or candidate in models:
+            continue
+        models.append(candidate)
+    return models
+
+
+def _group_models_by_backend(models: list[str], *, default_backend: str) -> dict[str, list[str]]:
+    grouped: dict[str, list[str]] = {}
+    for model in models:
+        backend = infer_local_llm_backend(model, default=default_backend).strip().lower()
+        normalized = resolve_ollama_model_id(model) if backend == "ollama" else model
+        grouped.setdefault(backend, [])
+        if normalized not in grouped[backend]:
+            grouped[backend].append(normalized)
+    return grouped

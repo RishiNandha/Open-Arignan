@@ -103,7 +103,7 @@ def ensure_model_available(
     ensure_service_running(app_home, endpoint, progress=progress)
     if model in list_available_models(endpoint):
         return
-    _emit(progress, "Preparing local model...")
+    _emit(progress, f"Preparing local model ({model})...")
     response = httpx.post(
         endpoint.rstrip("/") + "/api/pull",
         json={"model": model, "stream": False},

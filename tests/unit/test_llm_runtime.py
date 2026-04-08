@@ -49,6 +49,14 @@ def test_create_local_text_generator_uses_ollama_by_default(app_home) -> None:
     assert generator.model_name == "qwen3:4b-q4_K_M"
 
 
+def test_create_local_text_generator_can_override_model(app_home) -> None:
+    generator = create_local_text_generator(AppConfig(app_home=app_home), model_name="qwen3:0.6b")
+
+    assert generator.__class__.__name__ == "OllamaTextGenerator"
+    assert generator.backend_name == "ollama-local"
+    assert generator.model_name == "qwen3:0.6b"
+
+
 def test_ollama_text_generator_posts_chat_request_and_strips_think_blocks(app_home) -> None:
     captured: dict[str, object] = {}
 

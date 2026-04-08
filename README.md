@@ -49,7 +49,7 @@
 
 0. Clone the repo
 1. Run the `python setup.py --app-home <install dir>`. This will:
-   - Download all the models needed
+   - Download all the models needed, including the default local answer model and a lighter fallback answer model
    - Create a **bin directory** folder with executables
    - Print the bin directory for your reference
 2. Add the bin directory folder to your PATH
@@ -184,7 +184,8 @@ Using the Ingestion log, the files are remove, map.md is updated and the vector 
    - Descending down the maps retrieves the knowledge base markdown. (If the markdown is large, headings are treated as individual chunks).
 4. **Reciprocal Rank Fusion**: Chunks that appear in both Qdrant and BM25 are awarded higher score, and the rest are pruned
 5. **Cross-Encoder Reranking**: The chunks are reranked. This removes false positives, and removes irrelevant chunks from the markdown. Default cross-encoder used is `BAAI/bge-reranker-v2-m3` (can be changed in settings.json)
-6. (To implement in future): Adjacent Content Expansion.
+6. **Final Answer Mode**: `ask` can use the default local LLM, a lighter local LLM, deterministic retrieval synthesis, or a raw reranked-context dump via `--answer-mode default|light|none|raw`
+7. (To implement in future): Adjacent Content Expansion.
 
 ### Session Scope
 
@@ -224,11 +225,12 @@ When the chat history is becoming too long:
 4. Load with hat: `arignan load "flename.pdf" --hat psychology`
 5. QnA: `arignan ask "What is JEPA?"`
 6. QnA with hat: `arignan ask "How to use CalibreRC" --hat "IC Design"`
-7. Ingestion Log: `arignan list-loads`
-8. Delete a past ingestion: `arignan delete <load_id>`
-9. Reset context: `arignan reset-session`
-10. Save context: `arignan save-session <path/session_name.json>`
-11. Reload context: `arignan load-session <path/session_name.json>`
+7. Optional answer mode: `arignan ask "What is JEPA?" --answer-mode light`
+8. Ingestion Log: `arignan list-loads`
+9. Delete a past ingestion: `arignan delete <load_id>`
+10. Reset context: `arignan reset-session`
+11. Save context: `arignan save-session <path/session_name.json>`
+12. Reload context: `arignan load-session <path/session_name.json>`
 
 ### For Developers
 

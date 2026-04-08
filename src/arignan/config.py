@@ -6,7 +6,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from arignan.model_registry import DEFAULT_LOCAL_LLM_REPO_ID, infer_local_llm_backend
+from arignan.model_registry import DEFAULT_LIGHT_LOCAL_LLM_REPO_ID, DEFAULT_LOCAL_LLM_REPO_ID, infer_local_llm_backend
 from arignan.paths import resolve_app_home, resolve_settings_path
 
 APP_HOME_ENV = "ARIGNAN_HOME"
@@ -44,6 +44,7 @@ class MarkdownConfig:
 class AppConfig:
     local_llm_backend: str = "ollama"
     local_llm_model: str = DEFAULT_LOCAL_LLM_REPO_ID
+    local_llm_light_model: str = DEFAULT_LIGHT_LOCAL_LLM_REPO_ID
     local_llm_endpoint: str = "http://127.0.0.1:11434"
     local_llm_keep_alive: str = "10m"
     local_llm_timeout_seconds: int = 120

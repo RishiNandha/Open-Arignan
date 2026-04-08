@@ -10,7 +10,7 @@ from arignan.cli import main
 def test_cli_logs_unhandled_exception_to_active_session_log(tmp_path: Path, capsys, monkeypatch) -> None:
     app_home = tmp_path / ".arignan"
 
-    def boom(self, question: str, hat: str = "auto", terminal_pid: int | None = None):
+    def boom(self, question: str, hat: str = "auto", terminal_pid: int | None = None, answer_mode: str = "default"):
         raise RuntimeError("cli boom")
 
     monkeypatch.setattr("arignan.cli.ArignanApp.ask", boom)
