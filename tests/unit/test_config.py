@@ -13,7 +13,9 @@ def test_load_config_uses_defaults_when_settings_missing(app_home: Path) -> None
 
     assert isinstance(config, AppConfig)
     assert config.app_home == app_home.resolve()
-    assert config.local_llm_model == "Qwen/Qwen3-1.7B"
+    assert config.local_llm_backend == "ollama"
+    assert config.local_llm_model == "qwen3:4b-q4_K_M"
+    assert config.local_llm_endpoint == "http://127.0.0.1:11434"
     assert config.embedding_model == "BAAI/bge-base-en-v1.5"
     assert config.chunking.chunk_size == 1500
     assert config.chunking.chunk_overlap == 80
@@ -25,6 +27,7 @@ def test_load_config_merges_nested_overrides(app_home: Path) -> None:
     settings_path.write_text(
         json.dumps(
             {
+                "local_llm_backend": "transformers",
                 "local_llm_model": "custom-llm",
                 "retrieval": {"dense_top_k": 12},
                 "session": {"soft_token_limit": 4096},
@@ -35,6 +38,7 @@ def test_load_config_merges_nested_overrides(app_home: Path) -> None:
 
     config = load_config(app_home=app_home)
 
+    assert config.local_llm_backend == "transformers"
     assert config.local_llm_model == "custom-llm"
     assert config.retrieval.dense_top_k == 12
     assert config.session.soft_token_limit == 4096
@@ -56,6 +60,8 @@ def test_write_default_settings_creates_file(app_home: Path) -> None:
     assert settings_path.exists()
     payload = json.loads(settings_path.read_text(encoding="utf-8"))
     assert payload["app_home"] == str(app_home.resolve())
+    assert payload["local_llm_backend"] == "ollama"
+    assert payload["local_llm_model"] == "qwen3:4b-q4_K_M"
     assert payload["chunking"]["chunk_size"] == 1500
     assert payload["chunking"]["chunk_overlap"] == 80
     assert payload["markdown"]["max_md_length"] == 4000

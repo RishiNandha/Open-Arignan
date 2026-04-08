@@ -4,7 +4,7 @@ from pathlib import Path
 
 from arignan.markdown import compose_topic_markdown
 from arignan.markdown.rendering import compose_topic_markdown as compose_topic_markdown_rendering
-from arignan.model_registry import resolve_model_storage_dir
+from arignan.model_registry import infer_local_llm_backend, resolve_model_storage_dir, resolve_ollama_model_id
 
 
 def test_markdown_package_exports_rendering_helpers() -> None:
@@ -13,3 +13,9 @@ def test_markdown_package_exports_rendering_helpers() -> None:
 
 def test_resolve_model_storage_dir_uses_resolved_repo_id(tmp_path: Path) -> None:
     assert resolve_model_storage_dir(tmp_path, "Qwen3-1.7B") == tmp_path / "models" / "Qwen__Qwen3-1.7B"
+
+
+def test_model_registry_resolves_ollama_aliases_and_infers_backends() -> None:
+    assert resolve_ollama_model_id("Qwen/Qwen3-1.7B") == "qwen3:4b-q4_K_M"
+    assert infer_local_llm_backend("qwen3:4b-q4_K_M") == "ollama"
+    assert infer_local_llm_backend("Qwen/Qwen3-1.7B") == "transformers"

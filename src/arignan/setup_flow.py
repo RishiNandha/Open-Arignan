@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -9,10 +10,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from arignan.llm.service import ensure_model_available, provision_managed_runtime
 from arignan.model_registry import (
     DEFAULT_LOCAL_LLM_DISPLAY_NAME,
     DEFAULT_LOCAL_LLM_REPO_ID,
-    MODEL_REPO_ALIASES,
+    LEGACY_TRANSFORMERS_LOCAL_LLM_DISPLAY_NAME,
+    LEGACY_TRANSFORMERS_LOCAL_LLM_REPO_ID,
+    infer_local_llm_backend,
+    resolve_ollama_model_id,
     resolve_model_repo_id,
     sanitize_model_id,
 )
@@ -24,6 +29,8 @@ class SetupResult:
     app_home: Path
     settings_path: Path
     models_dir: Path
+    local_llm_backend: str
+    local_llm_model: str
     bin_dir: Path
     windows_launcher: Path
     posix_launcher: Path
@@ -54,16 +61,25 @@ def install_package(root: Path | None = None, dev: bool = False) -> str:
         check=True,
     )
     return target
-def update_local_llm_model(settings_path: Path, local_llm_model: str | None) -> None:
-    if local_llm_model is None:
+def update_local_llm_settings(
+    settings_path: Path,
+    local_llm_backend: str | None,
+    local_llm_model: str | None,
+) -> None:
+    if local_llm_model is None and local_llm_backend is None:
+        _migrate_legacy_local_llm_defaults(settings_path)
         return
     payload = json.loads(settings_path.read_text(encoding="utf-8"))
-    payload["local_llm_model"] = local_llm_model
+    if local_llm_backend is not None:
+        payload["local_llm_backend"] = local_llm_backend
+    if local_llm_model is not None:
+        payload["local_llm_model"] = local_llm_model
     settings_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
 def initialize_local_state(
     app_home: Path | None = None,
+    local_llm_backend: str | None = None,
     local_llm_model: str | None = None,
 ) -> tuple[Path, Path]:
     from arignan.config import write_default_settings
@@ -73,36 +89,78 @@ def initialize_local_state(
     settings_path = write_default_settings(app_home=app_home)
     resolved_home = settings_path.parent.resolve()
     write_persisted_app_home(resolved_home)
-    update_local_llm_model(settings_path, local_llm_model=local_llm_model)
+    update_local_llm_settings(
+        settings_path,
+        local_llm_backend=local_llm_backend,
+        local_llm_model=local_llm_model,
+    )
     layout = StorageLayout.from_home(app_home).ensure()
     return layout.root, settings_path
 
 
-def download_required_models(app_home: Path) -> Path:
+def download_required_models(app_home: Path, progress: Callable[[str], None] | None = None) -> Path:
     from arignan.config import load_config
-
-    try:
-        from huggingface_hub import snapshot_download
-        from huggingface_hub.errors import GatedRepoError, HfHubHTTPError, RepositoryNotFoundError
-    except ImportError as exc:  # pragma: no cover
-        raise RuntimeError("huggingface_hub is required to bootstrap the local model bundle") from exc
 
     config = load_config(app_home=app_home)
     models_dir = app_home / "models"
     models_dir.mkdir(parents=True, exist_ok=True)
-    model_ids = [
-        config.local_llm_model,
-        config.embedding_model,
-        config.reranker_model,
-    ]
-    for model_id in model_ids:
-        repo_id = resolve_model_repo_id(model_id)
-        target_dir = models_dir / sanitize_model_id(repo_id)
+    backend = (config.local_llm_backend or infer_local_llm_backend(config.local_llm_model)).strip().lower()
+    if backend == "ollama":
+        resolved_model = resolve_ollama_model_id(config.local_llm_model)
+        provision_managed_runtime(app_home, progress=progress)
+        ensure_model_available(
+            app_home,
+            config.local_llm_endpoint,
+            resolved_model,
+            progress=progress,
+            timeout_seconds=1800.0,
+        )
+        _write_runtime_manifest(models_dir, backend=backend, model=resolved_model)
+        return models_dir
+    if backend in {"transformers", "huggingface"}:
         try:
-            snapshot_download(repo_id=repo_id, local_dir=target_dir, local_dir_use_symlinks=False)
-        except (RepositoryNotFoundError, GatedRepoError, HfHubHTTPError) as exc:
-            raise RuntimeError(_format_model_download_error(app_home, model_id, repo_id, exc)) from exc
-    return models_dir
+            from huggingface_hub import snapshot_download
+            from huggingface_hub.errors import GatedRepoError, HfHubHTTPError, RepositoryNotFoundError
+        except ImportError as exc:  # pragma: no cover
+            raise RuntimeError("huggingface_hub is required to bootstrap the local model bundle") from exc
+
+        model_ids = [config.local_llm_model]
+        for model_id in model_ids:
+            repo_id = resolve_model_repo_id(model_id)
+            target_dir = models_dir / sanitize_model_id(repo_id)
+            try:
+                snapshot_download(repo_id=repo_id, local_dir=target_dir, local_dir_use_symlinks=False)
+            except (RepositoryNotFoundError, GatedRepoError, HfHubHTTPError) as exc:
+                raise RuntimeError(_format_model_download_error(app_home, model_id, repo_id, exc)) from exc
+        _write_runtime_manifest(models_dir, backend=backend, model=config.local_llm_model)
+        return models_dir
+    raise RuntimeError(f"Unsupported local_llm_backend '{config.local_llm_backend}'")
+
+
+def _write_runtime_manifest(models_dir: Path, *, backend: str, model: str) -> None:
+    payload = {
+        "local_llm_backend": backend,
+        "local_llm_model": model,
+    }
+    (models_dir / "local_llm_manifest.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def _migrate_legacy_local_llm_defaults(settings_path: Path) -> None:
+    payload = json.loads(settings_path.read_text(encoding="utf-8"))
+    current_model = payload.get("local_llm_model")
+    current_backend = payload.get("local_llm_backend")
+    legacy_models = {
+        None,
+        LEGACY_TRANSFORMERS_LOCAL_LLM_DISPLAY_NAME,
+        LEGACY_TRANSFORMERS_LOCAL_LLM_REPO_ID,
+    }
+    if current_backend not in {None, "transformers"}:
+        return
+    if current_model not in legacy_models:
+        return
+    payload["local_llm_backend"] = "ollama"
+    payload["local_llm_model"] = DEFAULT_LOCAL_LLM_REPO_ID
+    settings_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
 def create_launchers(root: Path | None = None, app_home: Path | None = None) -> tuple[Path, Path, Path]:
@@ -134,6 +192,7 @@ def create_launchers(root: Path | None = None, app_home: Path | None = None) -> 
 def run_setup(
     dev: bool = False,
     app_home: Path | None = None,
+    llm_backend: str | None = None,
     llm_model: str | None = None,
     progress: Callable[[str], None] | None = None,
 ) -> SetupResult:
@@ -142,18 +201,27 @@ def run_setup(
     _emit(progress, "[1/4] Installing Python package...")
     target = install_package(root=root, dev=dev)
     _emit(progress, "[2/4] Initializing local Arignan state...")
-    resolved_home, settings_path = initialize_local_state(app_home=app_home, local_llm_model=llm_model)
+    resolved_home, settings_path = initialize_local_state(
+        app_home=app_home,
+        local_llm_backend=llm_backend,
+        local_llm_model=llm_model,
+    )
     _emit(progress, "[3/4] Downloading required models...")
-    models_dir = download_required_models(resolved_home)
+    models_dir = download_required_models(resolved_home, progress=progress)
     _emit(progress, "[4/4] Creating CLI launchers...")
     pinned_app_home = resolved_home if app_home is not None else None
     bin_dir, windows_launcher, posix_launcher = create_launchers(root=root, app_home=pinned_app_home)
+    from arignan.config import load_config
+
+    config = load_config(app_home=resolved_home)
     _emit(progress, "[done] Setup steps completed.")
     return SetupResult(
         install_target=target,
         app_home=resolved_home,
         settings_path=settings_path,
         models_dir=models_dir,
+        local_llm_backend=config.local_llm_backend,
+        local_llm_model=config.local_llm_model,
         bin_dir=bin_dir,
         windows_launcher=windows_launcher,
         posix_launcher=posix_launcher,
@@ -169,6 +237,8 @@ def render_summary(result: SetupResult) -> str:
         f"- App home: {result.app_home}",
         f"- Settings: {result.settings_path}",
         f"- Models directory: {result.models_dir}",
+        f"- Local LLM backend: {result.local_llm_backend}",
+        f"- Local LLM model: {result.local_llm_model}",
         f"- Bin directory: {result.bin_dir}",
         f"- Windows launcher: {result.windows_launcher}",
         f"- POSIX launcher: {result.posix_launcher}",

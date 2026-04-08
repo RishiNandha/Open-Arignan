@@ -14,7 +14,7 @@ from arignan.config import AppConfig
 from arignan.grouping import GroupingDecision, GroupingPlan, GroupingPlanner, estimate_markdown_length
 from arignan.indexing import Chunker, DenseIndexer, HashingEmbedder, LexicalIndex, LexicalIndexer, LocalDenseIndex, tokenize
 from arignan.ingestion import IngestionLog, IngestionService
-from arignan.llm import TransformersTextGenerator
+from arignan.llm import create_local_text_generator
 from arignan.markdown import MarkdownRepository
 from arignan.markdown.writer import HeuristicArtifactWriter, LLMArtifactWriter
 from arignan.models import ChunkRecord, LoadEvent, LoadOperation, ParsedDocument, RetrievalHit
@@ -109,7 +109,7 @@ class ArignanApp:
         self.exception_logger = SessionExceptionLogger(self.session_manager.store, self.terminal_pid)
         self.trace_collector = ModelTraceCollector()
         artifact_writer = LLMArtifactWriter(
-            generator=TransformersTextGenerator(config),
+            generator=create_local_text_generator(config, progress_sink=self.progress_sink),
             fallback=HeuristicArtifactWriter(),
             trace_sink=self.trace_collector,
             progress_sink=self.progress_sink,

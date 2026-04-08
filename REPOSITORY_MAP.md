@@ -15,9 +15,10 @@ This file is a fast orientation guide for agents that need to patch the reposito
 
 Important current reality:
 
-- setup downloads model artifacts and runtime uses the local text model for markdown artifacts
+- setup provisions a managed local text-model runtime and runtime uses it for markdown artifacts
 - `ask` answer generation is still deterministic
-- the default local text model is `Qwen/Qwen3-1.7B`
+- the default local text model is `qwen3:4b-q4_K_M`
+- on Windows, setup bundles the local model runtime inside the app-home so users do not need a separate install/serve step
 - dense retrieval prefers local Qdrant storage when available and falls back to JSON storage otherwise
 - long-running CLI operations now print progress messages to `stderr`
 - swallowed LLM failures now write full tracebacks to a session-local `exceptions.log`
@@ -61,7 +62,7 @@ Flow:
 2. `src/arignan/setup_flow.py:run_setup`
 3. package install
 4. app-home initialization
-5. model download
+5. managed local-runtime provisioning
 6. `bin/` launcher creation
 
 Packaging note:
@@ -119,12 +120,16 @@ Implemented MCP surface:
 - `src/arignan/config.py`
   - owns `AppConfig`
   - writes and loads `settings.json`
+  - defaults the local markdown-generation backend to the managed local runtime
+  - infers `local_llm_backend` for older settings files that only stored a model string
   - enforces that `embedding_model` is fixed and cannot be overridden in settings
 - `src/arignan/paths.py`
   - resolves app home and settings paths
   - supports explicit `--app-home`, `ARIGNAN_HOME`, persisted app-home pointer, then fallback `~/.arignan`
 - `src/arignan/model_registry.py`
   - shared model alias resolution
+  - local-LLM backend inference for config migration
+  - local-runtime model-tag normalization for the default markdown-generation path
   - model-id sanitization
   - model storage directory derivation
   - this is the shared source used by setup and runtime loading
@@ -186,8 +191,16 @@ Implemented MCP surface:
   - progress reporting for LLM calls
   - session-local traceback logging for swallowed LLM failures
 - `src/arignan/llm/runtime.py`
-  - loads the configured local text model from `<app_home>/models`
-  - provides the transformers-based local generation adapter
+  - provides the managed local generation adapter used by default for markdown artifacts
+  - still contains an explicit transformers runtime path for non-default/back-compat use
+  - strips reasoning blocks from managed-runtime output before markdown validation
+- `src/arignan/llm/service.py`
+  - provisions the managed local runtime bundle during setup
+  - auto-starts the local runtime in the background on first use
+  - pulls the configured local model into `<app_home>/models`
+- `src/arignan/runtime_env.py`
+  - forces Arignan's process into the text-only Transformers path
+  - disables TensorFlow and Flax backends so local LLM calls do not drift into unused backend imports
 
 Topic folder invariant:
 
@@ -340,13 +353,15 @@ Touch:
 ## Key Invariants
 
 - `local_llm_model` is configurable; `embedding_model` is not
+- `local_llm_backend` defaults to `ollama`, but normal user setup hides that implementation detail behind the managed runtime flow
 - app home defaults to `~/.arignan`
 - `--hat` defaults to `auto`
 - persisted hat names cannot be `auto`
 - grouped topic state is tracked through `.topic_manifest.json`
 - deleting a grouped load should regenerate surviving grouped markdown, not blindly delete the topic
 - `map.md` and `global_map.md` are regenerated from manifests
-- setup downloads models into `<app_home>/models`
+- setup provisions the managed local runtime and writes a local runtime manifest into `<app_home>/models`
+- Arignan force-disables TensorFlow and Flax backends for its local text runtime
 - active session exceptions are logged to `<app_home>/sessions/active/pid-<pid>/exceptions.log`
 - `load` and grouped delete/regeneration should avoid redundant map/global-map refreshes inside inner loops
 

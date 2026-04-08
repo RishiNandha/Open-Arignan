@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from arignan.model_registry import DEFAULT_LOCAL_LLM_REPO_ID, infer_local_llm_backend
 from arignan.paths import resolve_app_home, resolve_settings_path
 
 APP_HOME_ENV = "ARIGNAN_HOME"
@@ -41,7 +42,11 @@ class MarkdownConfig:
 
 @dataclass(slots=True)
 class AppConfig:
-    local_llm_model: str = "Qwen/Qwen3-1.7B"
+    local_llm_backend: str = "ollama"
+    local_llm_model: str = DEFAULT_LOCAL_LLM_REPO_ID
+    local_llm_endpoint: str = "http://127.0.0.1:11434"
+    local_llm_keep_alive: str = "10m"
+    local_llm_timeout_seconds: int = 120
     embedding_model: str = "BAAI/bge-base-en-v1.5"
     reranker_model: str = "BAAI/bge-reranker-v2-m3"
     default_hat: str = "default"
@@ -91,6 +96,9 @@ def load_config(
     raw = _load_json(resolved_settings)
     if not raw:
         return config
+
+    if "local_llm_backend" not in raw:
+        raw["local_llm_backend"] = infer_local_llm_backend(raw.get("local_llm_model"), default=config.local_llm_backend)
 
     if "embedding_model" in raw and raw["embedding_model"] != config.embedding_model:
         raise ValueError("embedding_model is fixed at build time and cannot be overridden in settings.json")

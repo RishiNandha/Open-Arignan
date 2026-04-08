@@ -39,6 +39,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dev", action="store_true", help="Install the repository with dev dependencies.")
     parser.add_argument("--app-home", type=Path, default=None, help="Override the Arignan application home directory.")
     parser.add_argument(
+        "--llm-backend",
+        default=None,
+        help="Override local_llm_backend in settings.json before model downloads begin.",
+    )
+    parser.add_argument(
         "--llm-model",
         default=None,
         help="Override local_llm_model in settings.json before model downloads begin.",
@@ -58,7 +63,13 @@ def main() -> int:
     args = build_parser().parse_args()
     print("Starting Arignan setup...")
     try:
-        result = run_setup(dev=args.dev, app_home=args.app_home, llm_model=args.llm_model, progress=print)
+        result = run_setup(
+            dev=args.dev,
+            app_home=args.app_home,
+            llm_backend=args.llm_backend,
+            llm_model=args.llm_model,
+            progress=print,
+        )
     except Exception as exc:
         print(f"[error] {exc}", file=sys.stderr)
         return 1

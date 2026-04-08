@@ -76,7 +76,7 @@ def test_resolve_local_model_source_prefers_downloaded_model_dir(tmp_path: Path)
     app_home = tmp_path / ".arignan"
     model_dir = app_home / "models" / sanitize_model_id("Qwen/Qwen3-1.7B")
     model_dir.mkdir(parents=True)
-    config = AppConfig(app_home=app_home)
+    config = AppConfig(app_home=app_home, local_llm_backend="transformers", local_llm_model="Qwen/Qwen3-1.7B")
 
     source = resolve_local_model_source(config)
 
