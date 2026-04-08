@@ -332,6 +332,7 @@ Use a neutral, reference-style voice like a concise internal wiki page.
 Prefer definition-first lead sentences, compact explanatory paragraphs, and crisp bullets.
 Write each page as a durable lookup surface for later LLM retrieval, not as a compressed abstract.
 Make conceptual relationships, adjacent ideas, and source-to-source connections easy to scan.
+Treat summary.md as the main article page in a compiled wiki, not as an ingestion report.
 When sources are grouped, rewrite them into one coherent article rather than a pile of per-source mini-summaries."""
 
 HAT_MAP_SYSTEM_PROMPT = """You write concise lookup-table markdown for a knowledge-base hat map.
@@ -348,7 +349,9 @@ Do not add prose paragraphs before or after the table."""
 def _build_topic_prompt(documents: list[ParsedDocument], plan: GroupingPlan, fallback: TopicRender) -> str:
     related_threads = topic_related_threads(documents, limit=4)
     lines = [
-        "Task: write a clean wiki-style knowledge-base page for the topic below.",
+        "Task: write summary.md for a compiled local research wiki.",
+        "summary.md is the main article page for this topic, not a dump of extracted notes.",
+        "The directory will also contain a lighter topic index file, so summary.md should focus on being the actual article a person or LLM would read first.",
         "The page should act like a rich lookup article for future retrieval, not just a short summary.",
         "When multiple sources are grouped, draw clear lines between adjacent ideas, complementary angles, and recurring themes.",
         "Write it as one coherent topic page that helps a future reader or LLM quickly orient, retrieve, and connect ideas.",
@@ -379,6 +382,8 @@ def _build_topic_prompt(documents: list[ParsedDocument], plan: GroupingPlan, fal
         "- Make the markdown useful as a future lookup page for an LLM that will retrieve this topic later",
         "- If several sources are grouped, explain how they fit together instead of summarizing each source in isolation",
         "- Make each section feel like a stable reference entry, not reading notes or extracted chunks",
+        "- Prefer crisp noun phrases and conceptual framing that make later retrieval easier",
+        "- Make the article feel like one node in a larger wiki of related topics",
         "- Prefer declarative sentences over promotional or first-person phrasing",
         "- Do not paste raw chunks or long quotations",
         "- Do not mention page numbers unless they are semantically important",
@@ -389,6 +394,7 @@ def _build_topic_prompt(documents: list[ParsedDocument], plan: GroupingPlan, fal
         "- Do not sound like an extraction pipeline or a paper abstract pasted verbatim",
         "- Do not write one bullet per source file when the topic is clearly unified",
         "- Do not produce fragmented bullets where a paragraph would be clearer",
+        "- Do not make summary.md look like a directory listing; that belongs in the topic index file",
         "",
         "Example of a good summary_markdown shape:",
         "# Temporal Sparse Attention",

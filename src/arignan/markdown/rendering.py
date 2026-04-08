@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from collections import Counter
 
-from arignan.grouping import GroupingPlan, slugify
+from arignan.grouping import GroupingDecision, GroupingPlan, slugify
 from arignan.models import DocumentSection, ParsedDocument
 
 STOPWORDS = {
@@ -177,6 +177,69 @@ def compose_topic_markdown(documents: list[ParsedDocument], plan: GroupingPlan) 
         lines.append("## Keywords")
         lines.append(", ".join(keywords))
         lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def compose_topic_index_markdown(
+    documents: list[ParsedDocument],
+    plan: GroupingPlan,
+    *,
+    title: str | None = None,
+    locator: str | None = None,
+    keywords: list[str] | None = None,
+) -> str:
+    resolved_title = title or display_topic_title(plan.topic_folder, documents)
+    resolved_locator = locator or compose_topic_locator(documents)
+    resolved_keywords = keywords or derive_keywords(documents)
+    lines = [f"# Topic Index: {resolved_title}", ""]
+    lines.append("## Quick Lookup")
+    lines.append(f"- Topic folder: `{plan.topic_folder}`")
+    if resolved_locator:
+        lines.append(f"- Scope: {resolved_locator}")
+    lines.append(f"- Source count: {len(documents)}")
+    if plan.decision is GroupingDecision.SEGMENT and plan.segments:
+        lines.append(f"- Segment count: {len(plan.segments)}")
+    else:
+        lines.append(f"- Main article: {_wiki_link('summary.md')}")
+    lines.append("")
+
+    if resolved_keywords:
+        lines.append("## Retrieval Cues")
+        for keyword in resolved_keywords[:8]:
+            lines.append(f"- {keyword}")
+        lines.append("")
+
+    related_threads = topic_related_threads(documents, limit=5)
+    if related_threads:
+        lines.append("## Connections")
+        for thread in related_threads:
+            lines.append(f"- {thread}")
+        lines.append("")
+
+    if plan.decision is GroupingDecision.SEGMENT and plan.segments:
+        lines.append("## Segment Guide")
+        for index, segment in enumerate(plan.segments, start=1):
+            filename = f"{index:02d}-{segment.slug}.md"
+            lines.append(f"- {_wiki_link(filename)}: {segment.title}")
+        lines.append("")
+
+    lines.append("## Source Coverage")
+    lines.append("| Source | Contribution | File |")
+    lines.append("| --- | --- | --- |")
+    for document in documents:
+        source_ref = document.source.local_path.name if document.source.local_path else document.source.source_uri
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    markdown_table_cell(document.source.title or source_name(document)),
+                    markdown_table_cell(compose_document_summary(document)),
+                    f"`{source_ref}`",
+                ]
+            )
+            + " |"
+        )
+    lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -474,6 +537,11 @@ def document_outline(document: ParsedDocument) -> str:
 
 def source_name(document: ParsedDocument) -> str:
     return document.source.local_path.name if document.source.local_path else document.source.source_uri
+
+
+def _wiki_link(filename: str) -> str:
+    stem = filename.rsplit(".", maxsplit=1)[0]
+    return f"[[{stem}]]"
 
 
 def summarize_sentences(sentences: list[str], limit: int) -> list[str]:
@@ -781,6 +849,7 @@ __all__ = [
     "clean_source_text",
     "collect_semantic_headings",
     "compose_key_point",
+    "compose_topic_index_markdown",
     "compose_segment_markdown",
     "compose_topic_locator",
     "compose_topic_markdown",

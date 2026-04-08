@@ -78,15 +78,15 @@ class MapRetriever:
         markdown_paths = [hat_layout.map_path]
         markdown_paths.extend(
             path
-            for path in hat_layout.summaries_dir.glob("*/markdown_tree/**/*.md")
+            for topic_dir in hat_layout.summaries_dir.iterdir()
+            if topic_dir.is_dir()
+            for path in topic_dir.glob("*.md")
             if path.name != "map.md"
         )
 
         for path in markdown_paths:
             if path == hat_layout.map_path:
                 topic_folder = None
-            elif path.parent.name == "markdown_tree":
-                topic_folder = path.parent.parent.name
             else:
                 topic_folder = path.parent.name
             sections = split_markdown_sections(path.read_text(encoding="utf-8"))

@@ -25,7 +25,10 @@ class RetrievalConfig:
     map_top_k: int = 8
     fused_top_k: int = 20
     rerank_top_k: int = 14
-    answer_context_top_k: int = 8
+    answer_context_top_k_default: int = 10
+    answer_context_top_k_light: int = 8
+    answer_context_top_k_none: int = 10
+    answer_context_top_k_raw: int = 10
 
 
 @dataclass(slots=True)

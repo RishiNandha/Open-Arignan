@@ -151,12 +151,18 @@ class MarkdownRepository:
         topic_dir.mkdir(parents=True, exist_ok=True)
         original_files_dir = topic_dir / "original_files"
         original_files_dir.mkdir(parents=True, exist_ok=True)
-        markdown_tree_dir = topic_dir / "markdown_tree"
-        markdown_tree_dir.mkdir(parents=True, exist_ok=True)
 
         source_paths = self._write_sources(original_files_dir, documents)
         rendered_topic = self.artifact_writer.render_topic(documents, plan)
-        markdown_paths = self._write_markdowns(markdown_tree_dir, documents, plan, rendered_topic.summary_markdown)
+        markdown_paths = self._write_markdowns(topic_dir, documents, plan, rendered_topic.summary_markdown)
+        support_paths = self._write_support_markdowns(
+            topic_dir,
+            documents,
+            plan,
+            title=rendered_topic.title,
+            locator=rendered_topic.locator,
+            keywords=rendered_topic.keywords,
+        )
         keywords = rendered_topic.keywords or derive_keywords(documents)
         artifact = TopicArtifact(
             hat=hat,
@@ -174,6 +180,7 @@ class MarkdownRepository:
             plan,
             title=rendered_topic.title,
             locator=rendered_topic.locator,
+            support_paths=support_paths,
         )
         if refresh_maps:
             self.update_hat_map(layout, hat)
@@ -253,29 +260,52 @@ class MarkdownRepository:
 
     def _write_markdowns(
         self,
-        markdown_tree_dir: Path,
+        topic_dir: Path,
         documents: list[ParsedDocument],
         plan: GroupingPlan,
         summary_markdown: str,
     ) -> list[Path]:
         if plan.decision is GroupingDecision.SEGMENT and len(documents) == 1 and plan.segments:
-            return self._write_segmented_markdowns(markdown_tree_dir, documents[0], plan)
-        summary_path = markdown_tree_dir / "summary.md"
+            return self._write_segmented_markdowns(topic_dir, documents[0], plan)
+        summary_path = topic_dir / "summary.md"
         summary_path.write_text(summary_markdown, encoding="utf-8")
         return [summary_path]
 
     def _write_segmented_markdowns(
         self,
-        markdown_tree_dir: Path,
+        topic_dir: Path,
         document: ParsedDocument,
         plan: GroupingPlan,
     ) -> list[Path]:
         written: list[Path] = []
         for index, segment in enumerate(plan.segments, start=1):
-            path = markdown_tree_dir / f"{index:02d}-{segment.slug}.md"
+            path = topic_dir / f"{index:02d}-{segment.slug}.md"
             path.write_text(compose_segment_markdown(document, segment.section_indices, segment.title), encoding="utf-8")
             written.append(path)
         return written
+
+    def _write_support_markdowns(
+        self,
+        topic_dir: Path,
+        documents: list[ParsedDocument],
+        plan: GroupingPlan,
+        *,
+        title: str,
+        locator: str,
+        keywords: list[str],
+    ) -> list[Path]:
+        topic_index_path = topic_dir / "topic_index.md"
+        topic_index_path.write_text(
+            compose_topic_index_markdown(
+                documents,
+                plan,
+                title=title,
+                locator=locator,
+                keywords=keywords,
+            ),
+            encoding="utf-8",
+        )
+        return [topic_index_path]
 
     def _write_manifest(
         self,
@@ -286,11 +316,13 @@ class MarkdownRepository:
         plan: GroupingPlan,
         title: str,
         locator: str,
+        support_paths: list[Path],
     ) -> Path:
         payload = artifact.to_dict()
         payload["description"] = description
         payload["title"] = title
         payload["locator"] = locator
+        payload["support_markdown_paths"] = [str(path) for path in support_paths]
         payload["documents"] = [document.to_dict() for document in documents]
         payload["decision"] = plan.decision.value
         manifest_path = topic_dir / ".topic_manifest.json"
@@ -935,6 +967,7 @@ def _keyword_overlap_key(term: str) -> str:
 
 # Shared deterministic rendering now resolves through the dedicated rendering module.
 compose_topic_markdown = _rendering.compose_topic_markdown
+compose_topic_index_markdown = _rendering.compose_topic_index_markdown
 compose_segment_markdown = _rendering.compose_segment_markdown
 describe_documents = _rendering.describe_documents
 summarize_text = _rendering.summarize_text

@@ -6,6 +6,7 @@ from typing import Callable, Protocol
 
 import httpx
 
+from arignan.compute import preferred_torch_device
 from arignan.config import AppConfig
 from arignan.llm.service import ensure_model_available
 from arignan.model_registry import (
@@ -170,15 +171,30 @@ class TransformersTextGenerator:
             tokenizer.pad_token_id = tokenizer.eos_token_id
 
         model = None
-        model_load_attempts = [
-            {"torch_dtype": "auto", "device_map": "auto", "low_cpu_mem_usage": True},
-            {"torch_dtype": "auto", "low_cpu_mem_usage": True},
-            {},
-        ]
+        preferred_device = preferred_torch_device()
+        model_load_attempts = []
+        if preferred_device == "cuda":
+            model_load_attempts.append(
+                {
+                    "dtype": "auto",
+                    "low_cpu_mem_usage": True,
+                    "__move_to_device__": "cuda",
+                }
+            )
+            model_load_attempts.append({"dtype": "auto", "device_map": "auto", "low_cpu_mem_usage": True})
+        model_load_attempts.extend(
+            [
+                {"dtype": "auto", "low_cpu_mem_usage": True},
+                {},
+            ]
+        )
         last_error: Exception | None = None
         for extra_kwargs in model_load_attempts:
             try:
+                move_to_device = extra_kwargs.pop("__move_to_device__", None)
                 model = AutoModelForCausalLM.from_pretrained(source, **load_kwargs, **extra_kwargs)
+                if move_to_device is not None and hasattr(model, "to"):
+                    model = model.to(move_to_device)
                 break
             except Exception as exc:  # pragma: no cover - depends on local runtime
                 last_error = exc

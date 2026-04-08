@@ -14,10 +14,8 @@ from urllib.parse import urlparse
 from arignan.config import AppConfig
 from arignan.grouping import (
     GroupingDecision,
-    GroupingHint,
     GroupingPlan,
     GroupingPlanner,
-    MergeCandidate,
     derive_topic_folder,
     estimate_markdown_length,
 )
@@ -43,6 +41,27 @@ class LoadDocumentTrace:
     markdown_segment_count: int
     rationale: list[str]
     segment_titles: list[str]
+
+
+@dataclass(slots=True)
+class TopicGroupingRecord:
+    topic_folder: str
+    title: str
+    locator: str
+    description: str
+    keywords: list[str]
+    summary_excerpt: str
+    source_count: int
+    estimated_length: int
+    current_load: bool
+
+
+@dataclass(slots=True)
+class GroupingRecommendation:
+    members: list[str]
+    target_topic_folder: str
+    confidence: float
+    rationale: str
 
 
 @dataclass(slots=True)
@@ -289,7 +308,7 @@ class ArignanApp:
             question,
             answer_hits,
             answer_mode=answer_mode,
-            context_limit=self.config.retrieval.answer_context_top_k,
+            context_limit=self._answer_context_limit(answer_mode),
             expanded_query=bundle.expanded_query,
             selected_hat=bundle.selected_hat,
             default_generator=self.local_text_generator,
@@ -476,155 +495,97 @@ class ArignanApp:
         payload = json.loads(manifest_path.read_text(encoding="utf-8"))
         return [ParsedDocument.from_dict(item) for item in payload.get("documents", [])]
 
-    def _topic_merge_candidates(
-        self,
-        hat: str,
-        document: ParsedDocument,
-        related_hits: list[RetrievalHit],
-    ) -> list[MergeCandidate]:
-        candidates: dict[str, MergeCandidate] = {}
-        for hit in related_hits:
-            topic_folder = hit.metadata.topic_folder
-            if not topic_folder or hit.metadata.source_uri == document.source.source_uri:
-                continue
-            candidate = candidates.setdefault(
-                topic_folder,
-                MergeCandidate(topic_folder=topic_folder, score=0.0, length_estimate=0),
-            )
-            candidate.score += hit.score
-            candidate.length_estimate = max(
-                candidate.length_estimate,
-                int(hit.extras.get("topic_length_estimate", estimate_markdown_length(hit.text))),
-            )
-            candidate.related_chunk_ids.append(hit.chunk_id)
-
-        doc_keywords = derive_keywords([document], limit=8)
-        doc_headings = [
-            section.heading.strip()
-            for section in document.sections
-            if section.heading and not re.fullmatch(r"page\s+\d+", section.heading.strip(), flags=re.IGNORECASE)
-        ][:8]
-        doc_text = " ".join(
-            part
-            for part in [
-                document.source.title or "",
-                " ".join(doc_keywords),
-                " ".join(doc_headings),
-                document.full_text[:1800],
-            ]
-            if part.strip()
-        )
-        normalized_doc_text = " ".join(doc_text.lower().split())
-        doc_terms = set(tokenize(doc_text))
-
+    def _collect_grouping_topics(self, hat: str, load_id: str) -> list[TopicGroupingRecord]:
+        topics: list[TopicGroupingRecord] = []
         for manifest_path in sorted(self.layout.hat(hat).summaries_dir.glob("*/.topic_manifest.json")):
             payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-            topic_folder = payload["topic_folder"]
             documents = [ParsedDocument.from_dict(item) for item in payload.get("documents", [])]
-            if any(item.source.source_uri == document.source.source_uri for item in documents):
-                continue
-            title = payload.get("title") or topic_folder.replace("-", " ")
-            locator = payload.get("locator") or ""
-            description = payload.get("description") or ""
-            keywords = list(payload.get("keywords", []))
-            summary_excerpt = _read_topic_summary_excerpt(manifest_path.parent / "markdown_tree" / "summary.md")
-            topic_text = " ".join([title, locator, description, summary_excerpt, " ".join(keywords)])
-            topic_terms = set(tokenize(topic_text))
-            shared_terms = doc_terms & topic_terms
-            title_overlap = len(set(tokenize(title)) & doc_terms)
-            keyword_matches = sum(
-                1
-                for keyword in keywords
-                if keyword.strip() and _phrase_in_text(keyword, normalized_doc_text)
+            title = str(payload.get("title") or payload["topic_folder"].replace("-", " ")).strip()
+            locator = str(payload.get("locator") or "").strip()
+            description = str(payload.get("description") or "").strip()
+            keywords = [str(item).strip() for item in payload.get("keywords", []) if str(item).strip()]
+            topic_dir = manifest_path.parent
+            summary_excerpt = _read_topic_summary_excerpt(topic_dir / "summary.md")
+            if not summary_excerpt:
+                summary_excerpt = _read_topic_summary_excerpt(topic_dir / "topic_index.md")
+            estimated_length = sum(estimate_markdown_length(document.full_text) for document in documents)
+            topics.append(
+                TopicGroupingRecord(
+                    topic_folder=payload["topic_folder"],
+                    title=title,
+                    locator=locator,
+                    description=description,
+                    keywords=keywords,
+                    summary_excerpt=summary_excerpt,
+                    source_count=len(documents),
+                    estimated_length=estimated_length,
+                    current_load=any(document.load_id == load_id for document in documents),
+                )
             )
-            overlap_bonus = min(
-                1.1,
-                (0.08 * len(shared_terms))
-                + (0.26 * keyword_matches)
-                + (0.18 if title_overlap >= 2 else 0.0),
-            )
-            candidate = candidates.setdefault(
-                topic_folder,
-                MergeCandidate(topic_folder=topic_folder, score=0.0, length_estimate=0),
-            )
-            candidate.score += overlap_bonus
-            candidate.length_estimate = max(
-                candidate.length_estimate,
-                sum(estimate_markdown_length(item.full_text) for item in documents) or 0,
-            )
-            candidate.title = title
-            candidate.locator = locator
-            candidate.description = description
-            candidate.keywords = keywords
-            candidate.summary_excerpt = summary_excerpt
-            candidate.source_count = len(documents)
+        return topics
 
-        return sorted(
-            (
-                candidate
-                for candidate in candidates.values()
-                if candidate.length_estimate > 0
-            ),
-            key=lambda item: (item.score, item.source_count, len(item.related_chunk_ids), item.topic_folder),
-            reverse=True,
-        )
-
-    def _grouping_hint(
+    def _grouping_recommendations(
         self,
-        document: ParsedDocument,
-        candidates: list[MergeCandidate],
-        incoming_summary_markdown: str,
-        *,
-        index: int,
-        total: int,
-    ) -> GroupingHint | None:
-        if not candidates:
-            return None
+        hat: str,
+        load_id: str,
+        topics: list[TopicGroupingRecord],
+    ) -> list[GroupingRecommendation]:
+        if len(topics) < 2:
+            return []
+        if not any(topic.current_load for topic in topics):
+            return []
 
-        title = document.source.title or Path(document.source.source_uri).name
         self._emit_progress(
-            f"[{index}/{total}] Reviewing '{title}' against {len(candidates)} existing topic summaries with the light LLM..."
+            f"Reviewing {len(topics)} topic summaries in hat '{hat}' with the light LLM for possible groups..."
         )
-        prompt = _build_grouping_prompt(document, candidates, incoming_summary_markdown)
+        prompt = _build_grouping_review_prompt(hat, topics)
         try:
             raw = self.light_text_generator.generate(
-                system_prompt=GROUPING_SYSTEM_PROMPT,
+                system_prompt=GROUPING_REVIEW_SYSTEM_PROMPT,
                 user_prompt=prompt,
-                max_new_tokens=180,
+                max_new_tokens=500,
                 temperature=0.0,
-                response_format=GROUPING_RESPONSE_FORMAT,
+                response_format=GROUPING_REVIEW_RESPONSE_FORMAT,
             )
-            hint = _parse_grouping_hint(raw, candidates)
+            recommendations = _parse_grouping_review(raw, topics)
         except Exception as exc:
             log_path = self.log_exception(
                 component="llm",
-                task="grouping decision",
+                task="batch grouping review",
                 exc=exc,
-                context={"source_uri": document.source.source_uri, "candidate_count": len(candidates)},
+                context={"hat": hat, "topic_count": len(topics), "load_id": load_id},
             )
             self.trace_collector.record(
                 component="llm",
-                task="grouping decision",
+                task="batch grouping review",
                 model_name=self.light_text_generator.model_name,
                 backend=self.light_text_generator.backend_name,
                 status="fallback",
-                item_count=len(candidates),
-                detail=f"{title} | exception | {log_path.resolve()}",
+                item_count=len(topics),
+                detail=f"{hat} | exception | {log_path.resolve()}",
             )
-            return None
+            return []
 
-        status = "ok" if hint is not None else "fallback"
-        detail = title if hint is None else f"{title} -> {hint.topic_folder} ({hint.confidence:.2f})"
+        if recommendations:
+            preview = "; ".join(
+                f"{', '.join(item.members)} -> {item.target_topic_folder} ({item.confidence:.2f})"
+                for item in recommendations[:3]
+            )
+            self._emit_progress(f"Batch grouping review suggested {len(recommendations)} merge candidate(s): {preview}")
+            detail = f"{hat} | {preview}"
+        else:
+            self._emit_progress("Batch grouping review did not suggest any merge candidates.")
+            detail = f"{hat} | 0 recommendation(s)"
         self.trace_collector.record(
             component="llm",
-            task="grouping decision",
+            task="batch grouping review",
             model_name=self.light_text_generator.model_name,
             backend=self.light_text_generator.backend_name,
-            status=status,
-            item_count=len(candidates),
+            status="ok" if recommendations else "fallback",
+            item_count=len(topics),
             detail=detail,
         )
-        return hint
+        return recommendations
 
     def _normalize_plan(self, plan: GroupingPlan, documents: list[ParsedDocument]) -> GroupingPlan:
         if plan.decision is GroupingDecision.SEGMENT:
@@ -651,57 +612,67 @@ class ArignanApp:
             return topic_folders, [], 0, traces
 
         trace_by_source = {trace.source_uri: trace for trace in traces}
+        topics = self._collect_grouping_topics(hat, load_id)
+        recommendations = self._grouping_recommendations(hat, load_id, topics)
+        applied_topics: set[str] = set()
+        topics_by_folder = {topic.topic_folder: topic for topic in topics}
 
-        for index, topic_folder in enumerate(list(topic_folders), start=1):
-            manifest = self._read_topic_manifest(hat, topic_folder)
-            if manifest is None:
+        for recommendation in recommendations:
+            member_topics = [topic for topic in recommendation.members if topic in topics_by_folder]
+            if len(member_topics) < 2:
                 continue
-            payload, documents = manifest
-            if payload.get("decision") == GroupingDecision.SEGMENT.value:
+            if recommendation.target_topic_folder not in member_topics:
                 continue
-            if not any(document.load_id == load_id for document in documents):
+            if any(topic in applied_topics for topic in member_topics):
+                continue
+            if recommendation.confidence < GROUPING_REVIEW_MIN_CONFIDENCE:
+                continue
+            if not any(topics_by_folder[topic].current_load for topic in member_topics):
                 continue
 
-            current_document = next((document for document in documents if document.load_id == load_id), documents[0])
-            summary_path = self.layout.hat(hat).summaries_dir / topic_folder / "markdown_tree" / "summary.md"
-            incoming_summary_markdown = summary_path.read_text(encoding="utf-8") if summary_path.exists() else ""
-            candidates = self._topic_merge_candidates(hat, current_document, related_hits=[])
-            if not candidates:
+            manifests = [self._read_topic_manifest(hat, topic) for topic in member_topics]
+            if any(item is None for item in manifests):
                 continue
-            hint = self._grouping_hint(
-                current_document,
-                candidates,
-                incoming_summary_markdown,
-                index=index,
-                total=len(topic_folders),
+            payloads_and_docs = [item for item in manifests if item is not None]
+            if any(payload.get("decision") == GroupingDecision.SEGMENT.value for payload, _ in payloads_and_docs):
+                continue
+
+            merged_documents = _merge_documents(
+                [],
+                [document for _, documents in payloads_and_docs for document in documents],
             )
-            if hint is None or hint.topic_folder == topic_folder:
+            estimated_length = sum(estimate_markdown_length(document.full_text) for document in merged_documents)
+            if estimated_length > self.config.markdown.max_md_length:
                 continue
 
-            target_docs = self._existing_topic_documents(hat, hint.topic_folder)
-            if not target_docs:
-                continue
-            merged_documents = _merge_documents(target_docs, documents)
             final_plan = GroupingPlan(
                 decision=GroupingDecision.MERGE,
-                topic_folder=hint.topic_folder,
-                estimated_length=sum(estimate_markdown_length(document.full_text) for document in merged_documents),
-                merge_target_topic=hint.topic_folder,
+                topic_folder=recommendation.target_topic_folder,
+                estimated_length=estimated_length,
+                merge_target_topic=recommendation.target_topic_folder,
                 rationale=[
-                    f"Post-load regrouping merged '{topic_folder}' into '{hint.topic_folder}'.",
-                    hint.rationale or "Light LLM judged the existing topic to be the better conceptual home.",
+                    (
+                        f"Post-load grouping review merged {', '.join(sorted(member_topics))} into "
+                        f"'{recommendation.target_topic_folder}' ({recommendation.confidence:.2f})."
+                    ),
+                    recommendation.rationale,
                 ],
             )
             self._emit_progress(
-                f"[{index}/{len(topic_folders)}] Regrouping topic '{topic_folder}' into '{hint.topic_folder}'..."
+                "Applying grouped merge "
+                f"{', '.join(member_topics)} -> '{recommendation.target_topic_folder}' "
+                f"(confidence {recommendation.confidence:.2f})..."
             )
-            for document in documents:
+            for document in merged_documents:
+                if document.load_id != load_id:
+                    continue
                 trace = trace_by_source.get(document.source.source_uri)
-                if trace is not None:
-                    trace.topic_folder = hint.topic_folder
-                    trace.grouping_decision = GroupingDecision.MERGE.value
-                    trace.markdown_segment_count = 1
-                    trace.rationale = list(dict.fromkeys([*trace.rationale, *final_plan.rationale]))
+                if trace is None:
+                    continue
+                trace.topic_folder = recommendation.target_topic_folder
+                trace.grouping_decision = GroupingDecision.MERGE.value
+                trace.rationale = list(dict.fromkeys([*trace.rationale, *final_plan.rationale]))
+
             self.markdown_repository.regenerate_topic(
                 self.layout,
                 hat=hat,
@@ -709,9 +680,13 @@ class ArignanApp:
                 plan=final_plan,
                 refresh_maps=False,
             )
-            current_topic_dir = self.layout.hat(hat).summaries_dir / topic_folder
-            if current_topic_dir.exists() and topic_folder != hint.topic_folder:
-                shutil.rmtree(current_topic_dir)
+            for topic_folder in member_topics:
+                if topic_folder == recommendation.target_topic_folder:
+                    continue
+                current_topic_dir = self.layout.hat(hat).summaries_dir / topic_folder
+                if current_topic_dir.exists():
+                    shutil.rmtree(current_topic_dir)
+            applied_topics.update(member_topics)
 
         self._reindex_load_topics(hat, load_id)
         final_topic_folders, artifact_paths, total_markdown_segments = self._final_load_artifacts(hat, load_id, traces)
@@ -794,6 +769,16 @@ class ArignanApp:
     def _emit_progress(self, message: str) -> None:
         if self.progress_sink is not None:
             self.progress_sink(message)
+
+    def _answer_context_limit(self, answer_mode: Literal["default", "light", "none", "raw"]) -> int:
+        retrieval = self.config.retrieval
+        if answer_mode == "light":
+            return retrieval.answer_context_top_k_light
+        if answer_mode == "none":
+            return retrieval.answer_context_top_k_none
+        if answer_mode == "raw":
+            return retrieval.answer_context_top_k_raw
+        return retrieval.answer_context_top_k_default
 
     def _handle_load_parse_error(
         self,
@@ -1223,104 +1208,121 @@ def _answer_fallback_message(log_path: Path | None) -> str:
     return f"{message} Log: {log_path.resolve()}"
 
 
-GROUPING_SYSTEM_PROMPT = """You decide whether a newly loaded document should merge into an existing topic folder.
-You are given the incoming topic summary plus the existing topic summaries for the hat.
-Prefer merge when the incoming document belongs to the same broader concept family, subtopic cluster, or line of ideas as an existing folder.
-Avoid creating tiny standalone folders if one listed topic already covers the same conceptual neighborhood.
-Only keep the document standalone when no listed topic is a coherent home for it.
-Return strict JSON only with these keys:
-- "decision": "merge" or "standalone"
-- "topic_folder": the chosen topic folder when decision is "merge", otherwise ""
-- "confidence": number between 0 and 1
-- "rationale": one short sentence"""
+GROUPING_REVIEW_MIN_CONFIDENCE = 0.74
 
 
-GROUPING_RESPONSE_FORMAT = {
+GROUPING_REVIEW_SYSTEM_PROMPT = """You review topic pages inside one local research-wiki hat.
+Each topic already has a compiled wiki-style summary.
+Your task is to suggest topic groups only when the topics clearly belong in one shared wiki page.
+Focus on topics marked as part of the current load, but you may merge them into older topics in the same hat.
+Be conservative:
+- Do not merge just because topics are from the same broad field.
+- Prefer merge only when the topics share a concrete concept neighborhood, line of ideas, or one topic is clearly a subtopic of another.
+- Skip merges that would make the target page unfocused.
+Return strict JSON only with this shape:
+{
+  "recommendations": [
+    {
+      "members": ["topic-a", "topic-b"],
+      "target_topic_folder": "topic-b",
+      "confidence": 0.0,
+      "rationale": "short reason"
+    }
+  ]
+}
+If no merge is warranted, return {"recommendations": []}."""
+
+
+GROUPING_REVIEW_RESPONSE_FORMAT = {
     "type": "object",
     "properties": {
-        "decision": {"type": "string", "enum": ["merge", "standalone"]},
-        "topic_folder": {"type": "string"},
-        "confidence": {"type": "number"},
-        "rationale": {"type": "string"},
+        "recommendations": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "members": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 2,
+                    },
+                    "target_topic_folder": {"type": "string"},
+                    "confidence": {"type": "number"},
+                    "rationale": {"type": "string"},
+                },
+                "required": ["members", "target_topic_folder", "confidence", "rationale"],
+            },
+        }
     },
-    "required": ["decision", "topic_folder", "confidence", "rationale"],
+    "required": ["recommendations"],
 }
 
 
-def _build_grouping_prompt(
-    document: ParsedDocument,
-    candidates: list[MergeCandidate],
-    incoming_summary_markdown: str,
-) -> str:
-    keywords = derive_keywords([document], limit=8)
-    headings = [
-        section.heading.strip()
-        for section in document.sections
-        if section.heading and not re.fullmatch(r"page\s+\d+", section.heading.strip(), flags=re.IGNORECASE)
-    ][:6]
+def _build_grouping_review_prompt(hat: str, topics: list[TopicGroupingRecord]) -> str:
     lines = [
-        "<incoming_document>",
-        f"Title: {document.source.title or Path(document.source.source_uri).name}",
-        f"Keywords: {', '.join(keywords) or 'none'}",
-        f"Headings: {', '.join(headings) or 'none'}",
-        f"Summary: {_truncate_text(' '.join(document.full_text.split()), 700)}",
-        "</incoming_document>",
+        f"Review the topic list for hat '{hat}'.",
+        "Suggest groups only when multiple topics should become one shared wiki page.",
+        "Return only high-signal merge recommendations with confidence scores.",
         "",
-        "<incoming_topic_summary>",
-        _truncate_text(_flatten_markdown_for_grouping(incoming_summary_markdown), 1200) or "none",
-        "</incoming_topic_summary>",
-        "",
-        "<existing_topic_summaries>",
+        "<topic_list>",
     ]
-    for index, candidate in enumerate(candidates, start=1):
+    for index, topic in enumerate(topics, start=1):
         lines.extend(
             [
-                f"<candidate rank=\"{index}\" topic_folder=\"{candidate.topic_folder}\">",
-                f"Title: {candidate.title or candidate.topic_folder}",
-                f"Locator: {candidate.locator or 'n/a'}",
-                f"Keywords: {', '.join(candidate.keywords) or 'none'}",
-                f"Description: {candidate.description or 'n/a'}",
-                f"Summary excerpt: {candidate.summary_excerpt or candidate.description or 'n/a'}",
-                f"Source count: {candidate.source_count}",
-                f"Heuristic score: {candidate.score:.2f}",
-                "</candidate>",
+                f"<topic rank=\"{index}\" topic_folder=\"{topic.topic_folder}\">",
+                f"Current load: {'yes' if topic.current_load else 'no'}",
+                f"Title: {topic.title or topic.topic_folder}",
+                f"Locator: {topic.locator or 'n/a'}",
+                f"Description: {topic.description or 'n/a'}",
+                f"Keywords: {', '.join(topic.keywords) or 'none'}",
+                f"Source count: {topic.source_count}",
+                f"Estimated length: {topic.estimated_length}",
+                f"Summary excerpt: {topic.summary_excerpt or 'n/a'}",
+                "</topic>",
             ]
         )
     lines.extend(
         [
-            "</existing_topic_summaries>",
+            "</topic_list>",
             "",
-            "Choose merge when one existing topic is the best conceptual home for the incoming topic page.",
+            "Only recommend merges that would improve the wiki as a cleaner, richer lookup surface.",
         ]
     )
     return "\n".join(lines)
 
 
-def _parse_grouping_hint(raw: str, candidates: list[MergeCandidate]) -> GroupingHint | None:
+def _parse_grouping_review(raw: str, topics: list[TopicGroupingRecord]) -> list[GroupingRecommendation]:
     normalized = raw.strip()
     fenced = re.match(r"```(?:json)?\s*(.*?)\s*```$", normalized, re.DOTALL)
     if fenced:
         normalized = fenced.group(1).strip()
     payload = json.loads(normalized)
-    if payload.get("decision") != "merge":
-        return None
-    topic_folder = str(payload.get("topic_folder", "")).strip()
-    valid_topics = {candidate.topic_folder for candidate in candidates}
-    if topic_folder not in valid_topics:
-        return None
-    try:
-        confidence = float(payload.get("confidence", 0.0))
-    except (TypeError, ValueError):
-        confidence = 0.0
-    rationale = str(payload.get("rationale", "")).strip()
-    return GroupingHint(topic_folder=topic_folder, confidence=confidence, rationale=rationale)
-
-
-def _phrase_in_text(phrase: str, text: str) -> bool:
-    normalized_phrase = " ".join(phrase.lower().split())
-    if not normalized_phrase:
-        return False
-    return normalized_phrase in text
+    valid_topics = {topic.topic_folder for topic in topics}
+    recommendations: list[GroupingRecommendation] = []
+    for item in payload.get("recommendations", []):
+        if not isinstance(item, dict):
+            continue
+        members = [str(member).strip() for member in item.get("members", []) if str(member).strip()]
+        members = [member for member in members if member in valid_topics]
+        members = list(dict.fromkeys(members))
+        target_topic_folder = str(item.get("target_topic_folder", "")).strip()
+        if len(members) < 2 or target_topic_folder not in members:
+            continue
+        try:
+            confidence = float(item.get("confidence", 0.0))
+        except (TypeError, ValueError):
+            confidence = 0.0
+        rationale = str(item.get("rationale", "")).strip() or "No rationale provided."
+        recommendations.append(
+            GroupingRecommendation(
+                members=members,
+                target_topic_folder=target_topic_folder,
+                confidence=confidence,
+                rationale=rationale,
+            )
+        )
+    recommendations.sort(key=lambda item: item.confidence, reverse=True)
+    return recommendations
 
 
 def _read_topic_summary_excerpt(summary_path: Path) -> str:

@@ -3,7 +3,17 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from arignan.application import ArignanApp, _build_grouping_prompt, _parse_grouping_hint, compose_answer, format_citation, generate_answer, render_raw_hits, synthesize_answer
+from arignan.application import (
+    ArignanApp,
+    TopicGroupingRecord,
+    _build_grouping_review_prompt,
+    _parse_grouping_review,
+    compose_answer,
+    format_citation,
+    generate_answer,
+    render_raw_hits,
+    synthesize_answer,
+)
 from arignan.config import load_config
 from arignan.grouping import GroupingDecision, GroupingPlan
 from arignan.models import ChunkMetadata, DocumentSection, ParsedDocument, RetrievalHit, RetrievalSource, SourceDocument, SourceType
@@ -51,12 +61,12 @@ class FailingGenerator:
         raise RuntimeError(self.message)
 
 
-class GroupingGenerator:
+class GroupingReviewGenerator:
     model_name = "qwen3:0.6b"
     backend_name = "fake-backend"
 
-    def __init__(self, topic_folder: str) -> None:
-        self.topic_folder = topic_folder
+    def __init__(self, target_topic_folder: str) -> None:
+        self.target_topic_folder = target_topic_folder
 
     def generate(
         self,
@@ -69,10 +79,14 @@ class GroupingGenerator:
     ) -> str:
         return json.dumps(
             {
-                "decision": "merge",
-                "topic_folder": self.topic_folder,
-                "confidence": 0.81,
-                "rationale": "same conceptual family",
+                "recommendations": [
+                    {
+                        "members": ["latent-prediction-training", self.target_topic_folder],
+                        "target_topic_folder": self.target_topic_folder,
+                        "confidence": 0.81,
+                        "rationale": "same conceptual family",
+                    }
+                ]
             }
         )
 
@@ -156,20 +170,17 @@ class PostLoadRegroupGenerator:
         if "Title: First Topic" in user_prompt and "Title: Second Topic" in user_prompt:
             return json.dumps(
                 {
-                    "decision": "merge",
-                    "topic_folder": "second-topic",
-                    "confidence": 0.91,
-                    "rationale": "the first topic fits better as part of the second topic page",
+                    "recommendations": [
+                        {
+                            "members": ["first-topic", "second-topic"],
+                            "target_topic_folder": "second-topic",
+                            "confidence": 0.91,
+                            "rationale": "the first topic fits better as part of the second topic page",
+                        }
+                    ]
                 }
             )
-        return json.dumps(
-            {
-                "decision": "standalone",
-                "topic_folder": "",
-                "confidence": 0.25,
-                "rationale": "keep separate",
-            }
-        )
+        return json.dumps({"recommendations": []})
 
 
 def _hit(text: str) -> RetrievalHit:
@@ -334,32 +345,72 @@ def test_compose_answer_supports_raw_mode() -> None:
     assert citations == []
 
 
+def test_application_uses_per_mode_answer_context_limits(app_home: Path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "arignan.application.create_local_text_generator",
+        lambda config, progress_sink=None, **kwargs: ArtifactGenerator(kwargs.get("model_name") or config.local_llm_model),
+    )
+    app = ArignanApp(load_config(app_home=app_home))
+
+    assert app._answer_context_limit("default") == 10
+    assert app._answer_context_limit("light") == 8
+    assert app._answer_context_limit("none") == 10
+    assert app._answer_context_limit("raw") == 10
+
+
 def test_render_raw_hits_handles_empty_inputs() -> None:
     assert render_raw_hits([]) == "No relevant local knowledge was found for that question."
 
 
-def test_parse_grouping_hint_accepts_valid_merge_payload() -> None:
-    hint = _parse_grouping_hint(
+def test_parse_grouping_review_accepts_valid_merge_payload() -> None:
+    recommendations = _parse_grouping_review(
         json.dumps(
             {
-                "decision": "merge",
-                "topic_folder": "jepa",
-                "confidence": 0.72,
-                "rationale": "same ideas",
+                "recommendations": [
+                    {
+                        "members": ["latent-prediction-training", "jepa"],
+                        "target_topic_folder": "jepa",
+                        "confidence": 0.72,
+                        "rationale": "same ideas",
+                    }
+                ]
             }
         ),
-        candidates=[type("Candidate", (), {"topic_folder": "jepa"})()],
+        topics=[
+            TopicGroupingRecord(
+                topic_folder="latent-prediction-training",
+                title="Latent Prediction Training",
+                locator="predictive representation learning note",
+                description="A note on latent prediction training.",
+                keywords=["latent prediction"],
+                summary_excerpt="latent prediction training note",
+                source_count=1,
+                estimated_length=220,
+                current_load=True,
+            ),
+            TopicGroupingRecord(
+                topic_folder="jepa",
+                title="JEPA",
+                locator="predictive representation learning ideas",
+                description="Notes on JEPA.",
+                keywords=["JEPA"],
+                summary_excerpt="predictive representation learning ideas",
+                source_count=1,
+                estimated_length=220,
+                current_load=False,
+            ),
+        ],
     )
 
-    assert hint is not None
-    assert hint.topic_folder == "jepa"
-    assert hint.confidence == 0.72
+    assert len(recommendations) == 1
+    assert recommendations[0].target_topic_folder == "jepa"
+    assert recommendations[0].confidence == 0.72
 
 
-def test_application_topic_merge_candidates_and_light_llm_hint(app_home: Path, monkeypatch) -> None:
+def test_application_grouping_review_uses_full_topic_list(app_home: Path, monkeypatch) -> None:
     monkeypatch.setattr(
         "arignan.application.create_local_text_generator",
-        lambda config, progress_sink=None, **kwargs: GroupingGenerator("jepa"),
+        lambda config, progress_sink=None, **kwargs: GroupingReviewGenerator("jepa"),
     )
     app = ArignanApp(load_config(app_home=app_home))
     hat_layout = app.layout.hat("default").ensure()
@@ -390,8 +441,7 @@ def test_application_topic_merge_candidates_and_light_llm_hint(app_home: Path, m
         "documents": [existing_document.to_dict()],
     }
     (topic_dir / ".topic_manifest.json").write_text(json.dumps(manifest_payload, indent=2), encoding="utf-8")
-    (topic_dir / "markdown_tree").mkdir(parents=True, exist_ok=True)
-    (topic_dir / "markdown_tree" / "summary.md").write_text(
+    (topic_dir / "summary.md").write_text(
         "# JEPA\n\n## Summary\nJEPA covers predictive representation learning ideas and latent target prediction.\n",
         encoding="utf-8",
     )
@@ -423,8 +473,7 @@ def test_application_topic_merge_candidates_and_light_llm_hint(app_home: Path, m
         "documents": [unrelated_document.to_dict()],
     }
     (unrelated_dir / ".topic_manifest.json").write_text(json.dumps(unrelated_payload, indent=2), encoding="utf-8")
-    (unrelated_dir / "markdown_tree").mkdir(parents=True, exist_ok=True)
-    (unrelated_dir / "markdown_tree" / "summary.md").write_text(
+    (unrelated_dir / "summary.md").write_text(
         "# Positional Encoding Ideas\n\n## Summary\nPositional encoding adds order information to sequence representations.\n",
         encoding="utf-8",
     )
@@ -441,38 +490,30 @@ def test_application_topic_merge_candidates_and_light_llm_hint(app_home: Path, m
         full_text="Latent prediction training in joint embedding systems improves representation learning.",
         sections=[DocumentSection(text="Latent prediction training in joint embedding systems.", heading="Training")],
     )
-
-    candidates = app._topic_merge_candidates("default", new_document, related_hits=[])
     provisional_plan = GroupingPlan(
         decision=GroupingDecision.STANDALONE,
         topic_folder="latent-prediction-training",
         estimated_length=300,
     )
-    provisional_topic = app.heuristic_artifact_writer.render_topic([new_document], provisional_plan)
-    prompt = _build_grouping_prompt(new_document, candidates, provisional_topic.summary_markdown)
-    hint = app._grouping_hint(
-        new_document,
-        candidates,
-        provisional_topic.summary_markdown,
-        index=1,
-        total=1,
-    )
+    app.markdown_repository.write_topic(app.layout, hat="default", documents=[new_document], plan=provisional_plan, refresh_maps=False)
 
-    assert len(candidates) == 2
-    assert {candidate.topic_folder for candidate in candidates} == {"jepa", "positional-encoding"}
-    assert candidates[0].topic_folder == "jepa"
-    assert "predictive representation learning ideas" in candidates[0].summary_excerpt
-    assert hint is not None
-    assert hint.topic_folder == "jepa"
-    assert "<incoming_topic_summary>" in prompt
-    assert "<existing_topic_summaries>" in prompt
-    assert "Positional Encoding Ideas" in prompt
+    topics = app._collect_grouping_topics("default", load_id="load-new")
+    prompt = _build_grouping_review_prompt("default", topics)
+    recommendations = app._grouping_recommendations("default", "load-new", topics)
+
+    assert len(topics) == 3
+    assert {topic.topic_folder for topic in topics} == {"jepa", "positional-encoding", "latent-prediction-training"}
+    assert "Title: Positional Encoding Ideas" in prompt
+    assert "Current load: yes" in prompt
+    assert "Current load: no" in prompt
+    assert len(recommendations) == 1
+    assert recommendations[0].target_topic_folder == "jepa"
 
 
 def test_application_load_preserves_document_derived_topic_without_topic_naming(app_home: Path, tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(
         "arignan.application.create_local_text_generator",
-        lambda config, progress_sink=None, **kwargs: GroupingGenerator("unused"),
+        lambda config, progress_sink=None, **kwargs: ArtifactGenerator(kwargs.get("model_name") or config.local_llm_model),
     )
     app = ArignanApp(load_config(app_home=app_home))
     source = tmp_path / "alpha.md"
@@ -516,7 +557,7 @@ def test_application_load_post_regroups_after_all_topic_summaries_exist(
     assert result.topic_folders == ["second-topic"]
     assert result.total_markdown_segments == 1
     assert any(trace.title == "First Topic" and trace.topic_folder == "second-topic" for trace in result.traces)
-    assert any(call.task == "grouping decision" for call in result.model_calls)
+    assert any(call.task == "batch grouping review" for call in result.model_calls)
     second_manifest = app.layout.hat("default").summaries_dir / "second-topic" / ".topic_manifest.json"
     payload = json.loads(second_manifest.read_text(encoding="utf-8"))
     assert len(payload["documents"]) == 2

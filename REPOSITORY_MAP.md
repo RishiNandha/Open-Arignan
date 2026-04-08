@@ -188,14 +188,15 @@ Implemented MCP surface:
 - `src/arignan/markdown/generator.py`
   - repository/storage layer for topic folders
   - writes topic manifests
-  - writes topic markdown trees
+  - writes topic markdown files directly under the topic folder
+  - each non-empty topic folder now also gets `topic_index.md` as a compact wiki navigation companion to the main article page
   - regenerates hat/global maps from manifests
   - now supports batching by skipping map refreshes until the caller requests them
 - `src/arignan/markdown/writer.py`
   - artifact rendering boundary
   - heuristic fallback rendering
   - local-LLM-backed artifact generation
-  - topic-summary prompting now emphasizes grouped-topic coherence and `## Related Threads` for retrieval-oriented wiki pages
+  - topic-summary prompting now treats `summary.md` as the main article page of a compiled wiki, with grouped-topic coherence and `## Related Threads` for retrieval-oriented lookup
   - progress reporting for LLM calls
   - session-local traceback logging for swallowed LLM failures
 - `src/arignan/llm/runtime.py`
@@ -215,7 +216,8 @@ Topic folder invariant:
 ```text
 <app_home>/hats/<hat>/summaries/<topic_folder>/
 |-- original_files/
-|-- markdown_tree/
+|-- summary.md
+|-- topic_index.md
 `-- .topic_manifest.json
 ```
 
@@ -267,6 +269,7 @@ Active session log invariant:
   - owns user-facing progress emission for multi-step operations
   - `load` now writes provisional topic summaries first, then runs one post-load regroup pass over the finished topic summaries in the hat
   - after regrouping, the current load is reindexed once from the final manifests so the CLI summary and retrieval state reflect final grouped topics rather than provisional folders
+  - the regroup step is now batch-based: the light LLM sees the full topic list for the hat and returns confidence-scored merge recommendations instead of one topic-at-a-time hints
   - grouping now compares the incoming document’s provisional topic summary against every existing topic summary in the hat before deciding merge vs standalone
   - `ask()` supports four answer modes: default LLM, light LLM, deterministic synthesis, and raw reranked context
   - `ask()` calls the shared local text generator for default answers and a separate lightweight generator for `--answer-mode light`

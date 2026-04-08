@@ -4,6 +4,8 @@ import hashlib
 import math
 from typing import Protocol
 
+from arignan.compute import preferred_torch_device
+
 DEFAULT_EMBEDDING_MODEL = "BAAI/bge-base-en-v1.5"
 
 
@@ -49,6 +51,7 @@ class SentenceTransformerEmbedder:
     def __init__(self, model_name: str = DEFAULT_EMBEDDING_MODEL) -> None:
         self.model_name = model_name
         self.backend_name = "sentence-transformers"
+        self.device = preferred_torch_device()
         try:
             from sentence_transformers import SentenceTransformer
         except ImportError as exc:  # pragma: no cover - exercised only when dependency is installed
@@ -56,7 +59,7 @@ class SentenceTransformerEmbedder:
                 "sentence-transformers is required for SentenceTransformerEmbedder; "
                 "install the optional ml dependencies"
             ) from exc
-        self._model = SentenceTransformer(model_name)
+        self._model = SentenceTransformer(model_name, device=self.device)
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
         encoded = self._model.encode(texts, normalize_embeddings=True)

@@ -21,7 +21,10 @@ def test_load_config_uses_defaults_when_settings_missing(app_home: Path) -> None
     assert config.chunking.chunk_size == 2800
     assert config.chunking.chunk_overlap == 160
     assert config.retrieval.dense_top_k == 14
-    assert config.retrieval.answer_context_top_k == 8
+    assert config.retrieval.answer_context_top_k_default == 10
+    assert config.retrieval.answer_context_top_k_light == 8
+    assert config.retrieval.answer_context_top_k_none == 10
+    assert config.retrieval.answer_context_top_k_raw == 10
 
 
 def test_load_config_merges_nested_overrides(app_home: Path) -> None:
@@ -70,5 +73,8 @@ def test_write_default_settings_creates_file(app_home: Path) -> None:
     assert payload["chunking"]["chunk_size"] == 2800
     assert payload["chunking"]["chunk_overlap"] == 160
     assert payload["retrieval"]["dense_top_k"] == 14
-    assert payload["retrieval"]["answer_context_top_k"] == 8
+    assert payload["retrieval"]["answer_context_top_k_default"] == 10
+    assert payload["retrieval"]["answer_context_top_k_light"] == 8
+    assert payload["retrieval"]["answer_context_top_k_none"] == 10
+    assert payload["retrieval"]["answer_context_top_k_raw"] == 10
     assert payload["markdown"]["max_md_length"] == 4000

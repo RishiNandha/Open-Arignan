@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from arignan.compute import preferred_torch_device
 from arignan.indexing import tokenize
 from arignan.models import RetrievalHit
 
@@ -39,6 +40,7 @@ class CrossEncoderReranker:
     def __init__(self, model_name: str = DEFAULT_RERANKER_MODEL) -> None:
         self.model_name = model_name
         self.backend_name = "cross-encoder"
+        self.device = preferred_torch_device()
         try:
             from sentence_transformers import CrossEncoder
         except ImportError as exc:  # pragma: no cover - exercised only when dependency is installed
@@ -46,7 +48,7 @@ class CrossEncoderReranker:
                 "sentence-transformers is required for CrossEncoderReranker; "
                 "install the optional ml dependencies"
             ) from exc
-        self._model = CrossEncoder(model_name)
+        self._model = CrossEncoder(model_name, device=self.device)
 
     def rerank(self, query: str, hits: list[RetrievalHit], limit: int, min_score: float = 0.0) -> list[RetrievalHit]:
         pairs = [[query, hit.text] for hit in hits]

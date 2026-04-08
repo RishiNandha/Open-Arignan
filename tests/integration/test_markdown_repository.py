@@ -46,10 +46,13 @@ def test_markdown_repository_writes_topic_and_updates_maps(app_home: Path) -> No
 
     artifact = MarkdownRepository().write_topic(layout, hat="default", documents=[document], plan=plan)
 
-    summary_path = layout.hat("default").summaries_dir / "jepa-notes" / "markdown_tree" / "summary.md"
+    summary_path = layout.hat("default").summaries_dir / "jepa-notes" / "summary.md"
+    topic_index_path = layout.hat("default").summaries_dir / "jepa-notes" / "topic_index.md"
     assert artifact.markdown_paths == [summary_path]
     assert summary_path.exists()
+    assert topic_index_path.exists()
     summary_text = summary_path.read_text(encoding="utf-8")
+    topic_index_text = topic_index_path.read_text(encoding="utf-8")
     map_text = layout.hat("default").map_path.read_text(encoding="utf-8")
     global_map_text = layout.global_map_path.read_text(encoding="utf-8")
     assert "JEPA Notes" in summary_text
@@ -62,6 +65,9 @@ def test_markdown_repository_writes_topic_and_updates_maps(app_home: Path) -> No
     assert "local knowledge-base entry" not in summary_text
     assert "This source is derived from" not in summary_text
     assert "| Source | What To Find | Key Sections | File |" in summary_text
+    assert "# Topic Index: JEPA Notes" in topic_index_text
+    assert "## Quick Lookup" in topic_index_text
+    assert "## Retrieval Cues" in topic_index_text
     assert (layout.hat("default").summaries_dir / "jepa-notes" / "original_files" / "input.md").exists()
     assert "| Topic | Directory | What To Find | Source Files | Keywords |" in map_text
     assert "Useful entry points" not in map_text
@@ -96,7 +102,7 @@ def test_markdown_repository_cleans_citation_noise_from_summary_and_map(app_home
 
     MarkdownRepository().write_topic(layout, hat="default", documents=[document], plan=plan)
 
-    summary_text = (layout.hat("default").summaries_dir / "v-jepa-2" / "markdown_tree" / "summary.md").read_text(encoding="utf-8")
+    summary_text = (layout.hat("default").summaries_dir / "v-jepa-2" / "summary.md").read_text(encoding="utf-8")
     map_text = layout.hat("default").map_path.read_text(encoding="utf-8")
 
     assert "Bardes et al., 2024" not in summary_text
@@ -125,7 +131,7 @@ def test_markdown_repository_writes_summary_in_neutral_wiki_voice(app_home: Path
 
     MarkdownRepository().write_topic(layout, hat="default", documents=[document], plan=plan)
 
-    summary_text = (layout.hat("default").summaries_dir / "v-jepa-2" / "markdown_tree" / "summary.md").read_text(encoding="utf-8")
+    summary_text = (layout.hat("default").summaries_dir / "v-jepa-2" / "summary.md").read_text(encoding="utf-8")
 
     assert "# V-JEPA 2" in summary_text
     assert "We propose" not in summary_text
@@ -161,7 +167,7 @@ def test_markdown_repository_regenerates_grouped_topic_after_removal(app_home: P
 
     artifact = repository.regenerate_topic(layout, hat="default", documents=[first], plan=plan)
     source_names = {path.name for path in artifact.source_paths}
-    summary_text = (layout.hat("default").summaries_dir / "jepa" / "markdown_tree" / "summary.md").read_text(encoding="utf-8")
+    summary_text = (layout.hat("default").summaries_dir / "jepa" / "summary.md").read_text(encoding="utf-8")
 
     assert source_names == {"doc1.md"}
     assert "JEPA Paper 1" in summary_text
@@ -199,7 +205,7 @@ def test_markdown_repository_grouped_topic_summary_reads_like_lookup_page(app_ho
 
     MarkdownRepository().write_topic(layout, hat="default", documents=[first, second], plan=plan)
 
-    summary_text = (layout.hat("default").summaries_dir / "jepa" / "markdown_tree" / "summary.md").read_text(encoding="utf-8")
+    summary_text = (layout.hat("default").summaries_dir / "jepa" / "summary.md").read_text(encoding="utf-8")
 
     assert "## Related Threads" in summary_text
     assert "one shared page" in summary_text

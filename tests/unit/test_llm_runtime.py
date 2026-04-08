@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import importlib
 import os
+import sys
+import types
 
 import arignan
 import arignan.llm.runtime as llm_runtime
 from arignan.config import AppConfig
-from arignan.llm.runtime import OllamaTextGenerator, create_local_text_generator
+from arignan.llm.runtime import OllamaTextGenerator, TransformersTextGenerator, create_local_text_generator
 from arignan.runtime_env import TEXT_RUNTIME_ENVIRONMENT, configure_text_runtime_environment
 
 
@@ -93,3 +95,43 @@ def test_ollama_text_generator_posts_chat_request_and_strips_think_blocks(app_ho
     assert payload["options"]["num_predict"] == 256
     assert payload["format"] == {"type": "object"}
     assert payload["think"] is False
+
+
+def test_transformers_text_generator_prefers_cuda_load_when_available(app_home, monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeTokenizer:
+        pad_token_id = None
+        eos_token_id = 7
+
+        @staticmethod
+        def from_pretrained(source, **kwargs):
+            captured["tokenizer_source"] = source
+            captured["tokenizer_kwargs"] = kwargs
+            return FakeTokenizer()
+
+    class FakeModel:
+        def to(self, device: str):
+            captured["moved_to"] = device
+            return self
+
+    class FakeAutoModelForCausalLM:
+        @staticmethod
+        def from_pretrained(source, **kwargs):
+            captured["model_source"] = source
+            captured["model_kwargs"] = kwargs
+            return FakeModel()
+
+    fake_module = types.SimpleNamespace(
+        AutoTokenizer=FakeTokenizer,
+        AutoModelForCausalLM=FakeAutoModelForCausalLM,
+    )
+    monkeypatch.setitem(sys.modules, "transformers", fake_module)
+    monkeypatch.setattr("arignan.llm.runtime.preferred_torch_device", lambda: "cuda")
+
+    generator = TransformersTextGenerator(AppConfig(app_home=app_home, local_llm_backend="transformers"))
+
+    generator._ensure_loaded()
+
+    assert captured["model_kwargs"]["dtype"] == "auto"
+    assert captured["moved_to"] == "cuda"

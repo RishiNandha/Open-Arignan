@@ -1,4 +1,4 @@
-# Open-Arignan
+﻿# Open-Arignan
 
 **Arignar** is the tamil word for the well-read / the knowledgeable / the scholar. **Arignan** is an application that can help scholars, engineers, founders, etc... to maintain a local-first private knowledge base and get queries answered from it.
 
@@ -78,35 +78,40 @@ A global map (global_map.md) provides a high-level view across all hats.
 
 The ingestion log allows for deleting any past loads. An LLM-generated global map describes which hat contains what knowledge.
 
-```
+```text
 ~/.arignan/
-├── settings.json
-├── ingestion_log.jsonl
-└── hats/
-    ├── default/
-    │   ├── vector_index/
-    │   ├── bm25_index/
-    │   ├── summaries/
-    │   │   └── <topic_folder>/
-    │   │       ├── <original_files>
-    │   │       └── <markdown_tree>
-    │   └── map.md
-    ├── <hat_name>/
-    │   ├── vector_index/
-    │   ├── bm25_index/
-    │   ├── summaries/
-    │   │   └── <topic_folder>/
-    │   │       ├── <original_files>
-    │   │       └── <markdown_tree>
-    │   └── map.md
-    └── global_map.md
+|-- settings.json
+|-- ingestion_log.jsonl
+`-- hats/
+    |-- default/
+    |   |-- vector_index/
+    |   |-- bm25_index/
+    |   |-- summaries/
+    |   |   `-- <topic_folder>/
+    |   |       |-- original_files/
+    |   |       |-- summary.md
+    |   |       |-- topic_index.md
+    |   |       `-- <optional_segment_markdowns>
+    |   `-- map.md
+    |-- <hat_name>/
+    |   |-- vector_index/
+    |   |-- bm25_index/
+    |   |-- summaries/
+    |   |   `-- <topic_folder>/
+    |   |       |-- original_files/
+    |   |       |-- summary.md
+    |   |       |-- topic_index.md
+    |   |       `-- <optional_segment_markdowns>
+    |   `-- map.md
+    `-- global_map.md
 ```
+In each `<topic_folder>`, the main wiki article page lives at `summary.md` and the compact lookup companion lives at `topic_index.md`.
 
 #### Knowledge-base Organization
 
-The summaries/ directory is LLM-organized and human-auditable. Each subfolder represents a topic grouping and the folder name inferred by the LLM.
+The summaries/ directory is LLM-organized and human-auditable. Each subfolder represents a topic grouping and the folder name inferred from the grouping decision.
 
-Each folder contains the original source file(s) and either a single markdown or a bunch of markdowns. The system gives the LLM the flexibility to do grouping based on size and semantic relatedness:
+Each folder contains the original source file(s) and the generated wiki markdowns directly under the topic folder. The main wiki-style article page is `summary.md`, while `topic_index.md` is a lighter companion page for quick lookup cues, connections, and source coverage. If a topic becomes too large, the same topic folder can also contain additional segment markdowns. The system gives the LLM the flexibility to do grouping based on size and semantic relatedness:
 
 - **Related documents can be grouped in one folder**: For example: multiple papers on a related coherent topic JEPA can be summarized into one markdown in one folder
 - **Large documents can have multiple markdowns**: For example: Behzad Razavi RFIC Design might typically one per section
@@ -143,13 +148,14 @@ Vector Index is done using Qdrant and HNSW for storing both embedding and metada
 
 #### Topic Grouping and Segmentation
 
-Grouping of files into a single markdown or segmentation of a single file into multiple markdowns is currently decided by local heuristics, with `max_md_length` assisting the decision. The architecture is still intended to be LLM-guided at this boundary.
+Grouping of files into a single topic or segmentation of a single file into multiple markdowns is handled in a wiki-first flow, with `max_md_length` acting as the main size guardrail.
 
 **Grouping:**
 
-1. The system runs a retrieval on the database with the given file
-2. If there are matches that are close in semantics such as keywords and concepts, the LLM flags a possible merge
-3. The merge is then evaluated against how the estimated length of the combined markdown will be (shouldn't be more than `max_md_length`)
+1. The system first writes provisional topic pages for the current load
+2. At the end of the load, the light local LLM reviews the full list of topic summaries in the hat and proposes possible groups with confidence scores
+3. A proposed group is only applied if the confidence is high enough and the estimated combined markdown stays within `max_md_length`
+4. If topics are grouped, the wiki-style markdown is regenerated from the grouped sources
 
 **Segmentation:**
 
@@ -158,13 +164,16 @@ Grouping of files into a single markdown or segmentation of a single file into m
 
 #### Editting Markdowns and Log
 
-LLM is systematically prompted to update one markdown at a time.
+LLM is systematically prompted to maintain wiki-style markdown one topic at a time.
 
-- Knowledge base markdowns: **wiki-styled** and **optimized tightly for token limits.**
+- Knowledge base markdowns:
+  - `summary.md`: the main wiki article page for the topic
+  - `topic_index.md`: a compact lookup companion for retrieval cues, connections, and source coverage
 - `map.md` to be rich in the following information:
   - Paths to files
   - What to expect from the files, like "RF IC textbook"
   - Any specific keywords, like "Calibre xRC"
+  - Quick lookup of which topic folder to descend into
 - The `global_map.md` to point to the relevant "hat" which would have the relevant map.md. It should have high-level keywords like "JEPA".
 
 **Ingestion Log** is append-only, like commit history and each addition or deletion is logged with the path to reach the relevant changes made it so that the delete function can use this to lookup.
@@ -262,3 +271,4 @@ Under the following terms:
 - Share-Alike: If you remix or modify, you must distribute under the same license
 
 Full license text: https://creativecommons.org/licenses/by-nc-sa/4.0/
+
