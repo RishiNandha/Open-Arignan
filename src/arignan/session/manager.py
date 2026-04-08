@@ -52,7 +52,9 @@ class SessionManager:
         return session
 
     def save_session(self, terminal_pid: int, destination: Path | None = None) -> Path:
-        session = self.get_or_create(terminal_pid)
+        session = self.store.load_active(terminal_pid)
+        if session is None or (not session.turns and not session.summary):
+            session = self.store.latest_active(require_content=True) or self.get_or_create(terminal_pid)
         return self.store.save_snapshot(session, destination=destination)
 
     def load_session(self, terminal_pid: int, source: Path) -> SessionState:

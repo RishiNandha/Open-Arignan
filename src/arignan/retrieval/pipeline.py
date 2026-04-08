@@ -3,10 +3,12 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from arignan.indexing import DenseIndexer, Embedder, HashingEmbedder, LexicalIndex, LexicalIndexer, LocalDenseIndex, tokenize
 from arignan.models import ChunkMetadata, RetrievalHit, RetrievalSource
 from arignan.storage import StorageLayout
+from arignan.tracing import ModelTraceCollector
 
 ABBREVIATIONS = {
     "bm25": "best matching 25",
@@ -127,6 +129,8 @@ class RetrievalPipeline:
         lexical_limit: int = 8,
         map_limit: int = 6,
         fused_limit: int = 10,
+        trace_sink: ModelTraceCollector | None = None,
+        progress_sink: Callable[[str], None] | None = None,
     ) -> None:
         self.layout = layout
         self.embedder = embedder or HashingEmbedder()
@@ -137,15 +141,27 @@ class RetrievalPipeline:
         self.lexical_limit = lexical_limit
         self.map_limit = map_limit
         self.fused_limit = fused_limit
+        self.trace_sink = trace_sink
+        self.progress_sink = progress_sink
 
     def retrieve(self, query: str, hat: str = "auto") -> RetrievalBundle:
+        self._emit_progress("Expanding query...")
         expanded_query = self.expander.expand(query)
+        self._emit_progress("Selecting hat...")
         selected_hat = self.selector.select(expanded_query, hat=hat)
-        dense = DenseIndexer(self.embedder, LocalDenseIndex(self.layout.hat(selected_hat).vector_index_dir))
+        dense = DenseIndexer(
+            self.embedder,
+            LocalDenseIndex(self.layout.hat(selected_hat).vector_index_dir),
+            trace_sink=self.trace_sink,
+        )
         lexical = LexicalIndexer(LexicalIndex(self.layout.hat(selected_hat).bm25_index_dir))
+        self._emit_progress(f"Searching dense index in hat '{selected_hat}'...")
         dense_hits = dense.search(expanded_query, self.dense_limit)
+        self._emit_progress(f"Searching lexical index in hat '{selected_hat}'...")
         lexical_hits = lexical.search(expanded_query, self.lexical_limit)
+        self._emit_progress(f"Searching map context in hat '{selected_hat}'...")
         map_hits = self.map_retriever.search(selected_hat, expanded_query, self.map_limit)
+        self._emit_progress("Fusing retrieval candidates...")
         fused_hits = reciprocal_rank_fusion(
             [dense_hits, lexical_hits, map_hits],
             limit=self.fused_limit,
@@ -159,6 +175,10 @@ class RetrievalPipeline:
             map_hits=map_hits,
             fused_hits=fused_hits,
         )
+
+    def _emit_progress(self, message: str) -> None:
+        if self.progress_sink is not None:
+            self.progress_sink(message)
 
 
 def reciprocal_rank_fusion(result_sets: list[list[RetrievalHit]], limit: int, k: int = 60) -> list[RetrievalHit]:

@@ -45,3 +45,14 @@ def test_session_manager_save_load_and_reset(app_home: Path) -> None:
     assert loaded.turns[0].content == "Saved turn"
     assert reset.terminal_pid == 1000
     assert reset.turns == []
+
+
+def test_session_manager_named_save_uses_saved_dir_and_falls_back_to_latest_active(app_home: Path) -> None:
+    manager = SessionManager(SessionStore(app_home), SessionConfig())
+    manager.append_turn(terminal_pid=1234, role="user", content="Remember this context")
+
+    saved_path = manager.save_session(terminal_pid=9999, destination=Path("8apr"))
+
+    assert saved_path == app_home / "sessions" / "saved" / "8apr.json"
+    assert saved_path.exists()
+    assert "Remember this context" in saved_path.read_text(encoding="utf-8")

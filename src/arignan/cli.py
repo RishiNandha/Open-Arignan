@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import os
+import sys
 from pathlib import Path
 from typing import Sequence
 
@@ -23,7 +25,8 @@ def build_parser() -> argparse.ArgumentParser:
             "Examples:\n"
             "  arignan load notes.md\n"
             "  arignan ask \"What is JEPA?\"\n"
-            "  arignan delete <load_id>"
+            "  arignan delete <load_id>\n"
+            "  arignan delete --hat psychology"
         ),
     )
     parser.add_argument("--app-home", type=Path, default=None, help="Override the Arignan app-home directory.")
@@ -58,6 +61,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Delete one or more past ingestions by load_id.",
         formatter_class=ArignanHelpFormatter,
     )
+    delete_parser.add_argument("--hat", help="Delete an entire hat after confirmation.")
     delete_parser.add_argument("load_ids", nargs="*", help="One or more load IDs. Omit to list ingestions.")
 
     save_parser = subparsers.add_parser(
@@ -95,72 +99,106 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    resolved_pid = args.pid or os.getppid() or os.getpid()
     config = load_config(settings_path=args.settings, app_home=args.app_home)
-    app = ArignanApp(config)
+    app = ArignanApp(config, progress_sink=_emit_progress, terminal_pid=resolved_pid)
 
-    if args.command == "load":
-        result = app.load(args.input_ref, hat=args.hat)
-        print(_format_load_summary(result))
-        if args.debug:
-            print()
-            print(_format_load_debug(result))
-        return 0
+    try:
+        if args.command == "load":
+            result = app.load(args.input_ref, hat=args.hat)
+            print(_format_load_summary(result))
+            if args.debug:
+                print()
+                print(_format_load_debug(result))
+            return 0
 
-    if args.command == "ask":
-        result = app.ask(args.question, hat=args.hat, terminal_pid=args.pid)
-        print(result.answer)
-        if result.citations:
-            print("\nCitations:")
-            for citation in result.citations:
-                print(f"- {citation}")
-        if args.debug:
-            print()
-            print(_format_ask_debug(result))
-        return 0
+        if args.command == "ask":
+            result = app.ask(args.question, hat=args.hat, terminal_pid=resolved_pid)
+            print(result.answer)
+            if result.citations:
+                print("\nCitations:")
+                for citation in result.citations:
+                    print(f"- {citation}")
+            if args.debug:
+                print()
+                print(_format_ask_debug(result))
+            return 0
 
-    if args.command == "delete":
-        if not args.load_ids:
-            events = app.list_ingestions()
+        if args.command == "delete":
+            if args.hat and args.load_ids:
+                parser.error("delete accepts either one or more load_ids or --hat, not both")
+            if args.hat:
+                confirmation = input(
+                    f"Delete entire hat '{args.hat}'? This will remove all indexes, summaries, and source copies for that hat. [y/N]: "
+                ).strip()
+                if confirmation.lower() not in {"y", "yes"}:
+                    print("Cancelled hat deletion.")
+                    return 0
+                result = app.delete_hat(args.hat)
+                if not result.existed:
+                    print(f"Hat '{args.hat}' was not found.")
+                    return 0
+                print(
+                    f"Deleted hat '{result.hat}'. "
+                    f"Loads removed: {len(result.deleted_load_ids)}. "
+                    f"Topics removed: {len(result.deleted_topics)}."
+                )
+                return 0
+            if not args.load_ids:
+                events = app.list_ingestions()
+                if not events:
+                    print("No ingestions found.")
+                    return 0
+                for event in events:
+                    print(f"{event.load_id}\t{event.hat}\t{', '.join(event.source_items)}")
+                return 0
+            result = app.delete(args.load_ids)
+            print(
+                f"Deleted loads: {', '.join(result.deleted_load_ids) or 'none'}. "
+                f"Missing: {', '.join(result.missing_load_ids) or 'none'}."
+            )
+            return 0
+
+        if args.command == "save-session":
+            destination = Path(args.destination) if args.destination else None
+            path = app.save_session(terminal_pid=resolved_pid, destination=destination)
+            print(path)
+            return 0
+
+        if args.command == "load-session":
+            session = app.load_session(Path(args.source), terminal_pid=resolved_pid)
+            print(f"Loaded session {session.session_id} into pid {session.terminal_pid}.")
+            return 0
+
+        if args.command == "reset-session":
+            session = app.reset_session(terminal_pid=resolved_pid)
+            print(f"Reset session. New session_id: {session.session_id}")
+            return 0
+
+        if args.command == "list-loads":
+            events = app.list_events()
             if not events:
-                print("No ingestions found.")
+                print("No log events found.")
                 return 0
             for event in events:
-                print(f"{event.load_id}\t{event.hat}\t{', '.join(event.source_items)}")
+                print(f"{event.created_at}\t{event.operation.value}\t{event.load_id}\t{event.hat}\t{', '.join(event.source_items)}")
             return 0
-        result = app.delete(args.load_ids)
-        print(
-            f"Deleted loads: {', '.join(result.deleted_load_ids) or 'none'}. "
-            f"Missing: {', '.join(result.missing_load_ids) or 'none'}."
+
+        parser.error(f"unsupported command: {args.command}")
+        return 2
+    except Exception as exc:
+        log_path = app.log_exception(
+            component="cli",
+            task=f"{args.command} command",
+            exc=exc,
+            context={"argv": list(argv) if argv is not None else None},
         )
-        return 0
+        print(f"[arignan] Full traceback logged to {log_path}", file=sys.stderr)
+        raise
 
-    if args.command == "save-session":
-        destination = Path(args.destination) if args.destination else None
-        path = app.save_session(terminal_pid=args.pid, destination=destination)
-        print(path)
-        return 0
 
-    if args.command == "load-session":
-        session = app.load_session(Path(args.source), terminal_pid=args.pid)
-        print(f"Loaded session {session.session_id} into pid {session.terminal_pid}.")
-        return 0
-
-    if args.command == "reset-session":
-        session = app.reset_session(terminal_pid=args.pid)
-        print(f"Reset session. New session_id: {session.session_id}")
-        return 0
-
-    if args.command == "list-loads":
-        events = app.list_events()
-        if not events:
-            print("No log events found.")
-            return 0
-        for event in events:
-            print(f"{event.created_at}\t{event.operation.value}\t{event.load_id}\t{event.hat}\t{', '.join(event.source_items)}")
-        return 0
-
-    parser.error(f"unsupported command: {args.command}")
-    return 2
+def _emit_progress(message: str) -> None:
+    print(f"[arignan] {message}", file=sys.stderr)
 
 
 def _format_load_summary(result: LoadResult) -> str:
@@ -173,6 +211,7 @@ def _format_load_summary(result: LoadResult) -> str:
 
 def _format_load_debug(result: LoadResult) -> str:
     lines = ["Debug: load details"]
+    lines.extend(_format_model_calls(result.model_calls))
     for index, trace in enumerate(result.traces, start=1):
         lines.extend(
             [
@@ -206,12 +245,34 @@ def _format_ask_debug(result: AskResult) -> str:
         ),
         "",
     ]
+    lines.extend(_format_model_calls(debug.model_calls))
     lines.extend(_format_hit_group("Dense hits", debug.dense_hits))
     lines.extend(_format_hit_group("Lexical hits", debug.lexical_hits))
     lines.extend(_format_hit_group("Map hits", debug.map_hits))
     lines.extend(_format_hit_group("Fused hits", debug.fused_hits))
     lines.extend(_format_hit_group("Reranked hits", debug.reranked_hits))
     return "\n".join(lines).rstrip()
+
+
+def _format_model_calls(calls) -> list[str]:
+    lines = [f"Model calls ({len(calls)}):"]
+    if not calls:
+        lines.append("  none")
+        lines.append("")
+        return lines
+    for index, call in enumerate(calls, start=1):
+        detail_parts = [call.task]
+        if call.item_count is not None:
+            detail_parts.append(f"items={call.item_count}")
+        if call.detail:
+            detail_parts.append(call.detail)
+        details = " | ".join(detail_parts)
+        lines.append(
+            f"  {index}. [{call.status}] {call.component} | {call.backend} | {call.model_name}"
+        )
+        lines.append(f"     {details}")
+    lines.append("")
+    return lines
 
 
 def _format_hit_group(title: str, hits) -> list[str]:

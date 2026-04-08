@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from arignan.grouping import GroupingDecision, GroupingPlan
-from arignan.markdown import MarkdownRepository
+from arignan.markdown import MarkdownRepository, derive_keywords
 from arignan.models import DocumentSection, ParsedDocument, SourceDocument, SourceType
 from arignan.storage import StorageLayout
 
@@ -31,7 +31,11 @@ def test_markdown_repository_writes_topic_and_updates_maps(app_home: Path) -> No
         app_home / "input.md",
         load_id="load-1",
         title="JEPA Notes",
-        text="Joint embedding predictive architecture notes.",
+        text=(
+            "Joint embedding predictive architecture is a self-supervised learning approach. "
+            "It builds latent representations that support prediction without requiring labels. "
+            "These notes focus on the core idea, training setup, and practical uses."
+        ),
         heading="JEPA Notes",
     )
     plan = GroupingPlan(
@@ -45,10 +49,87 @@ def test_markdown_repository_writes_topic_and_updates_maps(app_home: Path) -> No
     summary_path = layout.hat("default").summaries_dir / "jepa-notes" / "markdown_tree" / "summary.md"
     assert artifact.markdown_paths == [summary_path]
     assert summary_path.exists()
-    assert "JEPA Notes" in summary_path.read_text(encoding="utf-8")
+    summary_text = summary_path.read_text(encoding="utf-8")
+    map_text = layout.hat("default").map_path.read_text(encoding="utf-8")
+    global_map_text = layout.global_map_path.read_text(encoding="utf-8")
+    assert "JEPA Notes" in summary_text
+    assert "## Summary" in summary_text
+    assert "## Key Ideas" in summary_text
+    assert "## Sources" in summary_text
+    assert "## Keywords" in summary_text
+    assert "Decision:" not in summary_text
+    assert "local knowledge-base entry" not in summary_text
+    assert "This source is derived from" not in summary_text
+    assert "| Source | What To Find | Key Sections | File |" in summary_text
     assert (layout.hat("default").summaries_dir / "jepa-notes" / "original_files" / "input.md").exists()
-    assert "jepa" in layout.hat("default").map_path.read_text(encoding="utf-8").lower()
-    assert "default" in layout.global_map_path.read_text(encoding="utf-8").lower()
+    assert "| Topic | Directory | What To Find | Source Files | Keywords |" in map_text
+    assert "Useful entry points" not in map_text
+    assert "| Hat | Map Path | What To Find | High-Level Keywords |" in global_map_text
+    assert "default" in global_map_text.lower()
+
+
+def test_markdown_repository_cleans_citation_noise_from_summary_and_map(app_home: Path) -> None:
+    layout = StorageLayout.from_home(app_home).ensure()
+    document = _document(
+        app_home / "paper.md",
+        load_id="load-noise",
+        title="V-JEPA 2",
+        text=(
+            "Joint embedding predictive architecture improves world models (Bardes et al., 2024) [12].\n\n"
+            "References\nSmith, J. 2020."
+        ),
+        heading="V-JEPA 2",
+    )
+    document.sections = [
+        DocumentSection(
+            text="Joint embedding predictive architecture improves world models (Bardes et al., 2024) [12].",
+            heading="Overview",
+        ),
+        DocumentSection(text="Smith, J. 2020.", heading="References"),
+    ]
+    plan = GroupingPlan(
+        decision=GroupingDecision.STANDALONE,
+        topic_folder="v-jepa-2",
+        estimated_length=300,
+    )
+
+    MarkdownRepository().write_topic(layout, hat="default", documents=[document], plan=plan)
+
+    summary_text = (layout.hat("default").summaries_dir / "v-jepa-2" / "markdown_tree" / "summary.md").read_text(encoding="utf-8")
+    map_text = layout.hat("default").map_path.read_text(encoding="utf-8")
+
+    assert "Bardes et al., 2024" not in summary_text
+    assert "[12]" not in summary_text
+    assert "Smith, J. 2020." not in summary_text
+    assert "Bardes et al., 2024" not in map_text
+
+
+def test_markdown_repository_writes_summary_in_neutral_wiki_voice(app_home: Path) -> None:
+    layout = StorageLayout.from_home(app_home).ensure()
+    document = _document(
+        app_home / "paper.md",
+        load_id="load-wiki",
+        title="V-JEPA 2",
+        text=(
+            "We propose a world model that learns predictive video representations from unlabeled clips. "
+            "The method focuses on latent prediction, temporal abstraction, and evaluation across downstream tasks."
+        ),
+        heading="V-JEPA 2",
+    )
+    plan = GroupingPlan(
+        decision=GroupingDecision.STANDALONE,
+        topic_folder="v-jepa-2",
+        estimated_length=300,
+    )
+
+    MarkdownRepository().write_topic(layout, hat="default", documents=[document], plan=plan)
+
+    summary_text = (layout.hat("default").summaries_dir / "v-jepa-2" / "markdown_tree" / "summary.md").read_text(encoding="utf-8")
+
+    assert "# V-JEPA 2" in summary_text
+    assert "We propose" not in summary_text
+    assert "The work proposes" in summary_text
+    assert "| Source | What To Find | Key Sections | File |" in summary_text
 
 
 def test_markdown_repository_regenerates_grouped_topic_after_removal(app_home: Path) -> None:
@@ -83,3 +164,32 @@ def test_markdown_repository_regenerates_grouped_topic_after_removal(app_home: P
     assert source_names == {"doc1.md"}
     assert "JEPA Paper 1" in summary_text
     assert "JEPA Paper 2" not in summary_text
+
+
+def test_derive_keywords_filters_page_noise_and_numbers() -> None:
+    document = ParsedDocument(
+        load_id="load-keywords",
+        hat="default",
+        source=SourceDocument(
+            source_type=SourceType.PDF,
+            source_uri="V-JEPA2.1.pdf",
+            title="V-JEPA2.1",
+        ),
+        full_text=(
+            "Joint embedding predictive architecture learns predictive video representations. "
+            "The model uses latent prediction and world models for video understanding."
+        ),
+        sections=[
+            DocumentSection(text="Joint embedding predictive architecture learns predictive video representations.", heading="Page 1", page_number=1),
+            DocumentSection(text="The model uses latent prediction and world models for video understanding.", heading="Page 2", page_number=2),
+        ],
+    )
+
+    keywords = derive_keywords([document])
+    lowered = {keyword.lower() for keyword in keywords}
+
+    assert "page" not in lowered
+    assert "1" not in lowered
+    assert "2" not in lowered
+    assert "v" not in lowered
+    assert any("jepa" in keyword.lower() for keyword in keywords)

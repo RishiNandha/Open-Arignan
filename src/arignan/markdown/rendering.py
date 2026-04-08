@@ -1,15 +1,10 @@
 from __future__ import annotations
 
-import json
 import re
-import shutil
 from collections import Counter
-from pathlib import Path
 
-import arignan.markdown.rendering as _rendering
-from arignan.grouping import GroupingDecision, GroupingPlan, slugify
-from arignan.models import DocumentSection, ParsedDocument, TopicArtifact
-from arignan.storage import StorageLayout
+from arignan.grouping import GroupingPlan, slugify
+from arignan.models import DocumentSection, ParsedDocument
 
 STOPWORDS = {
     "a",
@@ -128,176 +123,6 @@ KEYWORD_TOKEN_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9\-]{1,}")
 ACRONYM_PATTERN = re.compile(r"\b(?:[A-Z]{2,}(?:-[A-Z0-9]+)*|[A-Z](?:-[A-Z0-9]+)+(?:\.\d+)*)\b")
 
 
-class MarkdownRepository:
-    def __init__(self, artifact_writer=None) -> None:
-        if artifact_writer is None:
-            from arignan.markdown.writer import HeuristicArtifactWriter
-
-            artifact_writer = HeuristicArtifactWriter()
-        self.artifact_writer = artifact_writer
-
-    def write_topic(
-        self,
-        layout: StorageLayout,
-        hat: str,
-        documents: list[ParsedDocument],
-        plan: GroupingPlan,
-        refresh_maps: bool = True,
-    ) -> TopicArtifact:
-        hat_layout = layout.hat(hat).ensure()
-        topic_dir = hat_layout.summaries_dir / plan.topic_folder
-        if topic_dir.exists():
-            shutil.rmtree(topic_dir)
-        topic_dir.mkdir(parents=True, exist_ok=True)
-        original_files_dir = topic_dir / "original_files"
-        original_files_dir.mkdir(parents=True, exist_ok=True)
-        markdown_tree_dir = topic_dir / "markdown_tree"
-        markdown_tree_dir.mkdir(parents=True, exist_ok=True)
-
-        source_paths = self._write_sources(original_files_dir, documents)
-        rendered_topic = self.artifact_writer.render_topic(documents, plan)
-        markdown_paths = self._write_markdowns(markdown_tree_dir, documents, plan, rendered_topic.summary_markdown)
-        keywords = rendered_topic.keywords or derive_keywords(documents)
-        artifact = TopicArtifact(
-            hat=hat,
-            topic_folder=plan.topic_folder,
-            source_paths=source_paths,
-            markdown_paths=markdown_paths,
-            keywords=keywords,
-        )
-        description = rendered_topic.description or describe_documents(documents)
-        self._write_manifest(
-            topic_dir,
-            artifact,
-            description,
-            documents,
-            plan,
-            title=rendered_topic.title,
-            locator=rendered_topic.locator,
-        )
-        if refresh_maps:
-            self.update_hat_map(layout, hat)
-            self.update_global_map(layout)
-        return artifact
-
-    def regenerate_topic(
-        self,
-        layout: StorageLayout,
-        hat: str,
-        documents: list[ParsedDocument],
-        plan: GroupingPlan,
-        refresh_maps: bool = True,
-    ) -> TopicArtifact:
-        return self.write_topic(layout=layout, hat=hat, documents=documents, plan=plan, refresh_maps=refresh_maps)
-
-    def update_hat_map(self, layout: StorageLayout, hat: str) -> Path:
-        from arignan.markdown.writer import TopicMapEntry
-
-        hat_layout = layout.hat(hat).ensure()
-        manifests = sorted(hat_layout.summaries_dir.glob("*/.topic_manifest.json"))
-        entries: list[TopicMapEntry] = []
-        for manifest_path in manifests:
-            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-            documents = [ParsedDocument.from_dict(item) for item in payload.get("documents", [])]
-            entries.append(
-                TopicMapEntry(
-                    topic_folder=payload["topic_folder"],
-                    title=payload.get("title") or display_topic_title(payload["topic_folder"], documents),
-                    locator=payload.get("locator") or compose_topic_locator(documents),
-                    source_files=[Path(path).name for path in payload.get("source_paths", [])],
-                    markdown_files=[Path(path).name for path in payload.get("markdown_paths", [])],
-                    keywords=list(payload.get("keywords", [])),
-                )
-            )
-        hat_layout.map_path.write_text(self.artifact_writer.render_hat_map(hat, entries), encoding="utf-8")
-        return hat_layout.map_path
-
-    def update_global_map(self, layout: StorageLayout) -> Path:
-        from arignan.markdown.writer import HatMapEntry
-
-        layout.ensure(include_default_hat=False)
-        entries: list[HatMapEntry] = []
-        for hat_dir in sorted(path for path in layout.hats_dir.iterdir() if path.is_dir()):
-            manifests = sorted((hat_dir / "summaries").glob("*/.topic_manifest.json"))
-            keywords: list[str] = []
-            locators: list[str] = []
-            for manifest_path in manifests:
-                payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-                keywords.extend(payload.get("keywords", []))
-                locator = payload.get("locator")
-                if isinstance(locator, str) and locator.strip():
-                    locators.append(locator.strip())
-            entries.append(
-                HatMapEntry(
-                    hat=hat_dir.name,
-                    map_path=(Path("hats") / hat_dir.name / "map.md").as_posix(),
-                    what_to_find=natural_join(locators[:3]) if locators else "No topics yet",
-                    keywords=_dedupe(keywords)[:8],
-                )
-            )
-        layout.global_map_path.write_text(self.artifact_writer.render_global_map(entries), encoding="utf-8")
-        return layout.global_map_path
-
-    def _write_sources(self, sources_dir: Path, documents: list[ParsedDocument]) -> list[Path]:
-        written: list[Path] = []
-        for document in documents:
-            if document.source.local_path and document.source.local_path.exists():
-                destination = sources_dir / document.source.local_path.name
-                shutil.copy2(document.source.local_path, destination)
-            else:
-                stem = slugify(document.source.title or document.source.source_uri)
-                destination = sources_dir / f"{stem}.source.txt"
-                destination.write_text(document.source.source_uri + "\n", encoding="utf-8")
-            written.append(destination)
-        return written
-
-    def _write_markdowns(
-        self,
-        markdown_tree_dir: Path,
-        documents: list[ParsedDocument],
-        plan: GroupingPlan,
-        summary_markdown: str,
-    ) -> list[Path]:
-        if plan.decision is GroupingDecision.SEGMENT and len(documents) == 1 and plan.segments:
-            return self._write_segmented_markdowns(markdown_tree_dir, documents[0], plan)
-        summary_path = markdown_tree_dir / "summary.md"
-        summary_path.write_text(summary_markdown, encoding="utf-8")
-        return [summary_path]
-
-    def _write_segmented_markdowns(
-        self,
-        markdown_tree_dir: Path,
-        document: ParsedDocument,
-        plan: GroupingPlan,
-    ) -> list[Path]:
-        written: list[Path] = []
-        for index, segment in enumerate(plan.segments, start=1):
-            path = markdown_tree_dir / f"{index:02d}-{segment.slug}.md"
-            path.write_text(compose_segment_markdown(document, segment.section_indices, segment.title), encoding="utf-8")
-            written.append(path)
-        return written
-
-    def _write_manifest(
-        self,
-        topic_dir: Path,
-        artifact: TopicArtifact,
-        description: str,
-        documents: list[ParsedDocument],
-        plan: GroupingPlan,
-        title: str,
-        locator: str,
-    ) -> Path:
-        payload = artifact.to_dict()
-        payload["description"] = description
-        payload["title"] = title
-        payload["locator"] = locator
-        payload["documents"] = [document.to_dict() for document in documents]
-        payload["decision"] = plan.decision.value
-        manifest_path = topic_dir / ".topic_manifest.json"
-        manifest_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-        return manifest_path
-
-
 def compose_topic_markdown(documents: list[ParsedDocument], plan: GroupingPlan) -> str:
     title = display_topic_title(plan.topic_folder, documents)
     keywords = derive_keywords(documents)
@@ -331,9 +156,9 @@ def compose_topic_markdown(documents: list[ParsedDocument], plan: GroupingPlan) 
             "| "
             + " | ".join(
                 [
-                    _markdown_table_cell(document_title),
-                    _markdown_table_cell(compose_document_summary(document)),
-                    _markdown_table_cell(natural_join(headings[:3]) if headings else document_outline(document)),
+                    markdown_table_cell(document_title),
+                    markdown_table_cell(compose_document_summary(document)),
+                    markdown_table_cell(natural_join(headings[:3]) if headings else document_outline(document)),
                     f"`{source_ref}`",
                 ]
             )
@@ -412,10 +237,6 @@ def derive_keywords(documents: list[ParsedDocument], limit: int = 8) -> list[str
         if len(selected) >= limit:
             break
     return selected
-
-
-def humanize_topic_folder(topic_folder: str) -> str:
-    return " ".join(part.capitalize() for part in topic_folder.split("-")) or "Topic"
 
 
 def display_topic_title(topic_folder: str, documents: list[ParsedDocument]) -> str:
@@ -501,29 +322,6 @@ def compose_topic_summary(documents: list[ParsedDocument]) -> str:
     return " ".join(parts).strip()
 
 
-def compose_scope_paragraph(documents: list[ParsedDocument]) -> str:
-    headings = collect_semantic_headings(documents, limit=4)
-    total_sections = sum(len([section for section in document.sections if not _is_noise_section(section)]) for document in documents)
-    total_pages = sum(
-        1
-        for document in documents
-        for section in document.sections
-        if section.page_number is not None and not _is_noise_section(section)
-    )
-    structure_parts: list[str] = []
-    if total_pages:
-        structure_parts.append(f"{total_pages} readable page(s)")
-    if total_sections:
-        structure_parts.append(f"{total_sections} meaningful section(s)")
-    structure = " and ".join(structure_parts) if structure_parts else "the available readable text"
-    if headings:
-        return (
-            f"The source material is organized around {natural_join(headings)}. "
-            f"This entry condenses {structure} into a quick-reference summary."
-        )
-    return f"This entry condenses {structure} into a quick-reference summary."
-
-
 def compose_document_lead(document: ParsedDocument) -> str:
     source_ref = document.source.local_path.name if document.source.local_path else document.source.source_uri
     headings = collect_semantic_headings([document], limit=3)
@@ -536,16 +334,6 @@ def compose_document_lead(document: ParsedDocument) -> str:
         f"This source is derived from `{source_ref}`. "
         f"The extracted notes below focus on the most readable high-signal material."
     )
-
-
-def compose_document_focus(document: ParsedDocument) -> str:
-    sentences = topic_overview_sentences([document], limit=2)
-    if sentences:
-        return " ".join(sentences[:2])
-    headings = collect_semantic_headings([document], limit=3)
-    if headings:
-        return f"Covers {natural_join(headings)}."
-    return summarize_text(document.full_text)
 
 
 def compose_document_summary(document: ParsedDocument) -> str:
@@ -610,38 +398,6 @@ def describe_topic_expectation(documents: list[ParsedDocument]) -> str:
     return f"grouped reference notes from {len(documents)} related sources"
 
 
-def topic_entry_points(documents: list[ParsedDocument], limit: int = 4) -> list[str]:
-    entries: list[str] = []
-    seen: set[str] = set()
-    for document in documents:
-        for label, summary in document_section_highlights(document, limit=2):
-            entry = f"{document.source.title or source_name(document)} -> {label}: {summary}"
-            key = entry.lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            entries.append(entry)
-            if len(entries) >= limit:
-                return entries
-    return entries
-
-
-def document_section_highlights(document: ParsedDocument, limit: int = 4) -> list[tuple[str, str]]:
-    highlights: list[tuple[str, str]] = []
-    for section in document.sections:
-        if _is_noise_section(section):
-            continue
-        summary_sentences = _extract_sentences(section.text)
-        summary = summary_sentences[0] if summary_sentences else summarize_text(section.text)
-        if not summary:
-            continue
-        label = section.heading or (f"Page {section.page_number}" if section.page_number is not None else "Section")
-        highlights.append((label, summary))
-        if len(highlights) >= limit:
-            break
-    return highlights
-
-
 def document_outline(document: ParsedDocument) -> str:
     meaningful_sections = [section for section in document.sections if not _is_noise_section(section)]
     if meaningful_sections and all(section.page_number is not None for section in meaningful_sections):
@@ -680,41 +436,6 @@ def collect_semantic_headings(documents: list[ParsedDocument], limit: int = 4) -
             if len(headings) >= limit:
                 return headings
     return headings
-
-
-def _meaningful_sentences(document: ParsedDocument) -> list[str]:
-    return _meaningful_sentences_from_sections(document.sections) or _extract_sentences(document.full_text)
-
-
-def _meaningful_sentences_from_sections(sections: list[DocumentSection]) -> list[str]:
-    sentences: list[str] = []
-    for section in sections:
-        if _is_noise_section(section):
-            continue
-        sentences.extend(_extract_sentences(section.text))
-        if len(sentences) >= 8:
-            break
-    return sentences
-
-
-def _extract_sentences(text: str) -> list[str]:
-    cleaned = clean_source_text(text)
-    if not cleaned:
-        return []
-    candidates = [part.strip() for part in SENTENCE_BOUNDARY_PATTERN.split(cleaned) if part.strip()]
-    sentences: list[str] = []
-    for candidate in candidates:
-        candidate = normalize_wiki_sentence(candidate)
-        if len(candidate) < 40:
-            continue
-        if len(candidate.split()) < 7:
-            continue
-        if _looks_noisy(candidate):
-            continue
-        if candidate[-1] not in ".!?":
-            candidate += "."
-        sentences.append(candidate)
-    return sentences
 
 
 def clean_source_text(text: str) -> str:
@@ -757,6 +478,66 @@ def normalize_wiki_sentence(text: str) -> str:
     return cleaned
 
 
+def natural_join(values: list[str]) -> str:
+    if not values:
+        return ""
+    if len(values) == 1:
+        return values[0]
+    if len(values) == 2:
+        return f"{values[0]} and {values[1]}"
+    return f"{', '.join(values[:-1])}, and {values[-1]}"
+
+
+def dedupe_preserve_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        ordered.append(value)
+    return ordered
+
+
+def markdown_table_cell(value: str) -> str:
+    return value.replace("|", "\\|").replace("\n", " ").strip() or "-"
+
+
+def _meaningful_sentences(document: ParsedDocument) -> list[str]:
+    return _meaningful_sentences_from_sections(document.sections) or _extract_sentences(document.full_text)
+
+
+def _meaningful_sentences_from_sections(sections: list[DocumentSection]) -> list[str]:
+    sentences: list[str] = []
+    for section in sections:
+        if _is_noise_section(section):
+            continue
+        sentences.extend(_extract_sentences(section.text))
+        if len(sentences) >= 8:
+            break
+    return sentences
+
+
+def _extract_sentences(text: str) -> list[str]:
+    cleaned = clean_source_text(text)
+    if not cleaned:
+        return []
+    candidates = [part.strip() for part in SENTENCE_BOUNDARY_PATTERN.split(cleaned) if part.strip()]
+    sentences: list[str] = []
+    for candidate in candidates:
+        candidate = normalize_wiki_sentence(candidate)
+        if len(candidate) < 40:
+            continue
+        if len(candidate.split()) < 7:
+            continue
+        if _looks_noisy(candidate):
+            continue
+        if candidate[-1] not in ".!?":
+            candidate += "."
+        sentences.append(candidate)
+    return sentences
+
+
 def _is_noise_section(section: DocumentSection) -> bool:
     heading = (section.heading or "").strip()
     if heading and REFERENCE_HEADING_PATTERN.fullmatch(heading):
@@ -783,34 +564,9 @@ def _looks_noisy(text: str) -> bool:
     return False
 
 
-def natural_join(values: list[str]) -> str:
-    if not values:
-        return ""
-    if len(values) == 1:
-        return values[0]
-    if len(values) == 2:
-        return f"{values[0]} and {values[1]}"
-    return f"{', '.join(values[:-1])}, and {values[-1]}"
-
-
 def _is_page_heading(heading: str) -> bool:
     normalized = heading.strip().lower()
     return bool(re.fullmatch(r"page\s+\d+", normalized))
-
-
-def _dedupe(values: list[str]) -> list[str]:
-    seen: set[str] = set()
-    ordered: list[str] = []
-    for value in values:
-        if value in seen:
-            continue
-        seen.add(value)
-        ordered.append(value)
-    return ordered
-
-
-def _markdown_table_cell(value: str) -> str:
-    return value.replace("|", "\\|").replace("\n", " ").strip() or "-"
 
 
 def _add_keywords_from_text(
@@ -933,22 +689,22 @@ def _keyword_overlap_key(term: str) -> str:
     return " ".join(words)
 
 
-# Shared deterministic rendering now resolves through the dedicated rendering module.
-compose_topic_markdown = _rendering.compose_topic_markdown
-compose_segment_markdown = _rendering.compose_segment_markdown
-describe_documents = _rendering.describe_documents
-summarize_text = _rendering.summarize_text
-derive_keywords = _rendering.derive_keywords
-display_topic_title = _rendering.display_topic_title
-topic_overview_sentences = _rendering.topic_overview_sentences
-compose_topic_locator = _rendering.compose_topic_locator
-compose_key_point = _rendering.compose_key_point
-document_outline = _rendering.document_outline
-source_name = _rendering.source_name
-summarize_sentences = _rendering.summarize_sentences
-collect_semantic_headings = _rendering.collect_semantic_headings
-clean_source_text = _rendering.clean_source_text
-normalize_wiki_sentence = _rendering.normalize_wiki_sentence
-natural_join = _rendering.natural_join
-_dedupe = _rendering.dedupe_preserve_order
-_markdown_table_cell = _rendering.markdown_table_cell
+__all__ = [
+    "clean_source_text",
+    "collect_semantic_headings",
+    "compose_key_point",
+    "compose_segment_markdown",
+    "compose_topic_locator",
+    "compose_topic_markdown",
+    "dedupe_preserve_order",
+    "describe_documents",
+    "derive_keywords",
+    "display_topic_title",
+    "document_outline",
+    "markdown_table_cell",
+    "natural_join",
+    "normalize_wiki_sentence",
+    "source_name",
+    "summarize_text",
+    "topic_overview_sentences",
+]

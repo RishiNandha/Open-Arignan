@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Protocol
 
 from arignan.models import ChunkMetadata, ChunkRecord, RetrievalHit, RetrievalSource
+from arignan.tracing import ModelTraceCollector
 
 from .embedding import Embedder
 
@@ -195,11 +196,21 @@ class LocalDenseIndex:
 
 
 class DenseIndexer:
-    def __init__(self, embedder: Embedder, index: DenseIndex) -> None:
+    def __init__(self, embedder: Embedder, index: DenseIndex, trace_sink: ModelTraceCollector | None = None) -> None:
         self.embedder = embedder
         self.index = index
+        self.trace_sink = trace_sink
 
     def index_chunks(self, chunks: list[ChunkRecord]) -> list[ChunkRecord]:
+        if self.trace_sink is not None and chunks:
+            self.trace_sink.record(
+                component="embedder",
+                task="dense indexing",
+                model_name=self.embedder.model_name,
+                backend=getattr(self.embedder, "backend_name", type(self.embedder).__name__),
+                item_count=len(chunks),
+                detail=f"{len(chunks)} chunk(s)",
+            )
         embeddings = self.embedder.embed_texts([chunk.text for chunk in chunks])
         embedded_chunks = [
             replace(chunk, embedding=embedding)
@@ -209,6 +220,15 @@ class DenseIndexer:
         return embedded_chunks
 
     def search(self, query: str, limit: int) -> list[RetrievalHit]:
+        if self.trace_sink is not None:
+            self.trace_sink.record(
+                component="embedder",
+                task="dense query embedding",
+                model_name=self.embedder.model_name,
+                backend=getattr(self.embedder, "backend_name", type(self.embedder).__name__),
+                item_count=1,
+                detail=f"top_k={limit}",
+            )
         query_embedding = self.embedder.embed_query(query)
         return self.index.search(query_embedding, limit)
 

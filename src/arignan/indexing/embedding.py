@@ -9,6 +9,7 @@ DEFAULT_EMBEDDING_MODEL = "BAAI/bge-base-en-v1.5"
 
 class Embedder(Protocol):
     model_name: str
+    backend_name: str
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
         """Embed a batch of texts."""
@@ -23,6 +24,7 @@ class HashingEmbedder:
             raise ValueError("dimension must be positive")
         self.dimension = dimension
         self.model_name = DEFAULT_EMBEDDING_MODEL
+        self.backend_name = "hashing-embedder"
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
         return [self.embed_query(text) for text in texts]
@@ -46,6 +48,7 @@ class HashingEmbedder:
 class SentenceTransformerEmbedder:
     def __init__(self, model_name: str = DEFAULT_EMBEDDING_MODEL) -> None:
         self.model_name = model_name
+        self.backend_name = "sentence-transformers"
         try:
             from sentence_transformers import SentenceTransformer
         except ImportError as exc:  # pragma: no cover - exercised only when dependency is installed

@@ -10,6 +10,7 @@ DEFAULT_RERANKER_MODEL = "BAAI/bge-reranker-v2-m3"
 
 class Reranker(Protocol):
     model_name: str
+    backend_name: str
 
     def rerank(self, query: str, hits: list[RetrievalHit], limit: int, min_score: float = 0.0) -> list[RetrievalHit]:
         """Rerank candidate retrieval hits."""
@@ -18,6 +19,7 @@ class Reranker(Protocol):
 class HeuristicReranker:
     def __init__(self) -> None:
         self.model_name = DEFAULT_RERANKER_MODEL
+        self.backend_name = "heuristic-reranker"
 
     def rerank(self, query: str, hits: list[RetrievalHit], limit: int, min_score: float = 0.0) -> list[RetrievalHit]:
         query_terms = set(tokenize(query))
@@ -36,6 +38,7 @@ class HeuristicReranker:
 class CrossEncoderReranker:
     def __init__(self, model_name: str = DEFAULT_RERANKER_MODEL) -> None:
         self.model_name = model_name
+        self.backend_name = "cross-encoder"
         try:
             from sentence_transformers import CrossEncoder
         except ImportError as exc:  # pragma: no cover - exercised only when dependency is installed

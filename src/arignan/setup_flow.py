@@ -9,11 +9,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-DEFAULT_LOCAL_LLM_DISPLAY_NAME = "Qwen3-1.7B"
-DEFAULT_LOCAL_LLM_REPO_ID = "Qwen/Qwen3-1.7B"
-MODEL_REPO_ALIASES = {
-    DEFAULT_LOCAL_LLM_DISPLAY_NAME: DEFAULT_LOCAL_LLM_REPO_ID,
-}
+from arignan.model_registry import (
+    DEFAULT_LOCAL_LLM_DISPLAY_NAME,
+    DEFAULT_LOCAL_LLM_REPO_ID,
+    MODEL_REPO_ALIASES,
+    resolve_model_repo_id,
+    sanitize_model_id,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,16 +54,6 @@ def install_package(root: Path | None = None, dev: bool = False) -> str:
         check=True,
     )
     return target
-
-
-def sanitize_model_id(model_id: str) -> str:
-    return model_id.replace("/", "__").replace("\\", "__").replace(":", "_")
-
-
-def resolve_model_repo_id(model_id: str) -> str:
-    return MODEL_REPO_ALIASES.get(model_id, model_id)
-
-
 def update_local_llm_model(settings_path: Path, local_llm_model: str | None) -> None:
     if local_llm_model is None:
         return
