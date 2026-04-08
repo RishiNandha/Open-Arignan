@@ -8,6 +8,8 @@
 - `arignan ask "what is the full form of jepa"`: Works as expected
 
 # Known Issues
-- Answering quality can be improved with better more structured prompt given to the LLM instead of just plainly adding context and question
-- Summary markdown quality can be improved with better examples of how a wiki-style knowledge base should look
-- Topic grouping is still not intelligent. Most topics end up landing in their own folders anyways
+1. Answers are just rephrasing the given context, which adds no value for having the LLM. Prompting style needs changes
+2. Summary markdown can be more strictly wiki-styled with cross-lines (as described by A Karpathy recently)
+3. Topic grouping is still not very intelligent. Some topics are not getting grouped even when similar
+4. Segmentation of a large book into multiple sections hasn't been tested yet
+5. Active session jsons and logs are not getting deleted when the sessions end / new session starts
