@@ -50,14 +50,15 @@
 0. Clone the repo
 1. Run the `setup.py`. This will:
    - Download all the models needed
-   - Create a bin folder with executables
-2. Add the bin folder to your PATH
+   - Create a `bin/` folder with executables
+2. Add the `bin/` folder to your PATH
 3. Try `arignan load "filename.pdf"`
 4. Try `arignan ask "relevant question"`
 
 ### Option 2: Pip Install
 
-(To be supported in future)
+1. Pip install: `python -m pip install -e .[dev]`
+2. Add `bin/` to PATH
 
 ## Detailed Description
 
@@ -210,6 +211,28 @@ When the chat history is becoming too long:
   - Recent turns
   - Fresh retrieved context
 - The session JSON is overwritten with this summarized context (since unlike a chatbot, chat history holds no significance to us)
+
+## Setup
+
+### For Users
+
+1. Setup: `python setup.py`. And then add `bin/` to PATH.
+2. Help: `arignan --help`
+3. Load: `arignan load "filename.pdf"`
+4. Load with hat: `arignan load "flename.pdf" --hat psychology`
+5. QnA: `arignan ask "What is JEPA?"`
+6. QnA with hat: `arignan ask "How to use CalibreRC" --hat "IC Design"`
+7. Ingestion Log: `arignan list-loads`
+8. Delete a past ingestion: `arignan delete <load_id>`
+9. Reset context: `arignan reset-session`
+10. Save context: `arignan save-session <path/session_name.json>`
+11. Reload context: `arignan load-session <path/session_name.json>`
+
+### For Developers
+
+1. Install dependencies: `python -m pip install -e .[dev]`
+2. Run tests: `python -m pytest`
+3. CLI smoke tests: `python -m pytest tests/integration/test_cli_smoke.py`
 
 ## License
 
