@@ -1,3 +1,20 @@
+Metadata-Version: 2.4
+Name: open-arignan
+Version: 0.1.0
+Summary: Local-first private knowledge base and retrieval system.
+Author: Open Arignan Contributors
+License: CC BY-NC-SA 4.0
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: httpx<1,>=0.27
+Requires-Dist: pypdf<6,>=4.2
+Requires-Dist: huggingface_hub<1,>=0.23
+Requires-Dist: qdrant-client<2,>=1.9
+Provides-Extra: dev
+Requires-Dist: pytest<9,>=8.2; extra == "dev"
+Dynamic: license-file
+
 # Open-Arignan
 
 **Arignar** is the tamil word for the well-read / the knowledgeable / the scholar. **Arignan** is an application that can help scholars, engineers, founders, etc... to maintain a local-first private knowledge base and get queries answered from it.
@@ -13,7 +30,7 @@
 
 ### Technical
 
-- **Fully local LLM**: `Qwen/Qwen3-1.7B` by default, reconfigurable in settings.json
+- **Fully local LLM**: _Gemma-4-31B-IT-NVFP4_ by default, reconfigurable in settings.json
 - **4-piece hybrid retreival system**:
 
   - **map.md files** tell the LLM "where to find what" in the subdirectories
@@ -48,10 +65,10 @@
 ### Option 1: Git Clone
 
 0. Clone the repo
-1. Run the `python setup.py --app-home <install dir>`. This will:
+1. Run the `setup.py`. This will:
    - Download all the models needed
-   - Create a `<install dir/bin/` folder with executables
-2. Add the `<install dir/bin/` folder to your PATH
+   - Create a `bin/` folder with executables
+2. Add the `bin/` folder to your PATH
 3. Try `arignan load "filename.pdf"`
 4. Try `arignan ask "relevant question"`
 
@@ -143,7 +160,7 @@ Vector Index is done using Qdrant and HNSW for storing both embedding and metada
 
 #### Topic Grouping and Segmentation
 
-Grouping of files into a single markdown or segmentation of a single file into multiple markdowns is decided by the main LLM (Qwen 3 by default). The decisions are mostly driven by semantics, but there is also a `max_md_length` for assisting the decision.
+Grouping of files into a single markdown or segmentation of a single file into multiple markdowns is decided by the main LLM (Gemma 4 by default). The decisions are mostly driven by semantics, but there is also a `max_md_length` for assisting the decision.
 
 **Grouping:**
 
@@ -216,8 +233,7 @@ When the chat history is becoming too long:
 
 ### For Users
 
-1. Setup: `python setup.py --app-home <install dir>`
-2. Add `<install dir>/bin/` to PATH
+1. Setup: `python setup.py`. And then add `bin/` to PATH.
 2. Help: `arignan --help`
 3. Load: `arignan load "filename.pdf"`
 4. Load with hat: `arignan load "flename.pdf" --hat psychology`

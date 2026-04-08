@@ -3,3 +3,7 @@ __pycache__/
 .pytest_cache/
 pytest-cache-files-*/
 .tmp-arignan/
+.setuptools/
+build/
+docs/
+build/
