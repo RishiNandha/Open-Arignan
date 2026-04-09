@@ -102,6 +102,25 @@ def test_initialize_local_state_can_override_local_llm_model(tmp_path: Path) -> 
         Path.home = original_home
 
 
+def test_initialize_local_state_can_pin_lightweight_full_model(tmp_path: Path) -> None:
+    original_home = Path.home
+    Path.home = staticmethod(lambda: tmp_path)
+    try:
+        _, settings_path = initialize_local_state(
+            app_home=tmp_path / ".arignan",
+            local_llm_backend="ollama",
+            local_llm_model="qwen3:0.6b",
+            local_llm_light_model="qwen3:0.6b",
+        )
+
+        payload = json.loads(settings_path.read_text(encoding="utf-8"))
+
+        assert payload["local_llm_model"] == "qwen3:0.6b"
+        assert payload["local_llm_light_model"] == "qwen3:0.6b"
+    finally:
+        Path.home = original_home
+
+
 def test_initialize_local_state_migrates_legacy_transformers_default(tmp_path: Path) -> None:
     original_home = Path.home
     Path.home = staticmethod(lambda: tmp_path)

@@ -11,6 +11,7 @@
    - Download all the models needed, including the default local answer model and a lighter fallback answer model
    - Create a **bin directory** folder with executables
    - Print the bin directory for your reference
+   - Optional: use `python setup.py --app-home <install dir> --lightweight` if you want the normal local model to be the same smaller model as the light mode
 2. Add the bin directory folder to your PATH
 3. Try `arignan load "filename.pdf"`
 4. Try `arignan ask "relevant question"`
@@ -54,6 +55,7 @@ soon tm ;)
   - **Deleting Content**: First displays the ingestion history with load_IDs. Then user picks the load_IDs to undo the past ingestion.
   - **Saving chat state**: Chat history has to be saved. Otherwise, it get's erase by default
   - **Loading chat state**: To load the saved chat history
+  - **GUI launch**: `arignan -gui` starts the local browser UI and opens it automatically
 - **MCP Entry Points**:
 
   - **Context Retreival tool**: A client such as copilot or codex or claude code can tap into the knowledge base and retrieve context
@@ -244,8 +246,10 @@ When the chat history is becoming too long:
 
 1. Install dependencies: `python -m pip install -e .[dev]`
 2. Run tests: `python -m pytest`
-3. Debug Load Command: `arignan load "filepath" --debug`
-4. Debug Ask Command: `arignan ask "question" --debug`
+3. Optional git hook activation: `git config core.hooksPath .githooks`
+4. After that, every `git push` will run `python -m pytest` first through the tracked `pre-push` hook
+5. Debug Load Command: `arignan load "filepath" --debug`
+6. Debug Ask Command: `arignan ask "question" --debug`
 
 ## Declaration
 

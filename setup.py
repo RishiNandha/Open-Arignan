@@ -37,6 +37,11 @@ def is_packaging_invocation(argv: list[str]) -> bool:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Bootstrap a local Arignan user installation.")
     parser.add_argument("--dev", action="store_true", help="Install the repository with dev dependencies.")
+    parser.add_argument(
+        "--lightweight",
+        action="store_true",
+        help="Use the default light local model for both normal and light answer modes during setup.",
+    )
     parser.add_argument("--app-home", type=Path, default=None, help="Override the Arignan application home directory.")
     parser.add_argument(
         "--llm-backend",
@@ -65,6 +70,7 @@ def main() -> int:
     try:
         result = run_setup(
             dev=args.dev,
+            lightweight=args.lightweight,
             app_home=args.app_home,
             llm_backend=args.llm_backend,
             llm_model=args.llm_model,

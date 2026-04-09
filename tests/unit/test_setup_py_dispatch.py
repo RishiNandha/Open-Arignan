@@ -21,3 +21,11 @@ def test_setup_py_detects_packaging_invocations() -> None:
     assert module.is_packaging_invocation(["setup.py", "bdist_wheel"])
     assert not module.is_packaging_invocation(["setup.py"])
     assert not module.is_packaging_invocation(["setup.py", "--dev"])
+
+
+def test_setup_py_parser_accepts_lightweight_flag() -> None:
+    module = _load_setup_module()
+
+    args = module.build_parser().parse_args(["--lightweight"])
+
+    assert args.lightweight is True

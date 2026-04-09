@@ -29,6 +29,7 @@ class SessionManager:
             refreshed = self._apply_idle_timeout(existing)
             self.store.save_active(refreshed)
             return refreshed
+        self.store.clear_all_active()
         session = SessionState(
             session_id=f"session-{uuid4().hex[:12]}",
             terminal_pid=terminal_pid,

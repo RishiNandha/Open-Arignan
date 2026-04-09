@@ -242,6 +242,7 @@ Topic folder invariant:
   - persisted active/saved session JSON
   - per-PID active session directories for logs
   - active exception log path helper
+  - clears stale active-session artifacts when a brand-new session is started
 - `src/arignan/session/manager.py`
   - PID-scoped session lifecycle
   - rollover logic

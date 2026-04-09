@@ -1,5 +1,6 @@
 # Checked Features
 - `python setup.py --app-home E:/arignan`: Works as expected
+- `python setup.py --app-home E:/arignan --lightweight`: Supported
 - `arignan detete load-20260408073121-0c125daf`: Works as expecteda
 - `arignan delete --hat SNNs`: Works as expected
 - `arignan save-session 8apr`: Works as expected. 
@@ -12,4 +13,3 @@
 2. Summary markdown can be more strictly wiki-styled with cross-lines (as described by A Karpathy recently)
 3. Topic grouping is still not very intelligent. Some topics are not getting grouped even when similar
 4. Segmentation of a large book into multiple sections hasn't been tested yet
-5. Active session jsons and logs are not getting deleted when the sessions end / new session starts

@@ -47,6 +47,11 @@ class SessionStore:
         if session_dir.exists():
             shutil.rmtree(session_dir)
 
+    def clear_all_active(self) -> None:
+        if self.active_dir.exists():
+            shutil.rmtree(self.active_dir)
+        self.active_dir.mkdir(parents=True, exist_ok=True)
+
     def save_snapshot(self, session: SessionState, destination: Path | None = None) -> Path:
         target = self.resolve_snapshot_destination(destination, session.session_id)
         target.parent.mkdir(parents=True, exist_ok=True)

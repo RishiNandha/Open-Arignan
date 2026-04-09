@@ -56,3 +56,22 @@ def test_session_manager_named_save_uses_saved_dir_and_falls_back_to_latest_acti
     assert saved_path == app_home / "sessions" / "saved" / "8apr.json"
     assert saved_path.exists()
     assert "Remember this context" in saved_path.read_text(encoding="utf-8")
+
+
+def test_session_manager_clears_other_active_sessions_when_starting_new_one(app_home: Path) -> None:
+    store = SessionStore(app_home)
+    first_manager = SessionManager(store, SessionConfig())
+    first_session = first_manager.get_or_create(terminal_pid=111, hat="default")
+    store.active_exception_log_path(111).parent.mkdir(parents=True, exist_ok=True)
+    store.active_exception_log_path(111).write_text("old traceback", encoding="utf-8")
+    store.active_model_call_log_path(111).parent.mkdir(parents=True, exist_ok=True)
+    store.active_model_call_log_path(111).write_text("old call", encoding="utf-8")
+
+    second_manager = SessionManager(store, SessionConfig())
+    second_session = second_manager.get_or_create(terminal_pid=222, hat="default")
+
+    assert first_session.terminal_pid == 111
+    assert second_session.terminal_pid == 222
+    assert not store.active_path(111).exists()
+    assert not store.active_session_dir(111).exists()
+    assert store.active_path(222).exists()

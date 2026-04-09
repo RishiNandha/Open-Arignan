@@ -1,0 +1,6 @@
+#!/usr/bin/env sh
+set -eu
+
+echo "[arignan hook] Running test suite before push..."
+python -m pytest
+

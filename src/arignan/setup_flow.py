@@ -68,8 +68,9 @@ def update_local_llm_settings(
     settings_path: Path,
     local_llm_backend: str | None,
     local_llm_model: str | None,
+    local_llm_light_model: str | None = None,
 ) -> None:
-    if local_llm_model is None and local_llm_backend is None:
+    if local_llm_model is None and local_llm_backend is None and local_llm_light_model is None:
         _migrate_legacy_local_llm_defaults(settings_path)
         return
     payload = json.loads(settings_path.read_text(encoding="utf-8"))
@@ -77,6 +78,8 @@ def update_local_llm_settings(
         payload["local_llm_backend"] = local_llm_backend
     if local_llm_model is not None:
         payload["local_llm_model"] = local_llm_model
+    if local_llm_light_model is not None:
+        payload["local_llm_light_model"] = local_llm_light_model
     settings_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
@@ -84,6 +87,7 @@ def initialize_local_state(
     app_home: Path | None = None,
     local_llm_backend: str | None = None,
     local_llm_model: str | None = None,
+    local_llm_light_model: str | None = None,
 ) -> tuple[Path, Path]:
     from arignan.config import write_default_settings
     from arignan.paths import write_persisted_app_home
@@ -96,6 +100,7 @@ def initialize_local_state(
         settings_path,
         local_llm_backend=local_llm_backend,
         local_llm_model=local_llm_model,
+        local_llm_light_model=local_llm_light_model,
     )
     layout = StorageLayout.from_home(app_home).ensure()
     return layout.root, settings_path
@@ -208,17 +213,21 @@ def run_setup(
     app_home: Path | None = None,
     llm_backend: str | None = None,
     llm_model: str | None = None,
+    lightweight: bool = False,
     progress: Callable[[str], None] | None = None,
 ) -> SetupResult:
     root = repo_root()
     ensure_repo_on_syspath(root)
+    effective_llm_model = DEFAULT_LIGHT_LOCAL_LLM_REPO_ID if lightweight else llm_model
+    effective_light_model = DEFAULT_LIGHT_LOCAL_LLM_REPO_ID if lightweight else None
     _emit(progress, "[1/4] Installing Python package...")
     target = install_package(root=root, dev=dev)
     _emit(progress, "[2/4] Initializing local Arignan state...")
     resolved_home, settings_path = initialize_local_state(
         app_home=app_home,
         local_llm_backend=llm_backend,
-        local_llm_model=llm_model,
+        local_llm_model=effective_llm_model,
+        local_llm_light_model=effective_light_model,
     )
     _emit(progress, "[3/4] Downloading required models...")
     models_dir = download_required_models(resolved_home, progress=progress)
