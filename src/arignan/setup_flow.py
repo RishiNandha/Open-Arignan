@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from arignan.llm.service import ensure_model_available, provision_managed_runtime
 from arignan.model_registry import (
     DEFAULT_LOCAL_LLM_DISPLAY_NAME,
     DEFAULT_LOCAL_LLM_REPO_ID,
@@ -104,6 +103,30 @@ def initialize_local_state(
     )
     layout = StorageLayout.from_home(app_home).ensure()
     return layout.root, settings_path
+
+
+def provision_managed_runtime(app_home: Path, progress: Callable[[str], None] | None = None) -> Path:
+    from arignan.llm.service import provision_managed_runtime as _provision_managed_runtime
+
+    return _provision_managed_runtime(app_home, progress=progress)
+
+
+def ensure_model_available(
+    app_home: Path,
+    endpoint: str,
+    model: str,
+    progress: Callable[[str], None] | None = None,
+    timeout_seconds: float = 1800.0,
+) -> None:
+    from arignan.llm.service import ensure_model_available as _ensure_model_available
+
+    _ensure_model_available(
+        app_home,
+        endpoint,
+        model,
+        progress=progress,
+        timeout_seconds=timeout_seconds,
+    )
 
 
 def download_required_models(app_home: Path, progress: Callable[[str], None] | None = None) -> Path:

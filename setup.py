@@ -12,8 +12,6 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from arignan.setup_flow import render_summary, run_setup
-
 
 PACKAGING_COMMANDS = {
     "bdist_wheel",
@@ -65,6 +63,8 @@ def main() -> int:
             }
         )
         return 0
+    from arignan.setup_flow import render_summary, run_setup
+
     args = build_parser().parse_args()
     print("Starting Arignan setup...")
     try:
