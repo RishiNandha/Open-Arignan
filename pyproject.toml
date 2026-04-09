@@ -8,7 +8,7 @@ version = "1.0.0"
 description = "Local-first private knowledge base and retrieval system."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "CC BY-NC-SA 4.0" }
+license = "CC-BY-NC-SA-4.0"
 authors = [
   { name = "Rishi Nandha Vanchinathan" }
 ]

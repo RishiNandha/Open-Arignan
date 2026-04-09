@@ -56,12 +56,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     if is_packaging_invocation(sys.argv):
-        setuptools_setup(
-            options={
-                "egg_info": {"egg_base": ".setuptools"},
-                "build": {"build_base": ".setuptools/build"},
-            }
-        )
+        setuptools_setup()
         return 0
     from arignan.setup_flow import render_summary, run_setup
 
