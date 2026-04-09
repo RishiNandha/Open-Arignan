@@ -17,7 +17,10 @@
 
 ### Option 2: GUI
 
-Soon tm ;)
+0. Run setup first
+1. Run `arignan -gui`
+2. Your browser opens locally
+3. Use **Add More Files To Knowledge Base** to load material, then ask questions in the chat box
 
 ## Key Points
 
@@ -229,7 +232,7 @@ When the chat history is becoming too long:
 
 1. Setup: `python setup.py --app-home <install dir>`. 
 2. Optional lightweight setup for smaller GPUs: `python setup.py --app-home <install dir> --lightweight`
-3. Optional custom local model during setup: `python setup.py --app-home <install dir> --llm-model <model_name> --llm-backend ollama`
+3. Optional smaller/custom local model during setup: `python setup.py --app-home <install dir> --llm-model <model_name> --llm-backend ollama`
 4. Optional post-setup model change: edit `settings.json` 
 5. Add **Bin directory** to PATH. The setup.py will automatically print the bin directory for you.
 6. Help: `arignan --help`
