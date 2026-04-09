@@ -17,7 +17,7 @@
 
 ### Option 2: GUI
 
-0. Run setup first
+0. Run  `python setup.py --app-home <install dir>`
 1. Run `arignan -gui`
 2. Your browser opens locally
 3. Use **Add More Files To Knowledge Base** to load material, then ask questions in the chat box
