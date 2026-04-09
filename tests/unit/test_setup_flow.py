@@ -124,6 +124,9 @@ def test_initialize_local_state_can_override_local_llm_model(tmp_path: Path) -> 
         assert payload["local_llm_backend"] == "ollama"
         assert payload["local_llm_model"] == "qwen3:4b-q4_K_M"
         assert payload["local_llm_light_model"] == "qwen3:0.6b"
+        assert payload["local_llm_context_window"] == 6144
+        assert payload["local_llm_flash_attention"] is True
+        assert payload["local_llm_kv_cache_type"] == "q8_0"
         assert payload["embedding_model"] == "Alibaba-NLP/gte-modernbert-base"
         assert payload["reranker_model"] == "Alibaba-NLP/gte-reranker-modernbert-base"
         assert read_persisted_app_home() == (tmp_path / ".arignan").resolve()
@@ -174,6 +177,8 @@ def test_initialize_local_state_refreshes_existing_settings_to_current_defaults(
         assert refreshed["local_llm_backend"] == "ollama"
         assert refreshed["local_llm_model"] == "qwen3:4b-q4_K_M"
         assert refreshed["local_llm_light_model"] == "qwen3:0.6b"
+        assert refreshed["local_llm_context_window"] == 6144
+        assert refreshed["local_llm_flash_attention"] is True
         assert refreshed["embedding_model"] == "Alibaba-NLP/gte-modernbert-base"
         assert refreshed["reranker_model"] == "Alibaba-NLP/gte-reranker-modernbert-base"
     finally:
@@ -184,7 +189,7 @@ def test_download_required_models_pulls_default_ollama_model(tmp_path: Path, mon
     app_home = tmp_path / ".arignan"
     write_default_settings(app_home=app_home)
     provisioned: list[Path] = []
-    ensured: list[tuple[Path, str, str, float]] = []
+    ensured: list[tuple[Path, str, str, int | None, bool | None, str | None, int | None, int | None, float]] = []
 
     def fake_provision(app_home_arg: Path, progress=None) -> Path:
         provisioned.append(app_home_arg)
@@ -193,8 +198,32 @@ def test_download_required_models_pulls_default_ollama_model(tmp_path: Path, mon
         executable.write_text("", encoding="utf-8")
         return executable
 
-    def fake_ensure(app_home_arg: Path, endpoint: str, model: str, progress=None, timeout_seconds: float = 1800.0) -> None:
-        ensured.append((app_home_arg, endpoint, model, timeout_seconds))
+    def fake_ensure(
+        app_home_arg: Path,
+        endpoint: str,
+        model: str,
+        *,
+        context_window: int | None = None,
+        flash_attention: bool | None = None,
+        kv_cache_type: str | None = None,
+        num_parallel: int | None = None,
+        max_loaded_models: int | None = None,
+        progress=None,
+        timeout_seconds: float = 1800.0,
+    ) -> None:
+        ensured.append(
+            (
+                app_home_arg,
+                endpoint,
+                model,
+                context_window,
+                flash_attention,
+                kv_cache_type,
+                num_parallel,
+                max_loaded_models,
+                timeout_seconds,
+            )
+        )
 
     downloaded_transformer_models: list[tuple[str, Path, bool]] = []
 
@@ -214,8 +243,8 @@ def test_download_required_models_pulls_default_ollama_model(tmp_path: Path, mon
     assert models_dir == app_home / "models"
     assert provisioned == [app_home]
     assert ensured == [
-        (app_home, "http://127.0.0.1:11434", "qwen3:4b-q4_K_M", 1800.0),
-        (app_home, "http://127.0.0.1:11434", "qwen3:0.6b", 1800.0),
+        (app_home, "http://127.0.0.1:11434", "qwen3:4b-q4_K_M", 6144, True, "q8_0", 1, 1, 1800.0),
+        (app_home, "http://127.0.0.1:11434", "qwen3:0.6b", 6144, True, "q8_0", 1, 1, 1800.0),
     ]
     manifest = json.loads((models_dir / "local_llm_manifest.json").read_text(encoding="utf-8"))
     assert manifest == {

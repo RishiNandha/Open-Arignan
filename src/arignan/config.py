@@ -20,19 +20,19 @@ APP_HOME_ENV = "ARIGNAN_HOME"
 
 @dataclass(slots=True)
 class ChunkingConfig:
-    chunk_size: int = 2800
-    chunk_overlap: int = 160
+    chunk_size: int = 4200
+    chunk_overlap: int = 120
 
 
 @dataclass(slots=True)
 class RetrievalConfig:
-    dense_top_k: int = 14
-    lexical_top_k: int = 14
+    dense_top_k: int = 16
+    lexical_top_k: int = 16
     map_top_k: int = 8
-    fused_top_k: int = 28
-    rerank_top_k: int = 20
-    answer_context_top_k_default: int = 14
-    answer_context_top_k_light: int = 12
+    fused_top_k: int = 24
+    rerank_top_k: int = 16
+    answer_context_top_k_default: int = 10
+    answer_context_top_k_light: int = 8
     answer_context_top_k_none: int = 14
     answer_context_top_k_raw: int = 14
 
@@ -41,13 +41,13 @@ class RetrievalConfig:
 class SessionConfig:
     kv_cache_enabled: bool = True
     idle_timeout_minutes: int = 30
-    soft_token_limit: int = 12000
-    keep_recent_turns: int = 8
+    soft_token_limit: int = 18000
+    keep_recent_turns: int = 10
 
 
 @dataclass(slots=True)
 class MarkdownConfig:
-    max_md_length: int = 4000
+    max_md_length: int = 5000
 
 
 @dataclass(slots=True)
@@ -56,8 +56,13 @@ class AppConfig:
     local_llm_model: str = DEFAULT_LOCAL_LLM_REPO_ID
     local_llm_light_model: str = DEFAULT_LIGHT_LOCAL_LLM_REPO_ID
     local_llm_endpoint: str = "http://127.0.0.1:11434"
-    local_llm_keep_alive: str = "10m"
-    local_llm_timeout_seconds: int = 120
+    local_llm_keep_alive: str = "30m"
+    local_llm_timeout_seconds: int = 300
+    local_llm_context_window: int = 6144
+    local_llm_flash_attention: bool = True
+    local_llm_kv_cache_type: str = "q8_0"
+    local_llm_num_parallel: int = 1
+    local_llm_max_loaded_models: int = 1
     embedding_model: str = DEFAULT_EMBEDDING_MODEL_REPO_ID
     reranker_model: str = DEFAULT_RERANKER_MODEL_REPO_ID
     default_hat: str = "default"

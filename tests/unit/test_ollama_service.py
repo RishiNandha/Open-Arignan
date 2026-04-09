@@ -58,7 +58,7 @@ def test_ensure_service_running_starts_background_runtime_when_endpoint_is_down(
     executable = bundled_ollama_executable(tmp_path)
     executable.parent.mkdir(parents=True, exist_ok=True)
     executable.write_text("", encoding="utf-8")
-    calls: list[list[str]] = []
+    calls: list[dict[str, object]] = []
     readiness = iter([False, True])
 
     class FakeProcess:
@@ -67,12 +67,26 @@ def test_ensure_service_running_starts_background_runtime_when_endpoint_is_down(
     monkeypatch.setattr("arignan.llm.service.is_service_ready", lambda endpoint, timeout_seconds=1.0: next(readiness))
     monkeypatch.setattr(
         "arignan.llm.service.subprocess.Popen",
-        lambda command, **kwargs: calls.append(command) or FakeProcess(),
+        lambda command, **kwargs: calls.append({"command": command, "kwargs": kwargs}) or FakeProcess(),
     )
 
-    ensure_service_running(tmp_path, "http://127.0.0.1:11434")
+    ensure_service_running(
+        tmp_path,
+        "http://127.0.0.1:11434",
+        context_window=6144,
+        flash_attention=True,
+        kv_cache_type="q8_0",
+        num_parallel=1,
+        max_loaded_models=1,
+    )
 
-    assert calls == [[str(executable), "serve"]]
+    assert calls[0]["command"] == [str(executable), "serve"]
+    env = calls[0]["kwargs"]["env"]
+    assert env["OLLAMA_FLASH_ATTENTION"] == "1"
+    assert env["OLLAMA_CONTEXT_LENGTH"] == "6144"
+    assert env["OLLAMA_KV_CACHE_TYPE"] == "q8_0"
+    assert env["OLLAMA_NUM_PARALLEL"] == "1"
+    assert env["OLLAMA_MAX_LOADED_MODELS"] == "1"
     assert (managed_runtime_dir(tmp_path) / "service.pid").read_text(encoding="utf-8") == "3210"
 
 
@@ -107,7 +121,7 @@ def test_ensure_model_available_pulls_when_model_missing(monkeypatch, tmp_path: 
 
     monkeypatch.setattr(
         "arignan.llm.service.ensure_service_running",
-        lambda app_home, endpoint, progress=None, ready_timeout_seconds=20.0: ensured.append(endpoint),
+        lambda app_home, endpoint, **kwargs: ensured.append(endpoint),
     )
     monkeypatch.setattr("arignan.llm.service.list_available_models", lambda endpoint: set())
 

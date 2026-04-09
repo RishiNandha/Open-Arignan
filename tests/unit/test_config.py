@@ -17,15 +17,23 @@ def test_load_config_uses_defaults_when_settings_missing(app_home: Path) -> None
     assert config.local_llm_endpoint == "http://127.0.0.1:11434"
     assert config.embedding_model == "Alibaba-NLP/gte-modernbert-base"
     assert config.reranker_model == "Alibaba-NLP/gte-reranker-modernbert-base"
-    assert config.chunking.chunk_size == 2800
-    assert config.chunking.chunk_overlap == 160
-    assert config.retrieval.dense_top_k == 14
-    assert config.retrieval.fused_top_k == 28
-    assert config.retrieval.rerank_top_k == 20
-    assert config.retrieval.answer_context_top_k_default == 14
-    assert config.retrieval.answer_context_top_k_light == 12
+    assert config.local_llm_keep_alive == "30m"
+    assert config.local_llm_timeout_seconds == 300
+    assert config.local_llm_context_window == 6144
+    assert config.local_llm_flash_attention is True
+    assert config.local_llm_kv_cache_type == "q8_0"
+    assert config.chunking.chunk_size == 4200
+    assert config.chunking.chunk_overlap == 120
+    assert config.retrieval.dense_top_k == 16
+    assert config.retrieval.fused_top_k == 24
+    assert config.retrieval.rerank_top_k == 16
+    assert config.retrieval.answer_context_top_k_default == 10
+    assert config.retrieval.answer_context_top_k_light == 8
     assert config.retrieval.answer_context_top_k_none == 14
     assert config.retrieval.answer_context_top_k_raw == 14
+    assert config.session.soft_token_limit == 18000
+    assert config.session.keep_recent_turns == 10
+    assert config.markdown.max_md_length == 5000
 
 
 def test_load_config_merges_nested_overrides(app_home: Path) -> None:
@@ -67,13 +75,22 @@ def test_write_default_settings_creates_file(app_home: Path) -> None:
     assert payload["local_llm_light_model"] == "qwen3:0.6b"
     assert payload["embedding_model"] == "Alibaba-NLP/gte-modernbert-base"
     assert payload["reranker_model"] == "Alibaba-NLP/gte-reranker-modernbert-base"
-    assert payload["chunking"]["chunk_size"] == 2800
-    assert payload["chunking"]["chunk_overlap"] == 160
-    assert payload["retrieval"]["dense_top_k"] == 14
-    assert payload["retrieval"]["fused_top_k"] == 28
-    assert payload["retrieval"]["rerank_top_k"] == 20
-    assert payload["retrieval"]["answer_context_top_k_default"] == 14
-    assert payload["retrieval"]["answer_context_top_k_light"] == 12
+    assert payload["local_llm_keep_alive"] == "30m"
+    assert payload["local_llm_timeout_seconds"] == 300
+    assert payload["local_llm_context_window"] == 6144
+    assert payload["local_llm_flash_attention"] is True
+    assert payload["local_llm_kv_cache_type"] == "q8_0"
+    assert payload["local_llm_num_parallel"] == 1
+    assert payload["local_llm_max_loaded_models"] == 1
+    assert payload["chunking"]["chunk_size"] == 4200
+    assert payload["chunking"]["chunk_overlap"] == 120
+    assert payload["retrieval"]["dense_top_k"] == 16
+    assert payload["retrieval"]["fused_top_k"] == 24
+    assert payload["retrieval"]["rerank_top_k"] == 16
+    assert payload["retrieval"]["answer_context_top_k_default"] == 10
+    assert payload["retrieval"]["answer_context_top_k_light"] == 8
     assert payload["retrieval"]["answer_context_top_k_none"] == 14
     assert payload["retrieval"]["answer_context_top_k_raw"] == 14
-    assert payload["markdown"]["max_md_length"] == 4000
+    assert payload["session"]["soft_token_limit"] == 18000
+    assert payload["session"]["keep_recent_turns"] == 10
+    assert payload["markdown"]["max_md_length"] == 5000

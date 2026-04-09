@@ -155,6 +155,7 @@ class ArignanApp:
             model_name=config.local_llm_light_model,
         )
         self.heuristic_artifact_writer = HeuristicArtifactWriter()
+        self.provisional_markdown_repository = MarkdownRepository(artifact_writer=self.heuristic_artifact_writer)
         artifact_writer = LLMArtifactWriter(
             generator=self.local_text_generator,
             fallback=self.heuristic_artifact_writer,
@@ -209,7 +210,7 @@ class ArignanApp:
             total_chunks += len(chunks)
 
             self._emit_progress(f"[{index}/{len(batch.documents)}] Writing topic '{final_plan.topic_folder}'...")
-            artifact = self.markdown_repository.write_topic(
+            artifact = self.provisional_markdown_repository.write_topic(
                 self.layout,
                 hat=target_hat,
                 documents=documents_for_topic,
@@ -558,7 +559,7 @@ class ArignanApp:
             raw = self.local_text_generator.generate(
                 system_prompt=GROUPING_REVIEW_SYSTEM_PROMPT,
                 user_prompt=prompt,
-                max_new_tokens=500,
+                max_new_tokens=320,
                 temperature=0.0,
                 response_format=GROUPING_REVIEW_RESPONSE_FORMAT,
             )
@@ -688,7 +689,7 @@ class ArignanApp:
                 trace.grouping_decision = GroupingDecision.MERGE.value
                 trace.rationale = list(dict.fromkeys([*trace.rationale, *final_plan.rationale]))
 
-            self.markdown_repository.regenerate_topic(
+            self.provisional_markdown_repository.regenerate_topic(
                 self.layout,
                 hat=hat,
                 documents=merged_documents,
@@ -703,6 +704,8 @@ class ArignanApp:
                     shutil.rmtree(current_topic_dir)
             applied_topics.update(member_topics)
 
+        self._emit_progress("Finalizing wiki summaries for current load...")
+        self._finalize_load_topics_with_llm(hat, load_id)
         self._reindex_load_topics(hat, load_id)
         final_topic_folders, artifact_paths, total_markdown_segments = self._final_load_artifacts(hat, load_id, traces)
         return final_topic_folders, artifact_paths, total_markdown_segments, traces
@@ -763,6 +766,33 @@ class ArignanApp:
         if chunks:
             dense.index_chunks(chunks)
             lexical.index_chunks(chunks)
+
+    def _finalize_load_topics_with_llm(self, hat: str, load_id: str) -> None:
+        for manifest_path in sorted(self.layout.hat(hat).summaries_dir.glob("*/.topic_manifest.json")):
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            documents = [ParsedDocument.from_dict(item) for item in payload.get("documents", [])]
+            if not any(document.load_id == load_id for document in documents):
+                continue
+            decision_value = str(payload.get("decision") or GroupingDecision.STANDALONE.value)
+            try:
+                decision = GroupingDecision(decision_value)
+            except ValueError:
+                decision = GroupingDecision.STANDALONE
+            plan = GroupingPlan(
+                decision=decision,
+                topic_folder=payload["topic_folder"],
+                estimated_length=int(payload.get("estimated_length") or 0),
+                merge_target_topic=payload.get("merge_target_topic"),
+                related_chunk_ids=list(payload.get("related_chunk_ids", [])),
+                rationale=list(payload.get("rationale", [])),
+            )
+            self.markdown_repository.regenerate_topic(
+                self.layout,
+                hat=hat,
+                documents=documents,
+                plan=plan,
+                refresh_maps=False,
+            )
 
     @staticmethod
     def _assign_topic_folder(chunks: list[ChunkRecord], topic_folder: str) -> list[ChunkRecord]:
@@ -871,6 +901,7 @@ def compose_answer(
         expanded_query=expanded_query,
         selected_hat=selected_hat,
         generator=generator,
+        max_new_tokens=480 if answer_mode == "default" else 320,
         trace_sink=trace_sink,
         exception_logger=exception_logger,
         progress_sink=progress_sink,
@@ -900,6 +931,7 @@ def generate_answer(
     expanded_query: str,
     selected_hat: str,
     generator: LocalTextGenerator,
+    max_new_tokens: int = 480,
     trace_sink: ModelTraceCollector | None = None,
     exception_logger: SessionExceptionLogger | None = None,
     progress_sink: Callable[[str], None] | None = None,
@@ -929,7 +961,7 @@ def generate_answer(
         raw = generator.generate(
             system_prompt=ANSWER_SYSTEM_PROMPT,
             user_prompt=prompt,
-            max_new_tokens=420,
+            max_new_tokens=max_new_tokens,
             temperature=0.1,
         )
         answer = _normalize_generated_answer(raw)

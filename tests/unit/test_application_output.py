@@ -405,8 +405,8 @@ def test_application_uses_per_mode_answer_context_limits(app_home: Path, monkeyp
     )
     app = ArignanApp(load_config(app_home=app_home))
 
-    assert app._answer_context_limit("default") == 14
-    assert app._answer_context_limit("light") == 12
+    assert app._answer_context_limit("default") == 10
+    assert app._answer_context_limit("light") == 8
     assert app._answer_context_limit("none") == 14
     assert app._answer_context_limit("raw") == 14
 

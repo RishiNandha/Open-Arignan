@@ -144,7 +144,7 @@ class LLMArtifactWriter:
             raw = self.generator.generate(
                 system_prompt=TOPIC_SYSTEM_PROMPT,
                 user_prompt=prompt,
-                max_new_tokens=1100,
+                max_new_tokens=900,
                 temperature=0.1,
                 response_format=TOPIC_RESPONSE_SCHEMA,
             )
@@ -205,7 +205,7 @@ class LLMArtifactWriter:
             generated = self.generator.generate(
                 system_prompt=HAT_MAP_SYSTEM_PROMPT,
                 user_prompt=_build_hat_map_prompt(hat, entries),
-                max_new_tokens=700,
+                max_new_tokens=360,
                 temperature=0.1,
             )
         except Exception as exc:
@@ -254,7 +254,7 @@ class LLMArtifactWriter:
             generated = self.generator.generate(
                 system_prompt=GLOBAL_MAP_SYSTEM_PROMPT,
                 user_prompt=_build_global_map_prompt(entries),
-                max_new_tokens=700,
+                max_new_tokens=360,
                 temperature=0.1,
             )
         except Exception as exc:

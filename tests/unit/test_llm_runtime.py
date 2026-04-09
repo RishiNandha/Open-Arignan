@@ -93,6 +93,7 @@ def test_ollama_text_generator_posts_chat_request_and_strips_think_blocks(app_ho
     payload = captured["json"]
     assert payload["model"] == "qwen3:4b-q4_K_M"
     assert payload["options"]["num_predict"] == 256
+    assert payload["options"]["num_ctx"] == 6144
     assert payload["format"] == {"type": "object"}
     assert payload["think"] is False
 

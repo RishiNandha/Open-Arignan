@@ -68,6 +68,11 @@ class OllamaTextGenerator:
                 self.model_name,
                 progress=self.progress_sink,
                 timeout_seconds=float(max(self.config.local_llm_timeout_seconds, 1800)),
+                context_window=self.config.local_llm_context_window,
+                flash_attention=self.config.local_llm_flash_attention,
+                kv_cache_type=self.config.local_llm_kv_cache_type,
+                num_parallel=self.config.local_llm_num_parallel,
+                max_loaded_models=self.config.local_llm_max_loaded_models,
             )
             self._model_ready = True
         client = self._ensure_client()
@@ -81,6 +86,7 @@ class OllamaTextGenerator:
             "options": {
                 "temperature": max(temperature, 0.0),
                 "num_predict": max_new_tokens,
+                "num_ctx": self.config.local_llm_context_window,
             },
         }
         if response_format is not None:

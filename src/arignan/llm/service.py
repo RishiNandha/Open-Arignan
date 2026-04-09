@@ -62,6 +62,12 @@ def provision_managed_runtime(
 def ensure_service_running(
     app_home: Path,
     endpoint: str,
+    *,
+    context_window: int | None = None,
+    flash_attention: bool | None = None,
+    kv_cache_type: str | None = None,
+    num_parallel: int | None = None,
+    max_loaded_models: int | None = None,
     progress: Callable[[str], None] | None = None,
     ready_timeout_seconds: float = 20.0,
 ) -> None:
@@ -76,6 +82,16 @@ def ensure_service_running(
     env = os.environ.copy()
     env["OLLAMA_MODELS"] = str((app_home / "models").resolve())
     env["OLLAMA_HOST"] = _ollama_host(endpoint)
+    if flash_attention:
+        env["OLLAMA_FLASH_ATTENTION"] = "1"
+    if isinstance(context_window, int) and context_window > 0:
+        env["OLLAMA_CONTEXT_LENGTH"] = str(context_window)
+    if kv_cache_type:
+        env["OLLAMA_KV_CACHE_TYPE"] = kv_cache_type
+    if isinstance(num_parallel, int) and num_parallel > 0:
+        env["OLLAMA_NUM_PARALLEL"] = str(num_parallel)
+    if isinstance(max_loaded_models, int) and max_loaded_models > 0:
+        env["OLLAMA_MAX_LOADED_MODELS"] = str(max_loaded_models)
     handle = log_path.open("a", encoding="utf-8")
     try:
         process = subprocess.Popen(
@@ -98,10 +114,25 @@ def ensure_model_available(
     app_home: Path,
     endpoint: str,
     model: str,
+    *,
+    context_window: int | None = None,
+    flash_attention: bool | None = None,
+    kv_cache_type: str | None = None,
+    num_parallel: int | None = None,
+    max_loaded_models: int | None = None,
     progress: Callable[[str], None] | None = None,
     timeout_seconds: float = 1800.0,
 ) -> None:
-    ensure_service_running(app_home, endpoint, progress=progress)
+    ensure_service_running(
+        app_home,
+        endpoint,
+        context_window=context_window,
+        flash_attention=flash_attention,
+        kv_cache_type=kv_cache_type,
+        num_parallel=num_parallel,
+        max_loaded_models=max_loaded_models,
+        progress=progress,
+    )
     if model in list_available_models(endpoint):
         return
     _emit(progress, f"Configured local model '{model}' is not cached locally yet. Downloading it now...")
