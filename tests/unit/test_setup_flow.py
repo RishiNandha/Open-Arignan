@@ -14,6 +14,7 @@ from arignan.setup_flow import (
     create_launchers,
     download_required_models,
     initialize_local_state,
+    install_package,
     install_target,
     render_summary,
     resolve_ollama_model_id,
@@ -25,6 +26,24 @@ from arignan.setup_flow import (
 def test_install_target_switches_for_dev() -> None:
     assert install_target(dev=False) == "."
     assert install_target(dev=True) == ".[dev]"
+
+
+def test_install_package_uses_standard_pip_build_isolation(tmp_path: Path, monkeypatch) -> None:
+    calls: list[tuple[list[str], Path, bool]] = []
+
+    def fake_run(command, cwd=None, check=None):
+        calls.append((list(command), Path(cwd), bool(check)))
+        return None
+
+    monkeypatch.setattr("arignan.setup_flow.subprocess.run", fake_run)
+    monkeypatch.setattr(sys, "executable", str((tmp_path / "python.exe").resolve()))
+
+    target = install_package(root=tmp_path, dev=True)
+
+    assert target == ".[dev]"
+    assert calls == [
+        ([str((tmp_path / "python.exe").resolve()), "-m", "pip", "install", ".[dev]"], tmp_path.resolve(), True)
+    ]
 
 
 def test_create_launchers_writes_bin_scripts(tmp_path: Path, monkeypatch) -> None:

@@ -131,12 +131,7 @@ class LocalDenseIndex:
     def _search_qdrant(self, query_embedding: list[float], limit: int) -> list[RetrievalHit]:
         if not self._qdrant_client.collection_exists(self.collection_name):
             return []
-        results = self._qdrant_client.search(
-            collection_name=self.collection_name,
-            query_vector=query_embedding,
-            limit=limit,
-            with_payload=True,
-        )
+        results = self._qdrant_search_results(query_embedding, limit)
         hits: list[RetrievalHit] = []
         for item in results:
             payload = item.payload or {}
@@ -150,6 +145,27 @@ class LocalDenseIndex:
                 )
             )
         return hits
+
+    def _qdrant_search_results(self, query_embedding: list[float], limit: int):
+        client = self._qdrant_client
+        if client is None:
+            return []
+        if hasattr(client, "query_points"):
+            response = client.query_points(
+                collection_name=self.collection_name,
+                query=query_embedding,
+                limit=limit,
+                with_payload=True,
+            )
+            return getattr(response, "points", response)
+        if hasattr(client, "search"):
+            return client.search(
+                collection_name=self.collection_name,
+                query_vector=query_embedding,
+                limit=limit,
+                with_payload=True,
+            )
+        raise AttributeError("QdrantClient does not support query_points() or search()")
 
     def _delete_load_qdrant(self, load_id: str) -> None:
         from qdrant_client.http import models

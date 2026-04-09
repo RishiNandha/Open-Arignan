@@ -11,3 +11,9 @@ bin/
 .tmp-test-home/ingestion_log.jsonl
 .tmp-test-home/hats/global_map.md
 .tmp-test-home/hats/default/map.md
+src/open_arignan.egg-info/dependency_links.txt
+src/open_arignan.egg-info/entry_points.txt
+src/open_arignan.egg-info/PKG-INFO
+src/open_arignan.egg-info/requires.txt
+src/open_arignan.egg-info/SOURCES.txt
+src/open_arignan.egg-info/top_level.txt

@@ -58,7 +58,7 @@ def install_package(root: Path | None = None, dev: bool = False) -> str:
     resolved_root = (root or repo_root()).resolve()
     target = install_target(dev=dev)
     subprocess.run(
-        [sys.executable, "-m", "pip", "install", "--no-build-isolation", target],
+        [sys.executable, "-m", "pip", "install", target],
         cwd=resolved_root,
         check=True,
     )
