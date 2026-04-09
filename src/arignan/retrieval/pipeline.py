@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -33,11 +34,51 @@ class RetrievalBundle:
 class QueryExpander:
     def expand(self, query: str) -> str:
         normalized_tokens: list[str] = []
-        for token in tokenize(query):
+        raw_query = " ".join(query.split()).strip()
+        for token in tokenize(raw_query):
             normalized_tokens.append(token)
             if token in ABBREVIATIONS:
                 normalized_tokens.extend(tokenize(ABBREVIATIONS[token]))
-        return " ".join(normalized_tokens)
+        focus_phrase = _focus_phrase(raw_query)
+        if focus_phrase:
+            normalized_tokens.extend(tokenize(focus_phrase))
+        normalized_tokens.extend(_intent_hint_tokens(raw_query, focus_phrase))
+        return " ".join(_dedupe_preserve_order(normalized_tokens))
+
+
+def describe_question(query: str) -> tuple[str, str, str]:
+    raw_query = " ".join(query.split()).strip()
+    focus = _focus_phrase(raw_query) or raw_query
+    lowered = raw_query.lower()
+    if _matches_any(lowered, (r"^how\s+to\b", r"\bimplement\b", r"\bbuild\b", r"\btrain\b", r"\bdesign\b")):
+        return (
+            "implementation",
+            focus,
+            "Give concrete implementation guidance, components, steps, and practical constraints grounded in the retrieved context.",
+        )
+    if _matches_any(lowered, (r"^what\s+is\b", r"\bfull form\b", r"\bstand for\b", r"^define\b")):
+        return (
+            "definition",
+            focus,
+            "Answer directly with the definition or expansion first, then briefly explain the concept.",
+        )
+    if _matches_any(lowered, (r"\bcompare\b", r"\bdifference\b", r"\bvs\b", r"\bversus\b")):
+        return (
+            "comparison",
+            focus,
+            "Compare the main points side by side and call out practical tradeoffs when the context supports them.",
+        )
+    if _matches_any(lowered, (r"^why\b", r"\brationale\b", r"\bmotivation\b")):
+        return (
+            "motivation",
+            focus,
+            "Explain the reason, motivation, or benefit structure supported by the retrieved context.",
+        )
+    return (
+        "explanation",
+        focus,
+        "Synthesize the retrieved context into a concise technical explanation.",
+    )
 
 
 class HatSelector:
@@ -236,3 +277,45 @@ def split_markdown_sections(text: str) -> list[tuple[str | None, str]]:
 def map_chunk_id(path: Path, index: int, heading: str | None, text: str) -> str:
     digest = hashlib.sha1(f"{path}|{index}|{heading}|{text}".encode("utf-8")).hexdigest()[:12]
     return f"map-{digest}"
+
+
+def _focus_phrase(query: str) -> str:
+    lowered = query.lower().strip()
+    stripped = re.sub(
+        r"^(how\s+to|how\s+does|how\s+do|what\s+is|what\s+does|why\s+does|why\s+do|why\s+is|compare|difference\s+between|define)\s+",
+        "",
+        lowered,
+    )
+    stripped = re.sub(r"\b(in|with|for)\s+practice$", "", stripped).strip(" ?.")
+    return stripped
+
+
+def _intent_hint_tokens(query: str, focus_phrase: str) -> list[str]:
+    lowered = query.lower()
+    if _matches_any(lowered, (r"^how\s+to\b", r"\bimplement\b", r"\bbuild\b", r"\btrain\b", r"\bdesign\b")):
+        hints = ["implementation", "architecture", "algorithm", "training", "loss", "modules", "pseudocode", "code"]
+        if focus_phrase:
+            hints.extend(tokenize(f"{focus_phrase} implementation"))
+        return hints
+    if _matches_any(lowered, (r"^what\s+is\b", r"\bfull form\b", r"\bstand for\b", r"^define\b")):
+        return ["definition", "meaning", "overview", "concept"]
+    if _matches_any(lowered, (r"\bcompare\b", r"\bdifference\b", r"\bvs\b", r"\bversus\b")):
+        return ["comparison", "differences", "tradeoffs", "contrast"]
+    if _matches_any(lowered, (r"^why\b", r"\brationale\b", r"\bmotivation\b")):
+        return ["motivation", "rationale", "benefits", "reasons"]
+    return ["overview", "mechanism", "details"]
+
+
+def _dedupe_preserve_order(tokens: list[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for token in tokens:
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        ordered.append(token)
+    return ordered
+
+
+def _matches_any(text: str, patterns: tuple[str, ...]) -> bool:
+    return any(re.search(pattern, text) for pattern in patterns)

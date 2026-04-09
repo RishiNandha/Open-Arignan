@@ -15,8 +15,8 @@ def test_load_config_uses_defaults_when_settings_missing(app_home: Path) -> None
     assert config.local_llm_model == "qwen3:4b-q4_K_M"
     assert config.local_llm_light_model == "qwen3:0.6b"
     assert config.local_llm_endpoint == "http://127.0.0.1:11434"
-    assert config.embedding_model == "BAAI/bge-base-en-v1.5"
-    assert config.reranker_model == "mixedbread-ai/mxbai-rerank-base-v1"
+    assert config.embedding_model == "Alibaba-NLP/gte-modernbert-base"
+    assert config.reranker_model == "Alibaba-NLP/gte-reranker-modernbert-base"
     assert config.chunking.chunk_size == 2800
     assert config.chunking.chunk_overlap == 160
     assert config.retrieval.dense_top_k == 14
@@ -65,8 +65,8 @@ def test_write_default_settings_creates_file(app_home: Path) -> None:
     assert payload["local_llm_backend"] == "ollama"
     assert payload["local_llm_model"] == "qwen3:4b-q4_K_M"
     assert payload["local_llm_light_model"] == "qwen3:0.6b"
-    assert payload["embedding_model"] == "BAAI/bge-base-en-v1.5"
-    assert payload["reranker_model"] == "mixedbread-ai/mxbai-rerank-base-v1"
+    assert payload["embedding_model"] == "Alibaba-NLP/gte-modernbert-base"
+    assert payload["reranker_model"] == "Alibaba-NLP/gte-reranker-modernbert-base"
     assert payload["chunking"]["chunk_size"] == 2800
     assert payload["chunking"]["chunk_overlap"] == 160
     assert payload["retrieval"]["dense_top_k"] == 14

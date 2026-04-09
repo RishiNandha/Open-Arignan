@@ -5,9 +5,10 @@ import time
 
 from fastapi.testclient import TestClient
 
-from arignan.application import ArignanApp, AskDebug, AskResult, LoadResult
+from arignan.application import ArignanApp, AskDebug, AskResult, DeleteHatResult, DeleteResult, LoadResult
 from arignan.config import load_config
 from arignan.gui import create_gui_app
+from arignan.models import LoadEvent, LoadOperation
 
 
 def test_gui_options_and_root_render(tmp_path: Path) -> None:
@@ -36,6 +37,16 @@ def test_gui_task_endpoints_use_existing_app_flows(tmp_path: Path, monkeypatch) 
     app_home = tmp_path / ".arignan"
     app = ArignanApp(load_config(app_home=app_home))
     captured: dict[str, object] = {}
+    fake_events = [
+        LoadEvent(
+            load_id="load-gui",
+            operation=LoadOperation.INGEST,
+            hat="SNNs",
+            created_at="2026-04-09T12:00:00+00:00",
+            source_items=["paper.pdf", "notes.md"],
+            topic_folders=["jepa-notes"],
+        )
+    ]
 
     def fake_load(input_ref: str, hat: str = "auto") -> LoadResult:
         batch_dir = Path(input_ref)
@@ -79,9 +90,29 @@ def test_gui_task_endpoints_use_existing_app_flows(tmp_path: Path, monkeypatch) 
             ),
         )
 
+    def fake_list_ingestions():
+        return fake_events
+
+    def fake_delete(load_ids):
+        captured["deleted_load_ids"] = list(load_ids)
+        return DeleteResult(deleted_load_ids=list(load_ids), missing_load_ids=[], deleted_topics=["jepa-notes"])
+
+    def fake_delete_hat(hat: str):
+        captured["deleted_hat"] = hat
+        return DeleteHatResult(hat=hat, existed=True, deleted_load_ids=["load-gui"], deleted_topics=["jepa-notes"])
+
     monkeypatch.setattr(app, "load", fake_load)
     monkeypatch.setattr(app, "ask", fake_ask)
+    monkeypatch.setattr(app, "list_ingestions", fake_list_ingestions)
+    monkeypatch.setattr(app, "delete", fake_delete)
+    monkeypatch.setattr(app, "delete_hat", fake_delete_hat)
     client = TestClient(create_gui_app(app))
+
+    library = client.get("/api/library")
+    assert library.status_code == 200
+    library_payload = library.json()
+    assert "default" in library_payload["hats"]
+    assert library_payload["loads"][0]["load_id"] == "load-gui"
 
     load_start = client.post(
         "/api/load/start",
@@ -112,6 +143,20 @@ def test_gui_task_endpoints_use_existing_app_flows(tmp_path: Path, monkeypatch) 
     assert captured["question"] == "What is JEPA?"
     assert captured["ask_hat"] == "SNNs"
     assert captured["answer_mode"] == "light"
+
+    delete_start = client.post("/api/delete/start", json={"load_ids": ["load-gui"]})
+    assert delete_start.status_code == 200
+    delete_payload = _wait_for_task(client, delete_start.json()["task_id"])
+    assert delete_payload["status"] == "done"
+    assert delete_payload["result"]["kind"] == "load_delete"
+    assert captured["deleted_load_ids"] == ["load-gui"]
+
+    delete_hat_start = client.post("/api/delete/start", json={"hat": "SNNs"})
+    assert delete_hat_start.status_code == 200
+    delete_hat_payload = _wait_for_task(client, delete_hat_start.json()["task_id"])
+    assert delete_hat_payload["status"] == "done"
+    assert delete_hat_payload["result"]["kind"] == "hat_delete"
+    assert captured["deleted_hat"] == "SNNs"
 
 
 def test_gui_load_rejects_unsupported_file_types(tmp_path: Path) -> None:

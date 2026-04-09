@@ -25,7 +25,7 @@ from arignan.llm import LocalTextGenerator, create_local_text_generator
 from arignan.markdown import MarkdownRepository, derive_keywords
 from arignan.markdown.writer import HeuristicArtifactWriter, LLMArtifactWriter
 from arignan.models import ChunkRecord, LoadEvent, LoadOperation, ParsedDocument, RetrievalHit, SessionState, SourceDocument
-from arignan.retrieval import RetrievalPipeline, create_reranker
+from arignan.retrieval import RetrievalPipeline, create_reranker, describe_question
 from arignan.session import SessionExceptionLogger, SessionManager, SessionModelCallLogger, SessionStore
 from arignan.storage import StorageLayout
 from arignan.tracing import ModelCallTrace, ModelTraceCollector
@@ -551,11 +551,11 @@ class ArignanApp:
             return []
 
         self._emit_progress(
-            f"Reviewing {len(topics)} topic summaries in hat '{hat}' with the light LLM for possible groups..."
+            f"Reviewing {len(topics)} topic summaries in hat '{hat}' with the local LLM for possible groups..."
         )
         prompt = _build_grouping_review_prompt(hat, topics)
         try:
-            raw = self.light_text_generator.generate(
+            raw = self.local_text_generator.generate(
                 system_prompt=GROUPING_REVIEW_SYSTEM_PROMPT,
                 user_prompt=prompt,
                 max_new_tokens=500,
@@ -573,8 +573,8 @@ class ArignanApp:
             self.trace_collector.record(
                 component="llm",
                 task="batch grouping review",
-                model_name=self.light_text_generator.model_name,
-                backend=self.light_text_generator.backend_name,
+                model_name=self.local_text_generator.model_name,
+                backend=self.local_text_generator.backend_name,
                 status="fallback",
                 item_count=len(topics),
                 detail=f"{hat} | exception | {log_path.resolve()}",
@@ -594,8 +594,8 @@ class ArignanApp:
         self.trace_collector.record(
             component="llm",
             task="batch grouping review",
-            model_name=self.light_text_generator.model_name,
-            backend=self.light_text_generator.backend_name,
+            model_name=self.local_text_generator.model_name,
+            backend=self.local_text_generator.backend_name,
             status="ok" if recommendations else "fallback",
             item_count=len(topics),
             detail=detail,
@@ -1075,6 +1075,7 @@ def _build_answer_prompt(
     selected_hat: str,
     session: SessionState | None,
 ) -> str:
+    question_intent, focus_topic, answer_brief = describe_question(question)
     lines = [
         "<task>",
         "Answer the user's question using only the retrieved context.",
@@ -1095,6 +1096,12 @@ def _build_answer_prompt(
         f"Question: {question}",
         f"Expanded query: {expanded_query}",
         "</query>",
+        "",
+        "<question_brief>",
+        f"Intent: {question_intent}",
+        f"Focus topic: {focus_topic}",
+        f"Preferred answer shape: {answer_brief}",
+        "</question_brief>",
         "",
         "<example>",
         "Question: What does TTFS stand for?",
@@ -1223,16 +1230,18 @@ def _answer_fallback_message(log_path: Path | None) -> str:
     return f"{message} Log: {log_path.resolve()}"
 
 
-GROUPING_REVIEW_MIN_CONFIDENCE = 0.74
+GROUPING_REVIEW_MIN_CONFIDENCE = 0.68
 
 
 GROUPING_REVIEW_SYSTEM_PROMPT = """You review topic pages inside one local research-wiki hat.
 Each topic already has a compiled wiki-style summary.
 Your task is to suggest topic groups only when the topics clearly belong in one shared wiki page.
 Focus on topics marked as part of the current load, but you may merge them into older topics in the same hat.
-Be conservative:
+Be selective, but not timid:
 - Do not merge just because topics are from the same broad field.
-- Prefer merge only when the topics share a concrete concept neighborhood, line of ideas, or one topic is clearly a subtopic of another.
+- Prefer merge when topics are different notes, papers, or subtopics around the same named method family, embedding family, algorithm, training objective, or conceptual cluster.
+- Prefer merge when the topics share concrete terms such as the same model name, method name, objective, or technical vocabulary.
+- Prefer merge when one topic is clearly a subtopic, implementation note, training note, or explanatory note for another topic.
 - Skip merges that would make the target page unfocused.
 Return strict JSON only with this shape:
 {
@@ -1277,7 +1286,7 @@ def _build_grouping_review_prompt(hat: str, topics: list[TopicGroupingRecord]) -
     lines = [
         f"Review the topic list for hat '{hat}'.",
         "Suggest groups only when multiple topics should become one shared wiki page.",
-        "Return only high-signal merge recommendations with confidence scores.",
+        "Return high-signal merge recommendations with confidence scores.",
         "",
         "<topic_list>",
     ]
@@ -1299,6 +1308,18 @@ def _build_grouping_review_prompt(hat: str, topics: list[TopicGroupingRecord]) -
     lines.extend(
         [
             "</topic_list>",
+            "",
+            "<pair_hints>",
+        ]
+    )
+    pair_hints = _candidate_group_hints(topics)
+    if pair_hints:
+        lines.extend(pair_hints)
+    else:
+        lines.append("No strong overlap hints detected from titles and keywords.")
+    lines.extend(
+        [
+            "</pair_hints>",
             "",
             "Only recommend merges that would improve the wiki as a cleaner, richer lookup surface.",
         ]
@@ -1347,6 +1368,80 @@ def _read_topic_summary_excerpt(summary_path: Path) -> str:
         raw = summary_path.read_text(encoding="utf-8")
     except OSError:
         return ""
+
+
+GROUPING_HINT_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "architecture",
+    "approach",
+    "based",
+    "for",
+    "from",
+    "ideas",
+    "implementation",
+    "in",
+    "intro",
+    "introduction",
+    "learning",
+    "method",
+    "methods",
+    "model",
+    "models",
+    "note",
+    "notes",
+    "of",
+    "on",
+    "overview",
+    "paper",
+    "representation",
+    "research",
+    "the",
+    "to",
+    "training",
+}
+
+
+def _candidate_group_hints(topics: list[TopicGroupingRecord], limit: int = 8) -> list[str]:
+    scored: list[tuple[int, str]] = []
+    for index, left in enumerate(topics):
+        left_terms = _grouping_terms(left)
+        for right in topics[index + 1 :]:
+            if not (left.current_load or right.current_load):
+                continue
+            right_terms = _grouping_terms(right)
+            shared = sorted(left_terms & right_terms)
+            if len(shared) < 2:
+                continue
+            score = len(shared) + (1 if left.current_load and right.current_load else 0)
+            scored.append(
+                (
+                    score,
+                    f"{left.topic_folder} <-> {right.topic_folder}: shared terms {', '.join(shared[:6])}",
+                )
+            )
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return [hint for _, hint in scored[:limit]]
+
+
+def _grouping_terms(topic: TopicGroupingRecord) -> set[str]:
+    text = " ".join(
+        part
+        for part in [
+            topic.topic_folder.replace("-", " "),
+            topic.title,
+            topic.locator,
+            topic.description,
+            " ".join(topic.keywords),
+        ]
+        if part
+    )
+    return {
+        token
+        for token in tokenize(text)
+        if len(token) > 2 and token not in GROUPING_HINT_STOPWORDS
+    }
     return _truncate_text(_flatten_markdown_for_grouping(raw), 700)
 
 

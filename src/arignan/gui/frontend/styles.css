@@ -106,6 +106,25 @@ textarea {
   cursor: pointer;
 }
 
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.ghost-button {
+  min-height: 46px;
+  border-radius: 999px;
+  padding: 0 16px;
+  border: 1px solid var(--line-strong);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text);
+  cursor: pointer;
+  font-weight: 700;
+}
+
 .add-button:hover,
 .send-button:hover,
 .modal-action:hover,
@@ -248,6 +267,7 @@ textarea {
 }
 
 .select-control,
+.text-control,
 .question-input,
 .picker-button {
   border: 1px solid var(--line-strong);
@@ -256,6 +276,12 @@ textarea {
 }
 
 .select-control {
+  min-height: 44px;
+  border-radius: var(--radius-md);
+  padding: 10px 12px;
+}
+
+.text-control {
   min-height: 44px;
   border-radius: var(--radius-md);
   padding: 10px 12px;
@@ -311,6 +337,10 @@ textarea {
   padding: 22px;
   display: grid;
   gap: 16px;
+}
+
+.manage-modal {
+  width: min(860px, 100%);
 }
 
 .modal-head h2 {
@@ -400,6 +430,86 @@ textarea {
   flex-wrap: wrap;
 }
 
+.manage-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.manage-section {
+  min-height: 0;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.02);
+  padding: 14px;
+  display: grid;
+  gap: 12px;
+}
+
+.manage-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.manage-title-row h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.manage-title-row span {
+  color: var(--muted);
+  font-family: var(--font-mono);
+}
+
+.manage-list {
+  max-height: 360px;
+  overflow-y: auto;
+  display: grid;
+  gap: 10px;
+}
+
+.manage-item {
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--panel-soft);
+  padding: 12px;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 12px;
+  align-items: center;
+}
+
+.manage-item-main {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.manage-item-title {
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.manage-item-meta,
+.manage-item-copy {
+  color: var(--muted);
+  font-size: 0.9rem;
+  overflow-wrap: anywhere;
+}
+
+.danger-button {
+  min-height: 42px;
+  border-radius: 14px;
+  padding: 0 14px;
+  border: 1px solid rgba(255, 115, 115, 0.32);
+  background: rgba(255, 115, 115, 0.12);
+  color: #ffd3d3;
+  cursor: pointer;
+  font-weight: 700;
+}
+
 .modal-action {
   min-height: 46px;
   border-radius: 14px;
@@ -437,6 +547,17 @@ textarea {
     flex-direction: column;
   }
 
+  .header-actions {
+    width: 100%;
+    justify-content: stretch;
+  }
+
+  .ghost-button,
+  .add-button {
+    width: 100%;
+    justify-content: center;
+  }
+
   .message-bubble {
     max-width: 100%;
   }
@@ -450,6 +571,14 @@ textarea {
   }
 
   .choice-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .manage-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .manage-item {
     grid-template-columns: 1fr;
   }
 }

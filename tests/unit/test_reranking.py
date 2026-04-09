@@ -80,7 +80,7 @@ def test_cross_encoder_reranker_prefers_cuda_when_available(monkeypatch) -> None
 def test_create_reranker_uses_cross_encoder_when_model_cached(tmp_path: Path, monkeypatch) -> None:
     app_home = tmp_path / ".arignan"
     write_default_settings(app_home=app_home)
-    model_dir = app_home / "models" / "mixedbread-ai__mxbai-rerank-base-v1"
+    model_dir = app_home / "models" / "Alibaba-NLP__gte-reranker-modernbert-base"
     model_dir.mkdir(parents=True, exist_ok=True)
 
     captured: dict[str, object] = {}

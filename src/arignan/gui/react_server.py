@@ -18,6 +18,7 @@ from pydantic import BaseModel
 
 from arignan.application import ArignanApp
 from arignan.config import load_config
+from arignan.models import LoadOperation
 
 SUPPORTED_GUI_UPLOAD_SUFFIXES = {".pdf", ".md", ".markdown"}
 
@@ -26,6 +27,11 @@ class AskPayload(BaseModel):
     question: str
     hat: str = "auto"
     answer_mode: str = "default"
+
+
+class DeletePayload(BaseModel):
+    load_ids: list[str] | None = None
+    hat: str | None = None
 
 
 @dataclass(slots=True)
@@ -113,6 +119,23 @@ def create_gui_app(app: ArignanApp) -> FastAPI:
             "answer_modes": ["default", "light", "none", "raw"],
         }
 
+    @gui_app.get("/api/library")
+    async def library() -> dict[str, object]:
+        hats = sorted(path.name for path in app.layout.hats_dir.iterdir() if path.is_dir())
+        loads = [
+            _serialize_load_event(event)
+            for event in sorted(
+                app.list_ingestions(),
+                key=lambda item: item.created_at,
+                reverse=True,
+            )
+            if event.operation is LoadOperation.INGEST
+        ]
+        return {
+            "hats": hats,
+            "loads": loads,
+        }
+
     @gui_app.get("/api/tasks/{task_id}")
     async def task_status(task_id: str) -> dict[str, object]:
         task = task_store.get(task_id)
@@ -189,6 +212,49 @@ def create_gui_app(app: ArignanApp) -> FastAPI:
         threading.Thread(target=_runner, daemon=True).start()
         return {"task_id": task.task_id}
 
+    @gui_app.post("/api/delete/start")
+    async def start_delete(payload: DeletePayload) -> dict[str, object]:
+        if payload.hat and payload.load_ids:
+            raise HTTPException(status_code=400, detail="Choose either one or more load_ids or a hat, not both.")
+        if payload.hat:
+            hat = payload.hat.strip()
+            if not hat:
+                raise HTTPException(status_code=400, detail="Hat cannot be empty.")
+            task = task_store.create("delete", f"Deleting hat '{hat}'...")
+
+            def _runner() -> None:
+                task_app = _build_task_app(
+                    app,
+                    lambda message: task_store.update(task.task_id, _compact_gui_progress("delete", message)),
+                )
+                try:
+                    result = task_app.delete_hat(hat)
+                    task_store.finish(task.task_id, _serialize_delete_hat_result(result))
+                except Exception as exc:
+                    task_store.fail(task.task_id, str(exc))
+
+            threading.Thread(target=_runner, daemon=True).start()
+            return {"task_id": task.task_id}
+
+        load_ids = [load_id.strip() for load_id in (payload.load_ids or []) if load_id and load_id.strip()]
+        if not load_ids:
+            raise HTTPException(status_code=400, detail="No load_ids were provided.")
+        task = task_store.create("delete", "Deleting selected loads...")
+
+        def _runner() -> None:
+            task_app = _build_task_app(
+                app,
+                lambda message: task_store.update(task.task_id, _compact_gui_progress("delete", message)),
+            )
+            try:
+                result = task_app.delete(load_ids)
+                task_store.finish(task.task_id, _serialize_delete_result(result))
+            except Exception as exc:
+                task_store.fail(task.task_id, str(exc))
+
+        threading.Thread(target=_runner, daemon=True).start()
+        return {"task_id": task.task_id}
+
     return gui_app
 
 
@@ -259,7 +325,7 @@ async def _write_uploaded_files(batch_dir: Path, files: list[UploadFile]) -> lis
 
 def _build_task_app(app: ArignanApp, progress_sink) -> ArignanApp:
     task_app = ArignanApp(app.config, progress_sink=progress_sink, terminal_pid=app.terminal_pid)
-    for name in ("load", "ask"):
+    for name in ("load", "ask", "delete", "delete_hat", "list_ingestions"):
         if name in app.__dict__:
             setattr(task_app, name, getattr(app, name))
     return task_app
@@ -288,6 +354,45 @@ def _serialize_ask_result(result) -> dict[str, object]:
     }
 
 
+def _serialize_delete_result(result) -> dict[str, object]:
+    return {
+        "kind": "load_delete",
+        "deleted_load_ids": result.deleted_load_ids,
+        "missing_load_ids": result.missing_load_ids,
+        "deleted_topics": result.deleted_topics,
+        "message": (
+            f"Deleted loads: {', '.join(result.deleted_load_ids) or 'none'}. "
+            f"Missing: {', '.join(result.missing_load_ids) or 'none'}."
+        ),
+    }
+
+
+def _serialize_delete_hat_result(result) -> dict[str, object]:
+    return {
+        "kind": "hat_delete",
+        "hat": result.hat,
+        "existed": result.existed,
+        "deleted_load_ids": result.deleted_load_ids,
+        "deleted_topics": result.deleted_topics,
+        "message": (
+            f"Deleted hat '{result.hat}'. Loads removed: {len(result.deleted_load_ids)}. "
+            f"Topics removed: {len(result.deleted_topics)}."
+            if result.existed
+            else f"Hat '{result.hat}' was not found."
+        ),
+    }
+
+
+def _serialize_load_event(event) -> dict[str, object]:
+    return {
+        "load_id": event.load_id,
+        "hat": event.hat,
+        "created_at": event.created_at,
+        "source_items": list(event.source_items),
+        "topic_folders": list(event.topic_folders),
+    }
+
+
 def _compact_gui_progress(kind: str, message: str) -> str:
     raw = message.strip()
     if not raw:
@@ -295,6 +400,8 @@ def _compact_gui_progress(kind: str, message: str) -> str:
     if kind == "ask":
         mapped = _compact_ask_progress(raw)
         return mapped or raw
+    if kind == "delete":
+        return _compact_delete_progress(raw)
     return _compact_load_progress(raw)
 
 
@@ -328,6 +435,20 @@ def _compact_ask_progress(message: str) -> str | None:
 def _compact_load_progress(message: str) -> str:
     if "Calling local LLM" in message:
         return "Hitting LLM"
+    return message
+
+
+def _compact_delete_progress(message: str) -> str:
+    if "Deleting hat" in message or "Deleting " in message:
+        return "Deleting knowledge..."
+    if "Removing indexed chunks" in message:
+        return "Removing indexed chunks..."
+    if "Regenerating topic" in message:
+        return "Rewriting topic summaries..."
+    if "Refreshing map.md" in message or "Refreshing global_map.md" in message:
+        return "Refreshing maps..."
+    if "Recording deletion log" in message:
+        return "Recording deletion log..."
     return message
 
 

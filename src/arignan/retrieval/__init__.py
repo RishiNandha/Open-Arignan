@@ -1,6 +1,7 @@
 """Retrieval package."""
 
 from arignan.retrieval.pipeline import (
+    describe_question,
     HatSelector,
     MapRetriever,
     QueryExpander,
@@ -19,6 +20,7 @@ from arignan.retrieval.reranking import (
 __all__ = [
     "CrossEncoderReranker",
     "create_reranker",
+    "describe_question",
     "DEFAULT_RERANKER_MODEL",
     "HatSelector",
     "HeuristicReranker",

@@ -79,8 +79,8 @@ def test_render_summary_mentions_next_steps(tmp_path: Path) -> None:
         local_llm_backend="ollama",
         local_llm_model="qwen3:4b-q4_K_M",
         local_llm_light_model="qwen3:0.6b",
-        embedding_model="BAAI/bge-base-en-v1.5",
-        reranker_model="mixedbread-ai/mxbai-rerank-base-v1",
+        embedding_model="Alibaba-NLP/gte-modernbert-base",
+        reranker_model="Alibaba-NLP/gte-reranker-modernbert-base",
         bin_dir=tmp_path / "bin",
         windows_launcher=tmp_path / "bin" / "arignan.cmd",
         posix_launcher=tmp_path / "bin" / "arignan",
@@ -99,13 +99,13 @@ def test_display_path_strips_windows_extended_prefix() -> None:
 
 
 def test_sanitize_model_id_normalizes_paths() -> None:
-    assert sanitize_model_id("BAAI/bge-base-en-v1.5") == "BAAI__bge-base-en-v1.5"
+    assert sanitize_model_id("Alibaba-NLP/gte-modernbert-base") == "Alibaba-NLP__gte-modernbert-base"
 
 
 def test_resolve_model_repo_id_maps_readme_default() -> None:
     assert resolve_model_repo_id("Qwen3-1.7B") == "Qwen/Qwen3-1.7B"
     assert resolve_model_repo_id("Qwen/Qwen3-1.7B") == "Qwen/Qwen3-1.7B"
-    assert resolve_model_repo_id("BAAI/bge-base-en-v1.5") == "BAAI/bge-base-en-v1.5"
+    assert resolve_model_repo_id("Alibaba-NLP/gte-modernbert-base") == "Alibaba-NLP/gte-modernbert-base"
 
 
 def test_initialize_local_state_can_override_local_llm_model(tmp_path: Path) -> None:
@@ -124,8 +124,8 @@ def test_initialize_local_state_can_override_local_llm_model(tmp_path: Path) -> 
         assert payload["local_llm_backend"] == "ollama"
         assert payload["local_llm_model"] == "qwen3:4b-q4_K_M"
         assert payload["local_llm_light_model"] == "qwen3:0.6b"
-        assert payload["embedding_model"] == "BAAI/bge-base-en-v1.5"
-        assert payload["reranker_model"] == "mixedbread-ai/mxbai-rerank-base-v1"
+        assert payload["embedding_model"] == "Alibaba-NLP/gte-modernbert-base"
+        assert payload["reranker_model"] == "Alibaba-NLP/gte-reranker-modernbert-base"
         assert read_persisted_app_home() == (tmp_path / ".arignan").resolve()
     finally:
         Path.home = original_home
@@ -174,8 +174,8 @@ def test_initialize_local_state_refreshes_existing_settings_to_current_defaults(
         assert refreshed["local_llm_backend"] == "ollama"
         assert refreshed["local_llm_model"] == "qwen3:4b-q4_K_M"
         assert refreshed["local_llm_light_model"] == "qwen3:0.6b"
-        assert refreshed["embedding_model"] == "BAAI/bge-base-en-v1.5"
-        assert refreshed["reranker_model"] == "mixedbread-ai/mxbai-rerank-base-v1"
+        assert refreshed["embedding_model"] == "Alibaba-NLP/gte-modernbert-base"
+        assert refreshed["reranker_model"] == "Alibaba-NLP/gte-reranker-modernbert-base"
     finally:
         Path.home = original_home
 
@@ -222,12 +222,12 @@ def test_download_required_models_pulls_default_ollama_model(tmp_path: Path, mon
         "local_llm_backend": "ollama",
         "local_llm_model": "qwen3:4b-q4_K_M",
         "local_llm_light_model": "qwen3:0.6b",
-        "embedding_model": "BAAI/bge-base-en-v1.5",
-        "reranker_model": "mixedbread-ai/mxbai-rerank-base-v1",
+        "embedding_model": "Alibaba-NLP/gte-modernbert-base",
+        "reranker_model": "Alibaba-NLP/gte-reranker-modernbert-base",
     }
     assert [repo_id for repo_id, _, _ in downloaded_transformer_models] == [
-        "BAAI/bge-base-en-v1.5",
-        "mixedbread-ai/mxbai-rerank-base-v1",
+        "Alibaba-NLP/gte-modernbert-base",
+        "Alibaba-NLP/gte-reranker-modernbert-base",
     ]
 
 

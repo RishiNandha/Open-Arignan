@@ -63,12 +63,23 @@ class SentenceTransformerEmbedder:
         self._model = None
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
-        model = self._ensure_model()
-        encoded = model.encode(texts, normalize_embeddings=True)
+        encoded = self._encode(texts, is_query=False)
         return [list(vector) for vector in encoded]
 
     def embed_query(self, text: str) -> list[float]:
-        return self.embed_texts([text])[0]
+        return list(self._encode([text], is_query=True)[0])
+
+    def _encode(self, texts: list[str], *, is_query: bool):
+        model = self._ensure_model()
+        encode_kwargs = {"normalize_embeddings": True}
+        query_prompt = _query_prompt_for_model(self.model_name)
+        if is_query and query_prompt:
+            encode_kwargs["prompt"] = query_prompt
+        try:
+            return model.encode(texts, **encode_kwargs)
+        except TypeError:
+            encode_kwargs.pop("prompt", None)
+            return model.encode(texts, **encode_kwargs)
 
     def _ensure_model(self):
         if self._model is not None:
@@ -82,6 +93,13 @@ class SentenceTransformerEmbedder:
             ) from exc
         self._model = SentenceTransformer(self.model_source, device=self.device)
         return self._model
+
+
+def _query_prompt_for_model(model_name: str) -> str | None:
+    normalized = model_name.lower()
+    if "bge-" in normalized or "/bge-" in normalized:
+        return "Represent this sentence for searching relevant passages: "
+    return None
 
 
 def create_embedder(

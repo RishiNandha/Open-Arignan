@@ -63,7 +63,7 @@ class FailingGenerator:
 
 
 class GroupingReviewGenerator:
-    model_name = "qwen3:0.6b"
+    model_name = "qwen3:4b-q4_K_M"
     backend_name = "fake-backend"
 
     def __init__(self, target_topic_folder: str) -> None:
@@ -152,7 +152,7 @@ class ArtifactGenerator:
 
 
 class PostLoadRegroupGenerator:
-    model_name = "qwen3:0.6b"
+    model_name = "qwen3:4b-q4_K_M"
     backend_name = "fake-backend"
 
     def __init__(self) -> None:
@@ -168,20 +168,63 @@ class PostLoadRegroupGenerator:
         response_format=None,
     ) -> str:
         self.calls.append(user_prompt)
-        if "Title: First Topic" in user_prompt and "Title: Second Topic" in user_prompt:
+        if "review topic pages inside one local research-wiki hat" in system_prompt.lower():
+            if "Title: First Topic" in user_prompt and "Title: Second Topic" in user_prompt:
+                return json.dumps(
+                    {
+                        "recommendations": [
+                            {
+                                "members": ["first-topic", "second-topic"],
+                                "target_topic_folder": "second-topic",
+                                "confidence": 0.91,
+                                "rationale": "the first topic fits better as part of the second topic page",
+                            }
+                        ]
+                    }
+                )
+            return json.dumps({"recommendations": []})
+        if "Return strict JSON only" in system_prompt:
+            suggested_title = "Topic"
+            for line in user_prompt.splitlines():
+                if line.startswith("- Suggested title: "):
+                    suggested_title = line.split(": ", maxsplit=1)[1].strip() or "Topic"
+                    break
             return json.dumps(
                 {
-                    "recommendations": [
-                        {
-                            "members": ["first-topic", "second-topic"],
-                            "target_topic_folder": "second-topic",
-                            "confidence": 0.91,
-                            "rationale": "the first topic fits better as part of the second topic page",
-                        }
-                    ]
+                    "title": suggested_title,
+                    "description": "Topic description.",
+                    "locator": "topic lookup",
+                    "keywords": ["topic", "lookup"],
+                    "summary_markdown": (
+                        f"# {suggested_title}\n\n"
+                        "A concise topic page.\n\n"
+                        "## Summary\n"
+                        "Short summary.\n\n"
+                        "## Key Ideas\n"
+                        "- First idea\n"
+                        "- Second idea\n\n"
+                        "## Sources\n"
+                        "| Source | What To Find | Key Sections | File |\n"
+                        "| --- | --- | --- | --- |\n"
+                        f"| {suggested_title} | Short summary | Overview | `notes.md` |\n\n"
+                        "## Keywords\n"
+                        "topic, lookup"
+                    ),
                 }
             )
-        return json.dumps({"recommendations": []})
+        if "knowledge-base hat map" in system_prompt:
+            return (
+                "# Map for Hat: default\n\n"
+                "| Topic | Directory | What To Find | Source Files | Keywords |\n"
+                "| --- | --- | --- | --- | --- |\n"
+            )
+        if "global knowledge-base map" in system_prompt:
+            return (
+                "# Global Map\n\n"
+                "| Hat | Map Path | What To Find | High-Level Keywords |\n"
+                "| --- | --- | --- | --- |\n"
+            )
+        return "Answer."
 
 
 class EmptyCrossEncoderReranker:
@@ -278,6 +321,7 @@ def test_generate_answer_uses_local_llm_when_available() -> None:
 
     assert answer == "JEPA stands for Joint Embedding Predictive Architecture."
     assert len(generator.calls) == 1
+    assert "<question_brief>" in generator.calls[0][1]
     assert "<retrieved_passages>" in generator.calls[0][1]
     assert "<example>" in generator.calls[0][1]
     assert calls[-1].task == "answer generation"
@@ -563,6 +607,7 @@ def test_application_grouping_review_uses_full_topic_list(app_home: Path, monkey
     assert len(topics) == 3
     assert {topic.topic_folder for topic in topics} == {"jepa", "positional-encoding", "latent-prediction-training"}
     assert "Title: Positional Encoding Ideas" in prompt
+    assert "<pair_hints>" in prompt
     assert "Current load: yes" in prompt
     assert "Current load: no" in prompt
     assert len(recommendations) == 1
@@ -596,7 +641,7 @@ def test_application_load_post_regroups_after_all_topic_summaries_exist(
 
     def fake_generator_factory(config, progress_sink=None, **kwargs):
         requested_model = kwargs.get("model_name")
-        if requested_model == config.local_llm_light_model:
+        if requested_model in {None, config.local_llm_model}:
             return light_generator
         return ArtifactGenerator(requested_model or config.local_llm_model)
 

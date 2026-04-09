@@ -8,6 +8,10 @@ function App() {
     default_hat: "default",
     answer_modes: ANSWER_MODES,
   });
+  const [library, setLibrary] = useState({
+    hats: [],
+    loads: [],
+  });
   const [hat, setHat] = useState("auto");
   const [answerMode, setAnswerMode] = useState("default");
   const [question, setQuestion] = useState("");
@@ -19,11 +23,14 @@ function App() {
     }),
   ]);
   const [loadDialogOpen, setLoadDialogOpen] = useState(false);
+  const [manageDialogOpen, setManageDialogOpen] = useState(false);
   const [loadHat, setLoadHat] = useState("default");
+  const [newHatName, setNewHatName] = useState("");
   const [loadMode, setLoadMode] = useState("files");
   const [selectedUploads, setSelectedUploads] = useState([]);
   const [isAsking, setIsAsking] = useState(false);
   const [isLoadingTask, setIsLoadingTask] = useState(false);
+  const [isDeletingTask, setIsDeletingTask] = useState(false);
   const messagesRef = useRef(null);
   const fileInputRef = useRef(null);
   const folderInputRef = useRef(null);
@@ -45,11 +52,18 @@ function App() {
     setHat(payload.hats?.includes("auto") ? "auto" : payload.default_hat || "default");
     setLoadHat(payload.default_hat || "default");
     setAnswerMode("default");
+    await refreshLibrary();
+  }
+
+  async function refreshLibrary() {
+    const payload = await fetchJson("/api/library");
+    setLibrary(payload);
   }
 
   function openLoadDialog() {
     setLoadDialogOpen(true);
     setLoadHat(hat === "auto" ? options.default_hat || "default" : hat);
+    setNewHatName("");
     setLoadMode("files");
     setSelectedUploads([]);
     if (fileInputRef.current) fileInputRef.current.value = "";
@@ -61,6 +75,14 @@ function App() {
     setSelectedUploads([]);
     if (fileInputRef.current) fileInputRef.current.value = "";
     if (folderInputRef.current) folderInputRef.current.value = "";
+  }
+
+  function openManageDialog() {
+    setManageDialogOpen(true);
+  }
+
+  function closeManageDialog() {
+    setManageDialogOpen(false);
   }
 
   function appendMessage(message) {
@@ -81,12 +103,13 @@ function App() {
   async function confirmLoad() {
     if (!selectedUploads.length || isLoadingTask) return;
     setIsLoadingTask(true);
+    const effectiveHat = (newHatName || "").trim() || loadHat;
     const label = selectedUploads.map((file) => file.webkitRelativePath || file.name).join(", ");
     appendMessage(
       createMessage({
         role: "user",
         title: "You",
-        body: `Add more files to knowledge base in hat '${loadHat}': ${label}`,
+        body: `Add more files to knowledge base in hat '${effectiveHat}': ${label}`,
       })
     );
     const pendingMessage = createMessage({
@@ -101,7 +124,7 @@ function App() {
 
     try {
       const formData = new FormData();
-      formData.append("hat", loadHat);
+      formData.append("hat", effectiveHat);
       selectedUploads.forEach((file) => {
         const uploadName = file.webkitRelativePath || file.name;
         formData.append("files", file, uploadName);
@@ -119,6 +142,7 @@ function App() {
             body: formatLoadResult(result),
             citations: [],
           });
+          bootstrap();
         },
       });
     } catch (error) {
@@ -129,6 +153,104 @@ function App() {
       });
     } finally {
       setIsLoadingTask(false);
+    }
+  }
+
+  async function deleteLoad(load) {
+    if (isDeletingTask) return;
+    const confirmed = window.confirm(`Delete load '${load.load_id}' from hat '${load.hat}'?`);
+    if (!confirmed) return;
+    setIsDeletingTask(true);
+    appendMessage(
+      createMessage({
+        role: "user",
+        title: "You",
+        body: `Delete load '${load.load_id}' from hat '${load.hat}'`,
+      })
+    );
+    const pendingMessage = createMessage({
+      role: "assistant",
+      title: "Arignan",
+      body: "Deleting selected loads...",
+      pending: true,
+    });
+    const pendingId = pendingMessage.id;
+    appendMessage(pendingMessage);
+    try {
+      const payload = await fetchJson("/api/delete/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ load_ids: [load.load_id] }),
+      });
+      await followTask({
+        taskId: payload.task_id,
+        pendingId,
+        onComplete: (result) => {
+          patchMessage(pendingId, {
+            pending: false,
+            body: result.message,
+            citations: [],
+          });
+          bootstrap();
+        },
+      });
+    } catch (error) {
+      patchMessage(pendingId, {
+        pending: false,
+        body: normalizeError(error),
+        citations: [],
+      });
+    } finally {
+      setIsDeletingTask(false);
+    }
+  }
+
+  async function deleteHat(hatName) {
+    if (isDeletingTask) return;
+    const confirmed = window.confirm(`Delete entire hat '${hatName}'? This removes all indexes, summaries, and source copies for that hat.`);
+    if (!confirmed) return;
+    setIsDeletingTask(true);
+    appendMessage(
+      createMessage({
+        role: "user",
+        title: "You",
+        body: `Delete hat '${hatName}'`,
+      })
+    );
+    const pendingMessage = createMessage({
+      role: "assistant",
+      title: "Arignan",
+      body: `Deleting hat '${hatName}'...`,
+      pending: true,
+    });
+    const pendingId = pendingMessage.id;
+    appendMessage(pendingMessage);
+    try {
+      const payload = await fetchJson("/api/delete/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ hat: hatName }),
+      });
+      await followTask({
+        taskId: payload.task_id,
+        pendingId,
+        onComplete: (result) => {
+          patchMessage(pendingId, {
+            pending: false,
+            body: result.message,
+            citations: [],
+          });
+          bootstrap();
+        },
+      });
+    } catch (error) {
+      patchMessage(pendingId, {
+        pending: false,
+        body: normalizeError(error),
+        citations: [],
+      });
+    } finally {
+      setIsDeletingTask(false);
     }
   }
 
@@ -213,10 +335,15 @@ function App() {
           <h1 className="brand-title">Open Arignan</h1>
           <p className="brand-subtitle">Local knowledge base loading and questioning with a chat-style UI.</p>
         </div>
-        <button type="button" className="add-button" onClick={openLoadDialog}>
-          <span className="plus">+</span>
-          <span>Add More Files To Knowledge Base</span>
-        </button>
+        <div className="header-actions">
+          <button type="button" className="ghost-button" onClick={openManageDialog}>
+            Manage Knowledge Base
+          </button>
+          <button type="button" className="add-button" onClick={openLoadDialog}>
+            <span className="plus">+</span>
+            <span>Add More Files To Knowledge Base</span>
+          </button>
+        </div>
       </header>
 
       <section className="chat-panel">
@@ -278,6 +405,8 @@ function App() {
           hats={sortedHats.filter((value) => value !== "auto")}
           loadHat={loadHat}
           setLoadHat={setLoadHat}
+          newHatName={newHatName}
+          setNewHatName={setNewHatName}
           loadMode={loadMode}
           setLoadMode={setLoadMode}
           selectedUploads={selectedUploads}
@@ -289,6 +418,17 @@ function App() {
           fileInputRef={fileInputRef}
           folderInputRef={folderInputRef}
           busy={isLoadingTask}
+        />
+      )}
+
+      {manageDialogOpen && (
+        <ManageDialog
+          hats={library.hats || []}
+          loads={library.loads || []}
+          onClose={closeManageDialog}
+          onDeleteLoad={deleteLoad}
+          onDeleteHat={deleteHat}
+          busy={isDeletingTask}
         />
       )}
     </div>
@@ -329,6 +469,8 @@ function LoadDialog({
   hats,
   loadHat,
   setLoadHat,
+  newHatName,
+  setNewHatName,
   loadMode,
   setLoadMode,
   selectedUploads,
@@ -351,7 +493,7 @@ function LoadDialog({
 
         <div className="modal-grid">
           <label className="control-label">
-            Hat
+            Existing Hat
             <select className="select-control" value={loadHat} onChange={(event) => setLoadHat(event.target.value)}>
               {hats.map((value) => (
                 <option key={value} value={value}>
@@ -359,6 +501,17 @@ function LoadDialog({
                 </option>
               ))}
             </select>
+          </label>
+
+          <label className="control-label">
+            Or Create New Hat
+            <input
+              className="text-control"
+              type="text"
+              placeholder="Type a new hat name..."
+              value={newHatName}
+              onChange={(event) => setNewHatName(event.target.value)}
+            />
           </label>
 
           <div className="choice-grid">
@@ -426,6 +579,80 @@ function LoadDialog({
           </button>
           <button type="button" className="modal-action primary" onClick={onConfirm} disabled={!selectedUploads.length || busy}>
             Add
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function ManageDialog({ hats, loads, onClose, onDeleteLoad, onDeleteHat, busy }) {
+  return (
+    <div className="modal-scrim" role="dialog" aria-modal="true">
+      <section className="modal-card manage-modal">
+        <div className="modal-head">
+          <h2>Manage Knowledge Base</h2>
+          <p>Delete older loads or remove an entire hat from the local knowledge base.</p>
+        </div>
+
+        <div className="manage-grid">
+          <section className="manage-section">
+            <div className="manage-title-row">
+              <h3>Loads</h3>
+              <span>{loads.length}</span>
+            </div>
+            <div className="manage-list">
+              {loads.length ? (
+                loads.map((load) => (
+                  <article key={load.load_id} className="manage-item">
+                    <div className="manage-item-main">
+                      <div className="manage-item-title">{load.load_id}</div>
+                      <div className="manage-item-meta">
+                        Hat: {load.hat} | Topics: {(load.topic_folders || []).join(", ") || "n/a"}
+                      </div>
+                      <div className="manage-item-copy">
+                        {(load.source_items || []).slice(0, 3).join(", ") || "No source details"}
+                      </div>
+                    </div>
+                    <button type="button" className="danger-button" disabled={busy} onClick={() => onDeleteLoad(load)}>
+                      Delete
+                    </button>
+                  </article>
+                ))
+              ) : (
+                <div className="selection-hint">No ingestions found yet.</div>
+              )}
+            </div>
+          </section>
+
+          <section className="manage-section">
+            <div className="manage-title-row">
+              <h3>Hats</h3>
+              <span>{hats.length}</span>
+            </div>
+            <div className="manage-list">
+              {hats.length ? (
+                hats.map((hat) => (
+                  <article key={hat} className="manage-item">
+                    <div className="manage-item-main">
+                      <div className="manage-item-title">{hat}</div>
+                      <div className="manage-item-copy">Delete this only if you want to remove the entire hat.</div>
+                    </div>
+                    <button type="button" className="danger-button" disabled={busy} onClick={() => onDeleteHat(hat)}>
+                      Delete Hat
+                    </button>
+                  </article>
+                ))
+              ) : (
+                <div className="selection-hint">No hats found yet.</div>
+              )}
+            </div>
+          </section>
+        </div>
+
+        <div className="modal-actions">
+          <button type="button" className="modal-action" onClick={onClose} disabled={busy}>
+            Close
           </button>
         </div>
       </section>

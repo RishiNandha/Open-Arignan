@@ -52,10 +52,32 @@ def test_sentence_transformer_embedder_prefers_cuda_when_available(monkeypatch) 
     assert captured == {"model_name": DEFAULT_EMBEDDING_MODEL, "device": "cuda"}
 
 
+def test_sentence_transformer_embedder_uses_query_prompt_for_bge(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeSentenceTransformer:
+        def __init__(self, model_name: str, device: str) -> None:
+            captured["model_name"] = model_name
+            captured["device"] = device
+
+        def encode(self, texts, normalize_embeddings=True, prompt=None):
+            captured["prompt"] = prompt
+            return [[1.0, 0.0] for _ in texts]
+
+    fake_module = types.SimpleNamespace(SentenceTransformer=FakeSentenceTransformer)
+    monkeypatch.setitem(sys.modules, "sentence_transformers", fake_module)
+    monkeypatch.setattr("arignan.indexing.embedding.preferred_torch_device", lambda: "cuda")
+
+    embedder = SentenceTransformerEmbedder(model_name="BAAI/bge-small-en-v1.5")
+    embedder.embed_query("what is jepa")
+
+    assert captured["prompt"] == "Represent this sentence for searching relevant passages: "
+
+
 def test_create_embedder_uses_sentence_transformer_when_model_cached(tmp_path: Path, monkeypatch) -> None:
     app_home = tmp_path / ".arignan"
     write_default_settings(app_home=app_home)
-    model_dir = app_home / "models" / "BAAI__bge-base-en-v1.5"
+    model_dir = app_home / "models" / "Alibaba-NLP__gte-modernbert-base"
     model_dir.mkdir(parents=True, exist_ok=True)
 
     captured: dict[str, object] = {}

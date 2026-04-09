@@ -137,7 +137,7 @@ Parsing for the vector index and keyword index are done using headings wherever 
 
 #### Embedding
 
-Embedding model used is `BAAI/bge-base-en-v1.5` by default, with `BAAI/bge-small-en-v1.5` used by `--lightweight` setup. The configured retrieval models are stored in `settings.json` and cached locally under the app-home `models/` directory. Each chunk stores:
+Embedding model used is `Alibaba-NLP/gte-modernbert-base` by default, with `BAAI/bge-small-en-v1.5` used by `--lightweight` setup. The configured retrieval models are stored in `settings.json` and cached locally under the app-home `models/` directory. Each chunk stores:
 
 - The embedding vector
 - Canonical chunk text
@@ -192,7 +192,7 @@ Using the Ingestion log, the files are remove, map.md is updated and the vector 
    - BM25 retrieves top-k chunks
    - Descending down the maps retrieves the knowledge base markdown. (If the markdown is large, headings are treated as individual chunks).
 4. **Reciprocal Rank Fusion**: Chunks that appear in both Qdrant and BM25 are awarded higher score, and the rest are pruned
-5. **Cross-Encoder Reranking**: The chunks are reranked. This removes false positives, and removes irrelevant chunks from the markdown. Default cross-encoder used is `mixedbread-ai/mxbai-rerank-base-v1`, while `--lightweight` setup uses `mixedbread-ai/mxbai-rerank-xsmall-v1`
+5. **Cross-Encoder Reranking**: The chunks are reranked. This removes false positives, and removes irrelevant chunks from the markdown. Default cross-encoder used is `Alibaba-NLP/gte-reranker-modernbert-base`, while `--lightweight` setup uses `mixedbread-ai/mxbai-rerank-xsmall-v1`
 6. **Final Answer Mode**: `ask` can use the default local LLM, a lighter local LLM, deterministic retrieval synthesis, or a raw reranked-context dump via `--answer-mode default|light|none|raw`
 7. (To implement in future): Adjacent Content Expansion.
 
