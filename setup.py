@@ -19,6 +19,7 @@ PACKAGING_COMMANDS = {
     "build_py",
     "develop",
     "dist_info",
+    "editable_wheel",
     "egg_info",
     "install",
     "sdist",

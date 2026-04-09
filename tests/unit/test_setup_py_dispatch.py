@@ -19,6 +19,7 @@ def test_setup_py_detects_packaging_invocations() -> None:
 
     assert module.is_packaging_invocation(["setup.py", "egg_info"])
     assert module.is_packaging_invocation(["setup.py", "bdist_wheel"])
+    assert module.is_packaging_invocation(["setup.py", "editable_wheel", "--dist-dir", "tmp"])
     assert not module.is_packaging_invocation(["setup.py"])
     assert not module.is_packaging_invocation(["setup.py", "--dev"])
 
