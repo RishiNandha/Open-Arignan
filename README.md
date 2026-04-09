@@ -11,8 +11,6 @@
    - Download all the models needed, including the default local answer model and a lighter fallback answer model
    - Create a **bin directory** folder with executables
    - Print the bin directory for your reference
-   - Optional: use `python setup.py --app-home <install dir> --lightweight` if you want the normal local model to be the same smaller model as the light mode
-   - Optional for smaller local GPUs: you can also choose a custom local model during setup with `python setup.py --app-home <install dir> --llm-model <model_name> --llm-backend ollama`, or change `settings.json` later and Arignan will prepare the newly selected local model on first use
 2. Add the bin directory folder to your PATH
 3. Try `arignan load "filename.pdf"`
 4. Try `arignan ask "relevant question"`
@@ -232,7 +230,6 @@ When the chat history is becoming too long:
 1. Setup: `python setup.py --app-home <install dir>`. We will call this the **App home** from now.
 2. Add **Bin directory** to PATH. The setup.py will automatically print the bin directory for you.
 2. Help: `arignan --help`
-3. Load: `arignan load "filename.pdf"`
 4. Load with hat: `arignan load "flename.pdf" --hat psychology`
 5. QnA: `arignan ask "What is JEPA?"`
 6. QnA with hat: `arignan ask "How to use CalibreRC" --hat "IC Design"`
@@ -242,6 +239,7 @@ When the chat history is becoming too long:
 10. Reset context: `arignan reset-session`
 11. Save context: `arignan save-session <path/session_name.json>`
 12. Reload context: `arignan load-session <path/session_name.json>`
+4. Optional post-setup model change: edit `settings.json` 
 
 ### For Developers
 
