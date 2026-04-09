@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+from pathlib import Path
 from typing import Protocol
 
 from arignan.compute import preferred_torch_device
 from arignan.indexing import tokenize
+from arignan.model_registry import DEFAULT_RERANKER_MODEL_REPO_ID, resolve_model_storage_dir
 from arignan.models import RetrievalHit
 
-DEFAULT_RERANKER_MODEL = "BAAI/bge-reranker-v2-m3"
+if False:  # pragma: no cover
+    from arignan.config import AppConfig
+    from arignan.session import SessionExceptionLogger
+
+DEFAULT_RERANKER_MODEL = DEFAULT_RERANKER_MODEL_REPO_ID
 
 
 class Reranker(Protocol):
@@ -18,8 +25,8 @@ class Reranker(Protocol):
 
 
 class HeuristicReranker:
-    def __init__(self) -> None:
-        self.model_name = DEFAULT_RERANKER_MODEL
+    def __init__(self, model_name: str = DEFAULT_RERANKER_MODEL) -> None:
+        self.model_name = model_name
         self.backend_name = "heuristic-reranker"
 
     def rerank(self, query: str, hits: list[RetrievalHit], limit: int, min_score: float = 0.0) -> list[RetrievalHit]:
@@ -37,22 +44,16 @@ class HeuristicReranker:
 
 
 class CrossEncoderReranker:
-    def __init__(self, model_name: str = DEFAULT_RERANKER_MODEL) -> None:
+    def __init__(self, model_name: str = DEFAULT_RERANKER_MODEL, model_source: str | Path | None = None) -> None:
         self.model_name = model_name
         self.backend_name = "cross-encoder"
         self.device = preferred_torch_device()
-        try:
-            from sentence_transformers import CrossEncoder
-        except ImportError as exc:  # pragma: no cover - exercised only when dependency is installed
-            raise RuntimeError(
-                "sentence-transformers is required for CrossEncoderReranker; "
-                "install the optional ml dependencies"
-            ) from exc
-        self._model = CrossEncoder(model_name, device=self.device)
+        self.model_source = str(model_source or model_name)
+        self._model = None
 
     def rerank(self, query: str, hits: list[RetrievalHit], limit: int, min_score: float = 0.0) -> list[RetrievalHit]:
         pairs = [[query, hit.text] for hit in hits]
-        scores = self._model.predict(pairs)
+        scores = self._ensure_model().predict(pairs)
         rescored: list[tuple[float, RetrievalHit]] = []
         for hit, score in zip(hits, scores):
             numeric_score = float(score)
@@ -61,3 +62,44 @@ class CrossEncoderReranker:
                 rescored.append((numeric_score, hit))
         rescored.sort(key=lambda item: item[0], reverse=True)
         return [hit for _, hit in rescored[:limit]]
+
+    def _ensure_model(self):
+        if self._model is not None:
+            return self._model
+        try:
+            from sentence_transformers import CrossEncoder
+        except ImportError as exc:  # pragma: no cover - exercised only when dependency is installed
+            raise RuntimeError(
+                "sentence-transformers is required for CrossEncoderReranker; "
+                "install the optional ml dependencies"
+            ) from exc
+        self._model = CrossEncoder(self.model_source, device=self.device)
+        return self._model
+
+
+def create_reranker(
+    config: "AppConfig",
+    *,
+    progress_sink: Callable[[str], None] | None = None,
+    exception_logger: "SessionExceptionLogger | None" = None,
+) -> Reranker:
+    model_dir = resolve_model_storage_dir(config.app_home, config.reranker_model)
+    if not model_dir.exists():
+        return HeuristicReranker(model_name=config.reranker_model)
+    try:
+        if progress_sink is not None:
+            progress_sink(f"Preparing local reranker model ({config.reranker_model})...")
+        return CrossEncoderReranker(model_name=config.reranker_model, model_source=model_dir)
+    except Exception as exc:
+        if exception_logger is not None:
+            log_path = exception_logger.log_exception(
+                component="reranker",
+                task="reranker model load",
+                exc=exc,
+                context={"model_name": config.reranker_model, "model_source": str(model_dir)},
+            )
+            if progress_sink is not None:
+                progress_sink(
+                    f"Local reranker model unavailable; using heuristic fallback. Log: {log_path.resolve()}"
+                )
+        return HeuristicReranker(model_name=config.reranker_model)

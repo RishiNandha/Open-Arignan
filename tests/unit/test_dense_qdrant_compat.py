@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from arignan.indexing import DenseIndexer, HashingEmbedder
 from arignan.indexing.dense import LocalDenseIndex
+from arignan.models import ChunkMetadata, ChunkRecord
 
 
 class _FakeScoredPoint:
@@ -48,3 +50,28 @@ def test_local_dense_index_supports_qdrant_query_points_without_search(tmp_path:
     assert hits[0].chunk_id == "chunk-1"
     assert hits[0].score == 0.87
     assert hits[0].metadata.load_id == "load-1"
+
+
+def test_local_dense_index_recreates_qdrant_collection_when_vector_size_changes(tmp_path: Path) -> None:
+    index = LocalDenseIndex(tmp_path / "vector_index")
+    chunks = [
+        ChunkRecord(
+            chunk_id="chunk-old",
+            text="old retrieval chunk",
+            metadata=ChunkMetadata(load_id="load-old", hat="default", source_uri="old.md"),
+        )
+    ]
+    DenseIndexer(HashingEmbedder(dimension=24), index).index_chunks(chunks)
+
+    new_chunks = [
+        ChunkRecord(
+            chunk_id="chunk-new",
+            text="new retrieval chunk",
+            metadata=ChunkMetadata(load_id="load-new", hat="default", source_uri="new.md"),
+        )
+    ]
+    DenseIndexer(HashingEmbedder(dimension=768), index).index_chunks(new_chunks)
+
+    records = index.all_chunks()
+    assert [record.chunk_id for record in records] == ["chunk-new"]
+    assert len(records[0].embedding or []) == 768

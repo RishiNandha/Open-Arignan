@@ -140,6 +140,45 @@ def test_llm_artifact_writer_falls_back_on_invalid_json(tmp_path: Path) -> None:
     assert "## Related Threads" in rendered.summary_markdown
 
 
+def test_llm_artifact_writer_accepts_markdown_when_json_schema_is_ignored(tmp_path: Path) -> None:
+    document = _document(tmp_path)
+    writer = LLMArtifactWriter(
+        generator=FakeGenerator(
+            [
+                "# Alpha Activation TTFS\n\n"
+                "Alpha Activation TTFS is a timing-focused spiking-neural-network topic.\n\n"
+                "## Summary\n"
+                "This page covers the core idea, why the activation matters, and how the material fits together.\n\n"
+                "## Key Ideas\n"
+                "- Uses alpha-shaped temporal activity to shape spike timing behavior.\n"
+                "- Connects activation design with TTFS-style encoding choices.\n"
+                "- Helps frame timing sensitivity, signal shaping, and downstream sequence effects together.\n\n"
+                "## Related Threads\n"
+                "- Closely related to spike timing dynamics and temporal coding in SNNs.\n"
+                "- Useful when comparing activation shaping against other timing-sensitive encodings.\n"
+                "- Serves as a bridge between temporal response design and event-based learning behavior.\n\n"
+                "## Sources\n"
+                "| Source | What To Find | Key Sections | File |\n"
+                "| --- | --- | --- | --- |\n"
+                "| V-JEPA 2 | Video representation notes | Overview | `notes.md` |\n\n"
+                "## Keywords\n"
+                "alpha activation, TTFS, spiking neural network, temporal coding\n"
+            ]
+        ),
+        fallback=HeuristicArtifactWriter(),
+    )
+
+    rendered = writer.render_topic(
+        [document],
+        GroupingPlan(decision=GroupingDecision.STANDALONE, topic_folder="alpha-activation-ttfs", estimated_length=400),
+    )
+
+    assert rendered.title == "Alpha Activation TTFS"
+    assert rendered.summary_markdown.startswith("# Alpha Activation TTFS")
+    assert "## Summary" in rendered.summary_markdown
+    assert "## Related Threads" in rendered.summary_markdown
+
+
 def test_llm_artifact_writer_renders_map_and_global_map(tmp_path: Path) -> None:
     generator = FakeGenerator(
         [

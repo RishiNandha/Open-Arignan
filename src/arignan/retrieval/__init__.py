@@ -9,6 +9,7 @@ from arignan.retrieval.pipeline import (
     reciprocal_rank_fusion,
 )
 from arignan.retrieval.reranking import (
+    create_reranker,
     DEFAULT_RERANKER_MODEL,
     CrossEncoderReranker,
     HeuristicReranker,
@@ -17,6 +18,7 @@ from arignan.retrieval.reranking import (
 
 __all__ = [
     "CrossEncoderReranker",
+    "create_reranker",
     "DEFAULT_RERANKER_MODEL",
     "HatSelector",
     "HeuristicReranker",

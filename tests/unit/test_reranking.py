@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import sys
 import types
+from pathlib import Path
 
+from arignan.config import load_config, write_default_settings
 from arignan.models import ChunkMetadata, RetrievalHit, RetrievalSource
-from arignan.retrieval import DEFAULT_RERANKER_MODEL, CrossEncoderReranker, HeuristicReranker
+from arignan.retrieval import DEFAULT_RERANKER_MODEL, CrossEncoderReranker, HeuristicReranker, create_reranker
 
 
 def test_heuristic_reranker_reorders_hits_by_query_overlap() -> None:
@@ -69,6 +71,45 @@ def test_cross_encoder_reranker_prefers_cuda_when_available(monkeypatch) -> None
     monkeypatch.setattr("arignan.retrieval.reranking.preferred_torch_device", lambda: "cuda")
 
     reranker = CrossEncoderReranker()
+    reranker._ensure_model()
 
     assert reranker.device == "cuda"
     assert captured == {"model_name": DEFAULT_RERANKER_MODEL, "device": "cuda"}
+
+
+def test_create_reranker_uses_cross_encoder_when_model_cached(tmp_path: Path, monkeypatch) -> None:
+    app_home = tmp_path / ".arignan"
+    write_default_settings(app_home=app_home)
+    model_dir = app_home / "models" / "mixedbread-ai__mxbai-rerank-base-v1"
+    model_dir.mkdir(parents=True, exist_ok=True)
+
+    captured: dict[str, object] = {}
+
+    class FakeCrossEncoder:
+        def __init__(self, model_name: str, device: str) -> None:
+            captured["model_name"] = model_name
+            captured["device"] = device
+
+        def predict(self, pairs):
+            return [0.9 for _ in pairs]
+
+    monkeypatch.setitem(sys.modules, "sentence_transformers", types.SimpleNamespace(CrossEncoder=FakeCrossEncoder))
+    monkeypatch.setattr("arignan.retrieval.reranking.preferred_torch_device", lambda: "cuda")
+
+    reranker = create_reranker(load_config(app_home=app_home))
+    reranker.rerank(
+        "question",
+        [
+            RetrievalHit(
+                chunk_id="c1",
+                text="Joint embedding predictive architecture",
+                score=0.5,
+                source=RetrievalSource.DENSE,
+                metadata=ChunkMetadata(load_id="load-1", hat="default", source_uri="jepa.md"),
+            )
+        ],
+        limit=1,
+    )
+
+    assert reranker.backend_name == "cross-encoder"
+    assert captured == {"model_name": str(model_dir), "device": "cuda"}

@@ -101,15 +101,18 @@ class LocalDenseIndex:
         first_embedding = chunks[0].embedding
         if first_embedding is None:
             raise ValueError("chunk embedding must be set before indexing")
+        vector_size = len(first_embedding)
         if not self._qdrant_client.collection_exists(self.collection_name):
             self._qdrant_client.create_collection(
                 collection_name=self.collection_name,
                 vectors_config=models.VectorParams(
-                    size=len(first_embedding),
+                    size=vector_size,
                     distance=models.Distance.COSINE,
                     hnsw_config=models.HnswConfigDiff(),
                 ),
             )
+        elif self._qdrant_collection_vector_size() not in {None, vector_size}:
+            self._recreate_qdrant_collection(vector_size)
 
         points = []
         for chunk in chunks:
@@ -130,6 +133,9 @@ class LocalDenseIndex:
 
     def _search_qdrant(self, query_embedding: list[float], limit: int) -> list[RetrievalHit]:
         if not self._qdrant_client.collection_exists(self.collection_name):
+            return []
+        collection_size = self._qdrant_collection_vector_size()
+        if collection_size is not None and collection_size != len(query_embedding):
             return []
         results = self._qdrant_search_results(query_embedding, limit)
         hits: list[RetrievalHit] = []
@@ -166,6 +172,30 @@ class LocalDenseIndex:
                 with_payload=True,
             )
         raise AttributeError("QdrantClient does not support query_points() or search()")
+
+    def _qdrant_collection_vector_size(self) -> int | None:
+        client = self._qdrant_client
+        if client is None or not hasattr(client, "get_collection"):
+            return None
+        info = client.get_collection(self.collection_name)
+        try:
+            vectors = info.config.params.vectors
+            return int(vectors.size)
+        except Exception:
+            return None
+
+    def _recreate_qdrant_collection(self, vector_size: int) -> None:
+        from qdrant_client.http import models
+
+        self._qdrant_client.delete_collection(self.collection_name)
+        self._qdrant_client.create_collection(
+            collection_name=self.collection_name,
+            vectors_config=models.VectorParams(
+                size=vector_size,
+                distance=models.Distance.COSINE,
+                hnsw_config=models.HnswConfigDiff(),
+            ),
+        )
 
     def _delete_load_qdrant(self, load_id: str) -> None:
         from qdrant_client.http import models

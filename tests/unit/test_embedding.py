@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import sys
 import types
+from pathlib import Path
 
+from arignan.config import load_config, write_default_settings
 from arignan.indexing import DEFAULT_EMBEDDING_MODEL, HashingEmbedder, cosine_similarity
-from arignan.indexing.embedding import SentenceTransformerEmbedder
+from arignan.indexing.embedding import SentenceTransformerEmbedder, create_embedder
 
 
 def test_hashing_embedder_is_deterministic() -> None:
@@ -36,11 +38,41 @@ def test_sentence_transformer_embedder_prefers_cuda_when_available(monkeypatch) 
             captured["model_name"] = model_name
             captured["device"] = device
 
+        def encode(self, texts, normalize_embeddings=True):
+            return [[1.0, 0.0] for _ in texts]
+
     fake_module = types.SimpleNamespace(SentenceTransformer=FakeSentenceTransformer)
     monkeypatch.setitem(sys.modules, "sentence_transformers", fake_module)
     monkeypatch.setattr("arignan.indexing.embedding.preferred_torch_device", lambda: "cuda")
 
     embedder = SentenceTransformerEmbedder()
+    embedder.embed_texts(["hello world"])
 
     assert embedder.device == "cuda"
     assert captured == {"model_name": DEFAULT_EMBEDDING_MODEL, "device": "cuda"}
+
+
+def test_create_embedder_uses_sentence_transformer_when_model_cached(tmp_path: Path, monkeypatch) -> None:
+    app_home = tmp_path / ".arignan"
+    write_default_settings(app_home=app_home)
+    model_dir = app_home / "models" / "BAAI__bge-base-en-v1.5"
+    model_dir.mkdir(parents=True, exist_ok=True)
+
+    captured: dict[str, object] = {}
+
+    class FakeSentenceTransformer:
+        def __init__(self, model_name: str, device: str) -> None:
+            captured["model_name"] = model_name
+            captured["device"] = device
+
+        def encode(self, texts, normalize_embeddings=True):
+            return [[1.0, 0.0] for _ in texts]
+
+    monkeypatch.setitem(sys.modules, "sentence_transformers", types.SimpleNamespace(SentenceTransformer=FakeSentenceTransformer))
+    monkeypatch.setattr("arignan.indexing.embedding.preferred_torch_device", lambda: "cuda")
+
+    embedder = create_embedder(load_config(app_home=app_home))
+    embedder.embed_query("test")
+
+    assert embedder.backend_name == "sentence-transformers"
+    assert captured == {"model_name": str(model_dir), "device": "cuda"}

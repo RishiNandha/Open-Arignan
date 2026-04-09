@@ -148,7 +148,7 @@ class LLMArtifactWriter:
                 temperature=0.1,
                 response_format=TOPIC_RESPONSE_SCHEMA,
             )
-            payload = _extract_json_payload(raw)
+            payload = _coerce_topic_payload(raw, fallback=fallback, documents=documents)
         except Exception as exc:
             log_path = self._log_exception(
                 task="topic summary markdown",
@@ -518,6 +518,35 @@ def _extract_json_payload(text: str) -> dict[str, object]:
     if start == -1 or end == -1 or end <= start:
         raise ValueError("no json object found in llm output")
     return json.loads(normalized[start : end + 1])
+
+
+def _coerce_topic_payload(text: str, *, fallback: TopicRender, documents: list[ParsedDocument]) -> dict[str, object]:
+    try:
+        return _extract_json_payload(text)
+    except (ValueError, json.JSONDecodeError):
+        markdown = _normalize_summary_markdown(
+            _normalize_markdown_output(text),
+            title=fallback.title,
+            fallback="",
+            documents=documents,
+        )
+        if not markdown:
+            raise
+        return {
+            "title": _extract_markdown_title(markdown) or fallback.title,
+            "description": fallback.description,
+            "locator": fallback.locator,
+            "keywords": fallback.keywords,
+            "summary_markdown": markdown,
+        }
+
+
+def _extract_markdown_title(markdown: str) -> str:
+    for line in markdown.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("# "):
+            return stripped[2:].strip()
+    return ""
 
 
 def _normalize_summary_markdown(markdown: str, *, title: str, fallback: str, documents: list[ParsedDocument]) -> str:

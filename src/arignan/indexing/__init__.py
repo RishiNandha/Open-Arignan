@@ -3,6 +3,7 @@
 from arignan.indexing.chunking import Chunker, ChunkingResult
 from arignan.indexing.dense import DenseIndexer, LocalDenseIndex, cosine_similarity
 from arignan.indexing.embedding import (
+    create_embedder,
     DEFAULT_EMBEDDING_MODEL,
     Embedder,
     HashingEmbedder,
@@ -13,6 +14,7 @@ from arignan.indexing.lexical import LexicalIndex, LexicalIndexer, tokenize
 __all__ = [
     "Chunker",
     "ChunkingResult",
+    "create_embedder",
     "DEFAULT_EMBEDDING_MODEL",
     "DenseIndexer",
     "Embedder",

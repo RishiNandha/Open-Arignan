@@ -78,6 +78,8 @@ def test_render_summary_mentions_next_steps(tmp_path: Path) -> None:
         local_llm_backend="ollama",
         local_llm_model="qwen3:4b-q4_K_M",
         local_llm_light_model="qwen3:0.6b",
+        embedding_model="BAAI/bge-base-en-v1.5",
+        reranker_model="mixedbread-ai/mxbai-rerank-base-v1",
         bin_dir=tmp_path / "bin",
         windows_launcher=tmp_path / "bin" / "arignan.cmd",
         posix_launcher=tmp_path / "bin" / "arignan",
@@ -116,6 +118,8 @@ def test_initialize_local_state_can_override_local_llm_model(tmp_path: Path) -> 
         assert payload["local_llm_backend"] == "ollama"
         assert payload["local_llm_model"] == "qwen3:4b-q4_K_M"
         assert payload["local_llm_light_model"] == "qwen3:0.6b"
+        assert payload["embedding_model"] == "BAAI/bge-base-en-v1.5"
+        assert payload["reranker_model"] == "mixedbread-ai/mxbai-rerank-base-v1"
         assert read_persisted_app_home() == (tmp_path / ".arignan").resolve()
     finally:
         Path.home = original_home
@@ -130,33 +134,42 @@ def test_initialize_local_state_can_pin_lightweight_full_model(tmp_path: Path) -
             local_llm_backend="ollama",
             local_llm_model="qwen3:0.6b",
             local_llm_light_model="qwen3:0.6b",
+            embedding_model="BAAI/bge-small-en-v1.5",
+            reranker_model="mixedbread-ai/mxbai-rerank-xsmall-v1",
         )
 
         payload = json.loads(settings_path.read_text(encoding="utf-8"))
 
         assert payload["local_llm_model"] == "qwen3:0.6b"
         assert payload["local_llm_light_model"] == "qwen3:0.6b"
+        assert payload["embedding_model"] == "BAAI/bge-small-en-v1.5"
+        assert payload["reranker_model"] == "mixedbread-ai/mxbai-rerank-xsmall-v1"
     finally:
         Path.home = original_home
 
 
-def test_initialize_local_state_migrates_legacy_transformers_default(tmp_path: Path) -> None:
+def test_initialize_local_state_refreshes_existing_settings_to_current_defaults(tmp_path: Path) -> None:
     original_home = Path.home
     Path.home = staticmethod(lambda: tmp_path)
     try:
         app_home = tmp_path / ".arignan"
         settings_path = write_default_settings(app_home=app_home)
         payload = json.loads(settings_path.read_text(encoding="utf-8"))
-        payload.pop("local_llm_backend", None)
-        payload["local_llm_model"] = "Qwen/Qwen3-1.7B"
+        payload["local_llm_backend"] = "transformers"
+        payload["local_llm_model"] = "some-custom-old-model"
+        payload["local_llm_light_model"] = "another-old-model"
+        payload["embedding_model"] = "legacy-embedding"
+        payload["reranker_model"] = "legacy-reranker"
         settings_path.write_text(json.dumps(payload), encoding="utf-8")
 
-        _, migrated_settings_path = initialize_local_state(app_home=app_home)
+        _, refreshed_settings_path = initialize_local_state(app_home=app_home)
 
-        migrated = json.loads(migrated_settings_path.read_text(encoding="utf-8"))
-        assert migrated["local_llm_backend"] == "ollama"
-        assert migrated["local_llm_model"] == "qwen3:4b-q4_K_M"
-        assert migrated["local_llm_light_model"] == "qwen3:0.6b"
+        refreshed = json.loads(refreshed_settings_path.read_text(encoding="utf-8"))
+        assert refreshed["local_llm_backend"] == "ollama"
+        assert refreshed["local_llm_model"] == "qwen3:4b-q4_K_M"
+        assert refreshed["local_llm_light_model"] == "qwen3:0.6b"
+        assert refreshed["embedding_model"] == "BAAI/bge-base-en-v1.5"
+        assert refreshed["reranker_model"] == "mixedbread-ai/mxbai-rerank-base-v1"
     finally:
         Path.home = original_home
 
@@ -177,6 +190,16 @@ def test_download_required_models_pulls_default_ollama_model(tmp_path: Path, mon
     def fake_ensure(app_home_arg: Path, endpoint: str, model: str, progress=None, timeout_seconds: float = 1800.0) -> None:
         ensured.append((app_home_arg, endpoint, model, timeout_seconds))
 
+    downloaded_transformer_models: list[tuple[str, Path, bool]] = []
+
+    class FakeHubModule:
+        @staticmethod
+        def snapshot_download(*, repo_id: str, local_dir: Path, local_dir_use_symlinks: bool, ignore_patterns=None) -> None:
+            downloaded_transformer_models.append((repo_id, local_dir, local_dir_use_symlinks))
+            local_dir.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setitem(sys.modules, "huggingface_hub", FakeHubModule())
+
     monkeypatch.setattr("arignan.setup_flow.provision_managed_runtime", fake_provision)
     monkeypatch.setattr("arignan.setup_flow.ensure_model_available", fake_ensure)
 
@@ -193,7 +216,13 @@ def test_download_required_models_pulls_default_ollama_model(tmp_path: Path, mon
         "local_llm_backend": "ollama",
         "local_llm_model": "qwen3:4b-q4_K_M",
         "local_llm_light_model": "qwen3:0.6b",
+        "embedding_model": "BAAI/bge-base-en-v1.5",
+        "reranker_model": "mixedbread-ai/mxbai-rerank-base-v1",
     }
+    assert [repo_id for repo_id, _, _ in downloaded_transformer_models] == [
+        "BAAI/bge-base-en-v1.5",
+        "mixedbread-ai/mxbai-rerank-base-v1",
+    ]
 
 
 def test_download_required_models_surfaces_managed_runtime_provision_error(tmp_path: Path, monkeypatch) -> None:
@@ -224,7 +253,7 @@ def test_download_required_models_supports_transformers_backend(tmp_path: Path, 
 
     class FakeHubModule:
         @staticmethod
-        def snapshot_download(*, repo_id: str, local_dir: Path, local_dir_use_symlinks: bool) -> None:
+        def snapshot_download(*, repo_id: str, local_dir: Path, local_dir_use_symlinks: bool, ignore_patterns=None) -> None:
             raise FakeRepositoryNotFoundError(f"401 for {repo_id}")
 
     class FakeErrorsModule:

@@ -12,6 +12,7 @@
    - Create a **bin directory** folder with executables
    - Print the bin directory for your reference
    - Optional: use `python setup.py --app-home <install dir> --lightweight` if you want the normal local model to be the same smaller model as the light mode
+   - Optional for smaller local GPUs: you can also choose a custom local model during setup with `python setup.py --app-home <install dir> --llm-model <model_name> --llm-backend ollama`, or change `settings.json` later and Arignan will prepare the newly selected local model on first use
 2. Add the bin directory folder to your PATH
 3. Try `arignan load "filename.pdf"`
 4. Try `arignan ask "relevant question"`
@@ -138,7 +139,7 @@ Parsing for the vector index and keyword index are done using headings wherever 
 
 #### Embedding
 
-Embedding model used is `BAAI/bge-base-en-v1.5`. This is fixed at build time and can't be changed in settings.json. Each chunk stores:
+Embedding model used is `BAAI/bge-base-en-v1.5` by default, with `BAAI/bge-small-en-v1.5` used by `--lightweight` setup. The configured retrieval models are stored in `settings.json` and cached locally under the app-home `models/` directory. Each chunk stores:
 
 - The embedding vector
 - Canonical chunk text
@@ -193,7 +194,7 @@ Using the Ingestion log, the files are remove, map.md is updated and the vector 
    - BM25 retrieves top-k chunks
    - Descending down the maps retrieves the knowledge base markdown. (If the markdown is large, headings are treated as individual chunks).
 4. **Reciprocal Rank Fusion**: Chunks that appear in both Qdrant and BM25 are awarded higher score, and the rest are pruned
-5. **Cross-Encoder Reranking**: The chunks are reranked. This removes false positives, and removes irrelevant chunks from the markdown. Default cross-encoder used is `BAAI/bge-reranker-v2-m3` (can be changed in settings.json)
+5. **Cross-Encoder Reranking**: The chunks are reranked. This removes false positives, and removes irrelevant chunks from the markdown. Default cross-encoder used is `mixedbread-ai/mxbai-rerank-base-v1`, while `--lightweight` setup uses `mixedbread-ai/mxbai-rerank-xsmall-v1`
 6. **Final Answer Mode**: `ask` can use the default local LLM, a lighter local LLM, deterministic retrieval synthesis, or a raw reranked-context dump via `--answer-mode default|light|none|raw`
 7. (To implement in future): Adjacent Content Expansion.
 
@@ -246,10 +247,9 @@ When the chat history is becoming too long:
 
 1. Install dependencies: `python -m pip install -e .[dev]`
 2. Run tests: `python -m pytest`
-3. Optional git hook activation: `git config core.hooksPath .githooks`
-4. After that, every `git push` will run `python -m pytest` first through the tracked `pre-push` hook
-5. Debug Load Command: `arignan load "filepath" --debug`
-6. Debug Ask Command: `arignan ask "question" --debug`
+3. GitHub Actions now runs `python -m pip install .[dev]` and then `python -m pytest` automatically on every push and pull request through `.github/workflows/tests.yml`
+4. Debug Load Command: `arignan load "filepath" --debug`
+5. Debug Ask Command: `arignan ask "question" --debug`
 
 ## Declaration
 

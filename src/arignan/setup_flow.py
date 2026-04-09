@@ -11,12 +11,17 @@ from pathlib import Path
 from typing import Callable
 
 from arignan.model_registry import (
+    DEFAULT_EMBEDDING_MODEL_REPO_ID,
     DEFAULT_LOCAL_LLM_DISPLAY_NAME,
     DEFAULT_LOCAL_LLM_REPO_ID,
+    DEFAULT_LIGHT_EMBEDDING_MODEL_REPO_ID,
     DEFAULT_LIGHT_LOCAL_LLM_DISPLAY_NAME,
     DEFAULT_LIGHT_LOCAL_LLM_REPO_ID,
+    DEFAULT_LIGHT_RERANKER_MODEL_REPO_ID,
+    DEFAULT_RERANKER_MODEL_REPO_ID,
     LEGACY_TRANSFORMERS_LOCAL_LLM_DISPLAY_NAME,
     LEGACY_TRANSFORMERS_LOCAL_LLM_REPO_ID,
+    LEGACY_RERANKER_MODEL_REPO_ID,
     infer_local_llm_backend,
     resolve_ollama_model_id,
     resolve_model_repo_id,
@@ -33,6 +38,8 @@ class SetupResult:
     local_llm_backend: str
     local_llm_model: str
     local_llm_light_model: str
+    embedding_model: str
+    reranker_model: str
     bin_dir: Path
     windows_launcher: Path
     posix_launcher: Path
@@ -68,9 +75,18 @@ def update_local_llm_settings(
     local_llm_backend: str | None,
     local_llm_model: str | None,
     local_llm_light_model: str | None = None,
+    embedding_model: str | None = None,
+    reranker_model: str | None = None,
 ) -> None:
-    if local_llm_model is None and local_llm_backend is None and local_llm_light_model is None:
+    if (
+        local_llm_model is None
+        and local_llm_backend is None
+        and local_llm_light_model is None
+        and embedding_model is None
+        and reranker_model is None
+    ):
         _migrate_legacy_local_llm_defaults(settings_path)
+        _migrate_legacy_retrieval_defaults(settings_path)
         return
     payload = json.loads(settings_path.read_text(encoding="utf-8"))
     if local_llm_backend is not None:
@@ -79,6 +95,10 @@ def update_local_llm_settings(
         payload["local_llm_model"] = local_llm_model
     if local_llm_light_model is not None:
         payload["local_llm_light_model"] = local_llm_light_model
+    if embedding_model is not None:
+        payload["embedding_model"] = embedding_model
+    if reranker_model is not None:
+        payload["reranker_model"] = reranker_model
     settings_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
@@ -87,12 +107,14 @@ def initialize_local_state(
     local_llm_backend: str | None = None,
     local_llm_model: str | None = None,
     local_llm_light_model: str | None = None,
+    embedding_model: str | None = None,
+    reranker_model: str | None = None,
 ) -> tuple[Path, Path]:
     from arignan.config import write_default_settings
     from arignan.paths import write_persisted_app_home
     from arignan.storage import StorageLayout
 
-    settings_path = write_default_settings(app_home=app_home)
+    settings_path = write_default_settings(app_home=app_home, overwrite=True)
     resolved_home = settings_path.parent.resolve()
     write_persisted_app_home(resolved_home)
     update_local_llm_settings(
@@ -100,6 +122,8 @@ def initialize_local_state(
         local_llm_backend=local_llm_backend,
         local_llm_model=local_llm_model,
         local_llm_light_model=local_llm_light_model,
+        embedding_model=embedding_model,
+        reranker_model=reranker_model,
     )
     layout = StorageLayout.from_home(app_home).ensure()
     return layout.root, settings_path
@@ -165,6 +189,7 @@ def download_required_models(app_home: Path, progress: Callable[[str], None] | N
                 snapshot_download(repo_id=repo_id, local_dir=target_dir, local_dir_use_symlinks=False)
             except (RepositoryNotFoundError, GatedRepoError, HfHubHTTPError) as exc:
                 raise RuntimeError(_format_model_download_error(app_home, model_id, repo_id, exc)) from exc
+    _download_retrieval_models(app_home, models_dir=models_dir, progress=progress)
     unsupported = [backend for backend in backends if backend not in {"ollama", "transformers", "huggingface"}]
     if unsupported:
         raise RuntimeError(f"Unsupported local_llm_backend '{', '.join(unsupported)}'")
@@ -173,15 +198,27 @@ def download_required_models(app_home: Path, progress: Callable[[str], None] | N
         backend=config.local_llm_backend,
         model=config.local_llm_model,
         light_model=config.local_llm_light_model,
+        embedding_model=config.embedding_model,
+        reranker_model=config.reranker_model,
     )
     return models_dir
 
 
-def _write_runtime_manifest(models_dir: Path, *, backend: str, model: str, light_model: str) -> None:
+def _write_runtime_manifest(
+    models_dir: Path,
+    *,
+    backend: str,
+    model: str,
+    light_model: str,
+    embedding_model: str,
+    reranker_model: str,
+) -> None:
     payload = {
         "local_llm_backend": backend,
         "local_llm_model": model,
         "local_llm_light_model": light_model,
+        "embedding_model": embedding_model,
+        "reranker_model": reranker_model,
     }
     (models_dir / "local_llm_manifest.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
@@ -203,6 +240,19 @@ def _migrate_legacy_local_llm_defaults(settings_path: Path) -> None:
     payload["local_llm_model"] = DEFAULT_LOCAL_LLM_REPO_ID
     payload.setdefault("local_llm_light_model", DEFAULT_LIGHT_LOCAL_LLM_REPO_ID)
     settings_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def _migrate_legacy_retrieval_defaults(settings_path: Path) -> None:
+    payload = json.loads(settings_path.read_text(encoding="utf-8"))
+    changed = False
+    if payload.get("embedding_model") in {None, ""}:
+        payload["embedding_model"] = DEFAULT_EMBEDDING_MODEL_REPO_ID
+        changed = True
+    if payload.get("reranker_model") in {None, "", LEGACY_RERANKER_MODEL_REPO_ID}:
+        payload["reranker_model"] = DEFAULT_RERANKER_MODEL_REPO_ID
+        changed = True
+    if changed:
+        settings_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
 def create_launchers(root: Path | None = None, app_home: Path | None = None) -> tuple[Path, Path, Path]:
@@ -243,6 +293,8 @@ def run_setup(
     ensure_repo_on_syspath(root)
     effective_llm_model = DEFAULT_LIGHT_LOCAL_LLM_REPO_ID if lightweight else llm_model
     effective_light_model = DEFAULT_LIGHT_LOCAL_LLM_REPO_ID if lightweight else None
+    effective_embedding_model = DEFAULT_LIGHT_EMBEDDING_MODEL_REPO_ID if lightweight else None
+    effective_reranker_model = DEFAULT_LIGHT_RERANKER_MODEL_REPO_ID if lightweight else None
     _emit(progress, "[1/4] Installing Python package...")
     target = install_package(root=root, dev=dev)
     _emit(progress, "[2/4] Initializing local Arignan state...")
@@ -251,6 +303,8 @@ def run_setup(
         local_llm_backend=llm_backend,
         local_llm_model=effective_llm_model,
         local_llm_light_model=effective_light_model,
+        embedding_model=effective_embedding_model,
+        reranker_model=effective_reranker_model,
     )
     _emit(progress, "[3/4] Downloading required models...")
     models_dir = download_required_models(resolved_home, progress=progress)
@@ -269,6 +323,8 @@ def run_setup(
         local_llm_backend=config.local_llm_backend,
         local_llm_model=config.local_llm_model,
         local_llm_light_model=config.local_llm_light_model,
+        embedding_model=config.embedding_model,
+        reranker_model=config.reranker_model,
         bin_dir=bin_dir,
         windows_launcher=windows_launcher,
         posix_launcher=posix_launcher,
@@ -287,6 +343,8 @@ def render_summary(result: SetupResult) -> str:
         f"- Local LLM backend: {result.local_llm_backend}",
         f"- Local LLM model: {result.local_llm_model}",
         f"- Light local LLM model: {result.local_llm_light_model}",
+        f"- Embedding model: {result.embedding_model}",
+        f"- Reranker model: {result.reranker_model}",
         f"- Bin directory: {result.bin_dir}",
         f"- Windows launcher: {result.windows_launcher}",
         f"- POSIX launcher: {result.posix_launcher}",
@@ -329,6 +387,38 @@ def _configured_local_models(config) -> list[str]:
             continue
         models.append(candidate)
     return models
+
+
+def _download_retrieval_models(
+    app_home: Path,
+    *,
+    models_dir: Path,
+    progress: Callable[[str], None] | None = None,
+) -> None:
+    from arignan.config import load_config
+
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError as exc:  # pragma: no cover
+        raise RuntimeError("huggingface_hub is required to bootstrap retrieval models") from exc
+
+    config = load_config(app_home=app_home)
+    retrieval_models = [
+        ("embedding model", config.embedding_model),
+        ("reranker model", config.reranker_model),
+    ]
+    for label, model_id in retrieval_models:
+        repo_id = resolve_model_repo_id(model_id)
+        target_dir = models_dir / sanitize_model_id(repo_id)
+        if target_dir.exists():
+            continue
+        _emit(progress, f"Downloading local {label} ({model_id})...")
+        snapshot_download(
+            repo_id=repo_id,
+            local_dir=target_dir,
+            local_dir_use_symlinks=False,
+            ignore_patterns=["onnx/*", "openvino/*", "gguf/*", "*.onnx", "*.xml"],
+        )
 
 
 def _group_models_by_backend(models: list[str], *, default_backend: str) -> dict[str, list[str]]:

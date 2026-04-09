@@ -19,13 +19,13 @@ from arignan.grouping import (
     derive_topic_folder,
     estimate_markdown_length,
 )
-from arignan.indexing import Chunker, DenseIndexer, HashingEmbedder, LexicalIndex, LexicalIndexer, LocalDenseIndex, tokenize
+from arignan.indexing import Chunker, DenseIndexer, LexicalIndex, LexicalIndexer, LocalDenseIndex, create_embedder, tokenize
 from arignan.ingestion import IngestionFailure, IngestionLog, IngestionService
 from arignan.llm import LocalTextGenerator, create_local_text_generator
 from arignan.markdown import MarkdownRepository, derive_keywords
 from arignan.markdown.writer import HeuristicArtifactWriter, LLMArtifactWriter
 from arignan.models import ChunkRecord, LoadEvent, LoadOperation, ParsedDocument, RetrievalHit, SessionState, SourceDocument
-from arignan.retrieval import HeuristicReranker, RetrievalPipeline
+from arignan.retrieval import RetrievalPipeline, create_reranker
 from arignan.session import SessionExceptionLogger, SessionManager, SessionModelCallLogger, SessionStore
 from arignan.storage import StorageLayout
 from arignan.tracing import ModelCallTrace, ModelTraceCollector
@@ -130,16 +130,24 @@ class ArignanApp:
         self.ingestion_log = IngestionLog(self.layout.ingestion_log_path)
         self.ingestion_service = IngestionService(self.ingestion_log)
         self.grouping_planner = GroupingPlanner(max_md_length=config.markdown.max_md_length)
-        self.embedder = HashingEmbedder()
-        self.chunker = Chunker(
-            chunk_size=config.chunking.chunk_size,
-            chunk_overlap=config.chunking.chunk_overlap,
-        )
-        self.reranker = HeuristicReranker()
         self.session_manager = SessionManager(SessionStore(config.app_home), config.session)
         self.exception_logger = SessionExceptionLogger(self.session_manager.store, self.terminal_pid)
         self.model_call_logger = SessionModelCallLogger(self.session_manager.store, self.terminal_pid)
         self.trace_collector = ModelTraceCollector(on_record=self.model_call_logger.log_call)
+        self.embedder = create_embedder(
+            config,
+            progress_sink=self.progress_sink,
+            exception_logger=self.exception_logger,
+        )
+        self.chunker = Chunker(
+            chunk_size=config.chunking.chunk_size,
+            chunk_overlap=config.chunking.chunk_overlap,
+        )
+        self.reranker = create_reranker(
+            config,
+            progress_sink=self.progress_sink,
+            exception_logger=self.exception_logger,
+        )
         self.local_text_generator = create_local_text_generator(config, progress_sink=self.progress_sink)
         self.light_text_generator = create_local_text_generator(
             config,
