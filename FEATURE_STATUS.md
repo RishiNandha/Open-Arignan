@@ -3,6 +3,7 @@
 - `python setup.py --app-home E:/arignan --lightweight`: Supported
 - `arignan detete load-20260408073121-0c125daf`: Works as expecteda
 - `arignan delete --hat SNNs`: Works as expected
+- `arignan -gui`: Implemented
 - `arignan save-session 8apr`: Works as expected. 
 - `arignan load-session 8apr`: Works as expected.
 - `arignan load "JEPA\V-JEPA2.1.pdf" --hat "SNNs" --debug`: Works as expected.

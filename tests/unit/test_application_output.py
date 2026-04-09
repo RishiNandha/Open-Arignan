@@ -17,6 +17,7 @@ from arignan.application import (
 from arignan.config import load_config
 from arignan.grouping import GroupingDecision, GroupingPlan
 from arignan.models import ChunkMetadata, DocumentSection, ParsedDocument, RetrievalHit, RetrievalSource, SourceDocument, SourceType
+from arignan.retrieval import RetrievalBundle
 from arignan.session import SessionExceptionLogger, SessionStore
 from arignan.tracing import ModelTraceCollector
 
@@ -181,6 +182,14 @@ class PostLoadRegroupGenerator:
                 }
             )
         return json.dumps({"recommendations": []})
+
+
+class EmptyCrossEncoderReranker:
+    model_name = "mixedbread-ai/mxbai-rerank-base-v1"
+    backend_name = "cross-encoder"
+
+    def rerank(self, query: str, hits: list[RetrievalHit], limit: int, min_score: float = 0.0) -> list[RetrievalHit]:
+        return []
 
 
 def _hit(text: str) -> RetrievalHit:
@@ -352,10 +361,60 @@ def test_application_uses_per_mode_answer_context_limits(app_home: Path, monkeyp
     )
     app = ArignanApp(load_config(app_home=app_home))
 
-    assert app._answer_context_limit("default") == 10
-    assert app._answer_context_limit("light") == 8
-    assert app._answer_context_limit("none") == 10
-    assert app._answer_context_limit("raw") == 10
+    assert app._answer_context_limit("default") == 14
+    assert app._answer_context_limit("light") == 12
+    assert app._answer_context_limit("none") == 14
+    assert app._answer_context_limit("raw") == 14
+
+
+def test_application_ask_falls_back_to_fused_hits_when_reranker_returns_none(app_home: Path, monkeypatch) -> None:
+    hit = RetrievalHit(
+        chunk_id="chunk-spiking-mamba",
+        text="A spiking Mamba implementation usually combines selective state-space updates with spike-timing dynamics.",
+        score=0.71,
+        source=RetrievalSource.DENSE,
+        metadata=ChunkMetadata(
+            load_id="load-spiking",
+            hat="SNNs",
+            source_uri="spiking_mamba_notes.md",
+            source_path=Path("spiking_mamba_notes.md"),
+            heading="Implementation Notes",
+            section="Implementation Notes",
+            topic_folder="spiking-mamba",
+        ),
+        extras={"rrf_score": 0.12},
+    )
+
+    class StubRetrievalPipeline:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def retrieve(self, query: str, hat: str = "auto") -> RetrievalBundle:
+            return RetrievalBundle(
+                query=query,
+                expanded_query="how to implement a spiking mamba",
+                selected_hat="SNNs",
+                dense_hits=[hit],
+                lexical_hits=[],
+                map_hits=[],
+                fused_hits=[hit],
+            )
+
+    monkeypatch.setattr(
+        "arignan.application.create_local_text_generator",
+        lambda config, progress_sink=None, **kwargs: ArtifactGenerator(kwargs.get("model_name") or config.local_llm_model),
+    )
+    monkeypatch.setattr("arignan.application.RetrievalPipeline", StubRetrievalPipeline)
+
+    app = ArignanApp(load_config(app_home=app_home))
+    app.reranker = EmptyCrossEncoderReranker()
+
+    result = app.ask("How to implement a spiking mamba", answer_mode="none")
+
+    assert result.debug.reranked_hits == []
+    assert result.selected_hat == "SNNs"
+    assert "No relevant local knowledge was found" not in result.answer
+    assert "spiking Mamba implementation" in result.answer
 
 
 def test_render_raw_hits_handles_empty_inputs() -> None:

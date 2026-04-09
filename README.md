@@ -17,7 +17,7 @@
 
 ### Option 2: GUI
 
-soon tm ;)
+Soon tm ;)
 
 ## Key Points
 
@@ -227,19 +227,22 @@ When the chat history is becoming too long:
 
 ### For Users
 
-1. Setup: `python setup.py --app-home <install dir>`. We will call this the **App home** from now.
-2. Add **Bin directory** to PATH. The setup.py will automatically print the bin directory for you.
-2. Help: `arignan --help`
-4. Load with hat: `arignan load "flename.pdf" --hat psychology`
-5. QnA: `arignan ask "What is JEPA?"`
-6. QnA with hat: `arignan ask "How to use CalibreRC" --hat "IC Design"`
-7. Optional answer mode: `arignan ask "What is JEPA?" --answer-mode light`
-8. Ingestion Log: `arignan list-loads`
-9. Delete a past ingestion: `arignan delete <load_id>`
-10. Reset context: `arignan reset-session`
-11. Save context: `arignan save-session <path/session_name.json>`
-12. Reload context: `arignan load-session <path/session_name.json>`
+1. Setup: `python setup.py --app-home <install dir>`. 
+2. Optional lightweight setup for smaller GPUs: `python setup.py --app-home <install dir> --lightweight`
+3. Optional custom local model during setup: `python setup.py --app-home <install dir> --llm-model <model_name> --llm-backend ollama`
 4. Optional post-setup model change: edit `settings.json` 
+5. Add **Bin directory** to PATH. The setup.py will automatically print the bin directory for you.
+6. Help: `arignan --help`
+7. Load: `arignan load "filename.pdf"`
+8. Load with hat: `arignan load "flename.pdf" --hat psychology`
+9. QnA: `arignan ask "What is JEPA?"`
+10. QnA with hat: `arignan ask "How to use CalibreRC" --hat "IC Design"`
+11. Optional answer mode: `arignan ask "What is JEPA?" --answer-mode light`
+12. Ingestion Log: `arignan list-loads`
+13. Delete a past ingestion: `arignan delete <load_id>`
+14. Reset context: `arignan reset-session`
+15. Save context: `arignan save-session <path/session_name.json>`
+16. Reload context: `arignan load-session <path/session_name.json>`
 
 ### For Developers
 

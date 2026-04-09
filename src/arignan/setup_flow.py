@@ -333,26 +333,26 @@ def run_setup(
 
 def render_summary(result: SetupResult) -> str:
     path_command = "arignan --help"
-    direct_command = str(result.bin_dir / ("arignan.cmd" if os.name == "nt" else "arignan")) + " --help"
+    direct_command = _display_path(result.bin_dir / ("arignan.cmd" if os.name == "nt" else "arignan")) + " --help"
     lines = [
         "Arignan setup complete.",
         f"- Installed package target: {result.install_target}",
-        f"- App home: {result.app_home}",
-        f"- Settings: {result.settings_path}",
-        f"- Models directory: {result.models_dir}",
+        f"- App home: {_display_path(result.app_home)}",
+        f"- Settings: {_display_path(result.settings_path)}",
+        f"- Models directory: {_display_path(result.models_dir)}",
         f"- Local LLM backend: {result.local_llm_backend}",
         f"- Local LLM model: {result.local_llm_model}",
         f"- Light local LLM model: {result.local_llm_light_model}",
         f"- Embedding model: {result.embedding_model}",
         f"- Reranker model: {result.reranker_model}",
-        f"- Bin directory: {result.bin_dir}",
-        f"- Windows launcher: {result.windows_launcher}",
-        f"- POSIX launcher: {result.posix_launcher}",
+        f"- Bin directory: {_display_path(result.bin_dir)}",
+        f"- Windows launcher: {_display_path(result.windows_launcher)}",
+        f"- POSIX launcher: {_display_path(result.posix_launcher)}",
         "",
         "Next steps:",
-        f"1. Add '{result.bin_dir}' to PATH if you want to run just: {path_command}",
+        f"1. Add '{_display_path(result.bin_dir)}' to PATH if you want to run just: {path_command}",
         f"2. Or run directly from the repo with: {direct_command}",
-        f"3. Python fallback: {sys.executable} -m arignan.cli --help",
+        f"3. Python fallback: {_display_path(sys.executable)} -m arignan.cli --help",
     ]
     return "\n".join(lines)
 
@@ -377,6 +377,15 @@ def _format_model_download_error(app_home: Path, configured_model: str, repo_id:
 
 def _quote_posix_argument(value: str) -> str:
     return "'" + value.replace("'", "'\"'\"'") + "'"
+
+
+def _display_path(value: Path | str) -> str:
+    text = str(value)
+    if text.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + text[8:]
+    if text.startswith("\\\\?\\"):
+        return text[4:]
+    return text
 
 
 def _configured_local_models(config) -> list[str]:

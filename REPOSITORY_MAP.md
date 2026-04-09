@@ -277,6 +277,22 @@ Active session log invariant:
   - final answer prompting now uses a wider reranked-context budget than earlier revisions
   - raw mode returns filtered reranked context directly instead of generating a prose answer
 
+### GUI
+
+- `src/arignan/gui/react_server.py`
+  - serves the browser GUI
+  - handles direct and task-based GUI API routes for `load` and `ask`
+  - tracks compact in-memory task progress for the browser spinner/status bubbles
+  - auto-opens the browser for the `arignan -gui` flow
+- `src/arignan/gui/frontend/index.html`
+  - React host page for the browser client
+- `src/arignan/gui/frontend/app.jsx`
+  - chat-style React client with modal load flow, task polling, and spinner-bubble updates
+- `src/arignan/gui/frontend/styles.css`
+  - dark responsive frontend styling for desktop, half-window, and mobile layouts
+- `src/arignan/cli.py`
+  - supports `-gui` / `--gui` as a one-command local GUI launch path
+
 ## Behavior That Is Intentionally Simplified
 
 These are common places where an agent may assume there is a real model/runtime when there is not yet one:

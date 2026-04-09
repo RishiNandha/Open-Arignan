@@ -306,13 +306,19 @@ class ArignanApp:
             item_count=len(bundle.fused_hits),
             detail=f"top_k={self.config.retrieval.rerank_top_k}",
         )
+        rerank_min_score = 0.05 if getattr(self.reranker, "backend_name", "") == "heuristic-reranker" else float("-inf")
         reranked = self.reranker.rerank(
             bundle.expanded_query,
             bundle.fused_hits,
             limit=self.config.retrieval.rerank_top_k,
-            min_score=0.05,
+            min_score=rerank_min_score,
         )
         answer_hits = _content_hits(reranked)
+        if not answer_hits:
+            fallback_hits = _content_hits(bundle.fused_hits)
+            if fallback_hits:
+                self._emit_progress("Reranker found no strong hits; using top retrieved context instead...")
+                answer_hits = fallback_hits
         answer, citations = compose_answer(
             question,
             answer_hits,

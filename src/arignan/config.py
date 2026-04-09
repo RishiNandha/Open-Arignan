@@ -29,12 +29,12 @@ class RetrievalConfig:
     dense_top_k: int = 14
     lexical_top_k: int = 14
     map_top_k: int = 8
-    fused_top_k: int = 20
-    rerank_top_k: int = 14
-    answer_context_top_k_default: int = 10
-    answer_context_top_k_light: int = 8
-    answer_context_top_k_none: int = 10
-    answer_context_top_k_raw: int = 10
+    fused_top_k: int = 28
+    rerank_top_k: int = 20
+    answer_context_top_k_default: int = 14
+    answer_context_top_k_light: int = 12
+    answer_context_top_k_none: int = 14
+    answer_context_top_k_raw: int = 14
 
 
 @dataclass(slots=True)

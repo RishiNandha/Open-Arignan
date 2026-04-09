@@ -11,6 +11,7 @@ from arignan.paths import read_persisted_app_home
 from arignan.setup_flow import (
     SetupResult,
     _emit,
+    _display_path,
     create_launchers,
     download_required_models,
     initialize_local_state,
@@ -90,6 +91,11 @@ def test_render_summary_mentions_next_steps(tmp_path: Path) -> None:
     assert "Arignan setup complete." in summary
     assert "Next steps:" in summary
     assert str(result.bin_dir) in summary
+
+
+def test_display_path_strips_windows_extended_prefix() -> None:
+    assert _display_path(r"\\?\D:\Code\Open Arignan\bin") == r"D:\Code\Open Arignan\bin"
+    assert _display_path(r"\\?\UNC\server\share\folder") == r"\\server\share\folder"
 
 
 def test_sanitize_model_id_normalizes_paths() -> None:

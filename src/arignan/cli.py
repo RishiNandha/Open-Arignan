@@ -91,11 +91,12 @@ class AskStatusReporter:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="arignan",
-        usage="arignan [--app-home PATH] [--settings PATH] [--pid PID] <command> [<args>]",
+        usage="arignan [--app-home PATH] [--settings PATH] [--pid PID] [-gui] <command> [<args>]",
         description="Local-first knowledge base CLI for loading content, retrieval, and session management.",
         formatter_class=ArignanHelpFormatter,
         epilog=(
             "Examples:\n"
+            "  arignan -gui\n"
             "  arignan load notes.md\n"
             "  arignan ask \"What is JEPA?\"\n"
             "  arignan delete <load_id>\n"
@@ -105,8 +106,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--app-home", type=Path, default=None, help="Override the Arignan app-home directory.")
     parser.add_argument("--settings", type=Path, default=None, help="Use a specific settings.json file.")
     parser.add_argument("--pid", type=int, default=None, help="Override the terminal PID used for session state.")
+    parser.add_argument("-gui", "--gui", action="store_true", help="Launch the local browser GUI.")
 
-    subparsers = parser.add_subparsers(dest="command", required=True, title="commands", metavar="<command>")
+    subparsers = parser.add_subparsers(dest="command", required=False, title="commands", metavar="<command>")
 
     load_parser = subparsers.add_parser(
         "load",
@@ -179,6 +181,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     resolved_pid = args.pid or os.getppid() or os.getpid()
+    if args.gui:
+        return launch_gui(app_home=args.app_home, settings_path=args.settings, terminal_pid=resolved_pid)
+    if args.command is None:
+        parser.error("either a command or -gui is required")
     config = load_config(settings_path=args.settings, app_home=args.app_home)
     reporter = _build_progress_reporter(command=args.command, debug=getattr(args, "debug", False))
     app = ArignanApp(config, progress_sink=reporter.emit, terminal_pid=resolved_pid)
@@ -297,6 +303,12 @@ def _build_progress_reporter(*, command: str, debug: bool):
     if command == "ask" and not debug:
         return AskStatusReporter()
     return LineProgressReporter()
+
+
+def launch_gui(*, app_home: Path | None, settings_path: Path | None, terminal_pid: int) -> int:
+    from arignan.gui import run_gui
+
+    return run_gui(app_home=app_home, settings_path=settings_path, terminal_pid=terminal_pid)
 
 
 def _print_output_block(text: str) -> None:
