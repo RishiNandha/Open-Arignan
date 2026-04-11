@@ -95,3 +95,45 @@ def test_retrieval_pipeline_auto_selects_hat_from_maps(app_home: Path) -> None:
     bundle = RetrievalPipeline(layout, embedder=HashingEmbedder(dimension=24)).retrieve("representation learning with JEPA", hat="auto")
 
     assert bundle.selected_hat == "research"
+
+
+def test_retrieval_pipeline_can_use_related_topic_links_from_topic_index(app_home: Path) -> None:
+    layout = StorageLayout.from_home(app_home).ensure()
+    repository = MarkdownRepository()
+    skipgram = _build_document(
+        app_home / "skipgram.md",
+        load_id="load-skipgram",
+        title="Skipgram Distributed Representations",
+        text="Skipgram learns distributed word representations from nearby context words.",
+        heading="Skipgram",
+        hat="default",
+    )
+    word2vec = _build_document(
+        app_home / "word2vec.md",
+        load_id="load-word2vec",
+        title="Training Skipgrams",
+        text="Word2Vec training commonly uses negative sampling and subsampling for skipgram learning.",
+        heading="Word2Vec",
+        hat="default",
+    )
+    skipgram.keywords = ["skipgram", "word2vec", "negative sampling"]
+    word2vec.keywords = ["word2vec", "skipgram", "negative sampling"]
+    _index_document(layout, skipgram)
+    _index_document(layout, word2vec)
+    repository.write_topic(
+        layout,
+        hat="default",
+        documents=[skipgram],
+        plan=GroupingPlan(decision=GroupingDecision.STANDALONE, topic_folder="skipgram", estimated_length=300),
+    )
+    repository.write_topic(
+        layout,
+        hat="default",
+        documents=[word2vec],
+        plan=GroupingPlan(decision=GroupingDecision.STANDALONE, topic_folder="word2vec-training", estimated_length=300),
+    )
+
+    bundle = RetrievalPipeline(layout, embedder=HashingEmbedder(dimension=24)).retrieve("negative sampling in word2vec", hat="default")
+
+    assert any(hit.metadata.source_path and hit.metadata.source_path.name == "topic_index.md" for hit in bundle.map_hits)
+    assert any("word2vec-training" in hit.text or "Training Skipgrams" in hit.text for hit in bundle.map_hits)

@@ -17,6 +17,8 @@ from arignan.setup_flow import (
     initialize_local_state,
     install_package,
     install_target,
+    inspect_app_home,
+    prepare_app_home,
     render_summary,
     resolve_ollama_model_id,
     resolve_model_repo_id,
@@ -183,6 +185,62 @@ def test_initialize_local_state_refreshes_existing_settings_to_current_defaults(
         assert refreshed["reranker_model"] == "Alibaba-NLP/gte-reranker-modernbert-base"
     finally:
         Path.home = original_home
+
+
+def test_initialize_local_state_can_keep_existing_settings_when_not_refreshing(tmp_path: Path) -> None:
+    original_home = Path.home
+    Path.home = staticmethod(lambda: tmp_path)
+    try:
+        app_home = tmp_path / ".arignan"
+        settings_path = write_default_settings(app_home=app_home)
+        payload = json.loads(settings_path.read_text(encoding="utf-8"))
+        payload["local_llm_backend"] = "ollama"
+        payload["local_llm_model"] = "custom-main"
+        payload["local_llm_light_model"] = "custom-light"
+        settings_path.write_text(json.dumps(payload), encoding="utf-8")
+
+        _, preserved_settings_path = initialize_local_state(
+            app_home=app_home,
+            refresh_existing=False,
+        )
+
+        preserved = json.loads(preserved_settings_path.read_text(encoding="utf-8"))
+        assert preserved["local_llm_model"] == "custom-main"
+        assert preserved["local_llm_light_model"] == "custom-light"
+    finally:
+        Path.home = original_home
+
+
+def test_inspect_app_home_detects_existing_arignan_layout(tmp_path: Path) -> None:
+    app_home = tmp_path / ".arignan"
+    (app_home / "models").mkdir(parents=True)
+    (app_home / "settings.json").write_text("{}", encoding="utf-8")
+
+    inspection = inspect_app_home(app_home)
+
+    assert inspection.exists is True
+    assert inspection.looks_like_arignan is True
+    assert "models" in inspection.entries
+    assert "settings.json" in inspection.entries
+
+
+def test_prepare_app_home_freshens_but_preserves_models_and_runtime(tmp_path: Path) -> None:
+    app_home = tmp_path / ".arignan"
+    (app_home / "models").mkdir(parents=True)
+    (app_home / "runtime").mkdir(parents=True)
+    (app_home / "hats").mkdir(parents=True)
+    (app_home / "settings.json").write_text("{}", encoding="utf-8")
+    (app_home / "models" / "keep.txt").write_text("keep", encoding="utf-8")
+    (app_home / "runtime" / "keep.txt").write_text("keep", encoding="utf-8")
+
+    resolved, action = prepare_app_home(app_home, choose_action=lambda inspection: "fresh")
+
+    assert resolved == app_home.resolve()
+    assert action == "fresh"
+    assert (app_home / "models" / "keep.txt").exists()
+    assert (app_home / "runtime" / "keep.txt").exists()
+    assert not (app_home / "hats").exists()
+    assert not (app_home / "settings.json").exists()
 
 
 def test_download_required_models_pulls_default_ollama_model(tmp_path: Path, monkeypatch) -> None:

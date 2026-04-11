@@ -28,6 +28,7 @@ def test_chunker_prefers_document_sections() -> None:
     assert [chunk.metadata.heading for chunk in chunks] == ["Intro", "Details"]
     assert [chunk.metadata.section for chunk in chunks] == ["Intro", "Details"]
     assert all(chunk.metadata.keywords == ["jepa"] for chunk in chunks)
+    assert chunks[0].text.startswith("Context: notes.md | Intro")
 
 
 def test_chunker_falls_back_to_overlap_for_long_unstructured_text() -> None:
@@ -65,7 +66,7 @@ def test_chunker_prefers_full_sentences_when_possible() -> None:
     assert len(chunks) == 2
     assert chunks[0].text.endswith(".")
     assert "rather than reconstructing raw pixels." in chunks[0].text
-    assert chunks[1].text.startswith("It predicts latent targets from context")
+    assert "It predicts latent targets from context" in chunks[1].text
 
 
 def test_chunker_removes_inline_academic_citation_noise() -> None:
@@ -85,7 +86,9 @@ def test_chunker_removes_inline_academic_citation_noise() -> None:
 
     assert "Bardes et al., 2022" not in chunk.text
     assert "[12, 14]" not in chunk.text
-    assert chunk.text == "Joint embedding predictive architecture improves representations and outperforms prior baselines."
+    assert chunk.text.endswith(
+        "Joint embedding predictive architecture improves representations and outperforms prior baselines."
+    )
 
 
 def test_chunker_skips_reference_sections() -> None:
@@ -147,3 +150,27 @@ def test_chunker_merges_adjacent_page_sections_into_larger_span() -> None:
     assert "Page three connects the objective" in chunks[0].text
     assert chunks[0].metadata.page_number is None
     assert chunks[0].metadata.section == "Pages 1-3"
+
+
+def test_chunker_preserves_academic_section_boundaries_and_context() -> None:
+    document = ParsedDocument(
+        load_id="load-academic",
+        hat="default",
+        source=SourceDocument(source_type=SourceType.PDF, source_uri="paper.pdf", local_path=Path("paper.pdf"), title="Word2Vec Notes"),
+        full_text=(
+            "Skip-gram learns word representations from nearby words.\n\n"
+            "Training uses negative sampling and subsampling."
+        ),
+        sections=[
+            DocumentSection(text="Skip-gram learns word representations from nearby words.", heading="Introduction"),
+            DocumentSection(text="Training uses negative sampling and subsampling.", heading="Methods"),
+        ],
+    )
+
+    chunks = Chunker(chunk_size=500, chunk_overlap=60).chunk_document(document)
+
+    assert len(chunks) == 2
+    assert chunks[0].metadata.heading == "Introduction"
+    assert chunks[1].metadata.heading == "Methods"
+    assert chunks[0].text.startswith("Context: Word2Vec Notes | Introduction")
+    assert chunks[1].text.startswith("Context: Word2Vec Notes | Methods | Method")

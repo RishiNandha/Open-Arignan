@@ -16,7 +16,17 @@ from arignan.application import (
 )
 from arignan.config import load_config
 from arignan.grouping import GroupingDecision, GroupingPlan
-from arignan.models import ChunkMetadata, DocumentSection, ParsedDocument, RetrievalHit, RetrievalSource, SourceDocument, SourceType
+from arignan.models import (
+    ChunkMetadata,
+    DocumentSection,
+    LoadEvent,
+    LoadOperation,
+    ParsedDocument,
+    RetrievalHit,
+    RetrievalSource,
+    SourceDocument,
+    SourceType,
+)
 from arignan.retrieval import RetrievalBundle
 from arignan.session import SessionExceptionLogger, SessionStore
 from arignan.tracing import ModelTraceCollector
@@ -666,3 +676,23 @@ def test_application_load_post_regroups_after_all_topic_summaries_exist(
     payload = json.loads(second_manifest.read_text(encoding="utf-8"))
     assert len(payload["documents"]) == 2
     assert not (app.layout.hat("default").summaries_dir / "first-topic").exists()
+
+
+def test_application_delete_does_not_recreate_missing_hat_for_stale_log(app_home: Path) -> None:
+    app = ArignanApp(load_config(app_home=app_home))
+    stale_event = LoadEvent(
+        load_id="load-stale",
+        operation=LoadOperation.INGEST,
+        hat="SNNs",
+        created_at="2026-04-11T12:00:00+00:00",
+        source_items=["paper.pdf"],
+        topic_folders=["word2vec"],
+    )
+    app.ingestion_log.append(stale_event)
+
+    result = app.delete(["load-stale"])
+
+    assert result.deleted_load_ids == ["load-stale"]
+    assert "word2vec" in result.deleted_topics
+    assert not app.layout.hat("SNNs").root.exists()
+    assert app.list_live_ingestions() == []

@@ -361,6 +361,13 @@ class ArignanApp:
     def list_ingestions(self) -> list[LoadEvent]:
         return [event for event in self.ingestion_log.read_all() if event.operation is LoadOperation.INGEST]
 
+    def list_live_ingestions(self) -> list[LoadEvent]:
+        live_events: list[LoadEvent] = []
+        for event in self.list_ingestions():
+            if self._ingestion_event_exists(event):
+                live_events.append(event)
+        return live_events
+
     def list_loads(self) -> list[LoadEvent]:
         return self.list_events()
 
@@ -378,6 +385,15 @@ class ArignanApp:
 
         affected_hats = {ingest_events[load_id].hat for load_id in to_delete}
         for hat in affected_hats:
+            hat_layout = self.layout.hat(hat)
+            if not hat_layout.root.exists():
+                deleted_topics.extend(
+                    topic_folder
+                    for load_id in to_delete
+                    if ingest_events[load_id].hat == hat
+                    for topic_folder in ingest_events[load_id].topic_folders
+                )
+                continue
             self._emit_progress(f"Removing indexed chunks from hat '{hat}'...")
             dense = self._dense_indexer(hat, trace=False)
             lexical = self._lexical_indexer(hat)
@@ -861,6 +877,29 @@ class ArignanApp:
             exc=exc,
             context=context,
         )
+
+    def format_logged_exception_message(
+        self,
+        *,
+        component: str,
+        task: str,
+        exc: BaseException,
+        context: dict[str, object] | None = None,
+        user_message: str = "Something went wrong.",
+    ) -> str:
+        log_path = self.log_exception(component=component, task=task, exc=exc, context=context)
+        return f"{user_message} See {log_path.resolve()}"
+
+    def _ingestion_event_exists(self, event: LoadEvent) -> bool:
+        hat_layout = self.layout.hat(event.hat)
+        if not hat_layout.root.exists():
+            return False
+        if not event.topic_folders:
+            return True
+        for topic_folder in event.topic_folders:
+            if (hat_layout.summaries_dir / topic_folder / ".topic_manifest.json").exists():
+                return True
+        return False
 
 
 def synthesize_answer(question: str, hits: list[RetrievalHit], expanded_query: str | None = None) -> str:

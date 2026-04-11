@@ -187,6 +187,7 @@ def compose_topic_index_markdown(
     title: str | None = None,
     locator: str | None = None,
     keywords: list[str] | None = None,
+    related_topics: list[dict[str, object]] | None = None,
 ) -> str:
     resolved_title = title or display_topic_title(plan.topic_folder, documents)
     resolved_locator = locator or compose_topic_locator(documents)
@@ -216,6 +217,12 @@ def compose_topic_index_markdown(
             lines.append(f"- {thread}")
         lines.append("")
 
+    related_topic_lines = _related_topic_lines(related_topics or [])
+    if related_topic_lines:
+        lines.append("## Related Topics in This Hat")
+        lines.extend(related_topic_lines)
+        lines.append("")
+
     if plan.decision is GroupingDecision.SEGMENT and plan.segments:
         lines.append("## Segment Guide")
         for index, segment in enumerate(plan.segments, start=1):
@@ -241,6 +248,34 @@ def compose_topic_index_markdown(
         )
     lines.append("")
     return "\n".join(lines).rstrip() + "\n"
+
+
+def inject_related_topics_markdown(markdown: str, related_topics: list[dict[str, object]] | None) -> str:
+    normalized = markdown.rstrip()
+    if not normalized:
+        return markdown
+    related_topic_lines = _related_topic_lines(related_topics or [])
+    section_heading = "## Related Topics in This Hat"
+    section_body = "\n".join([section_heading, *related_topic_lines]).rstrip()
+    if not related_topic_lines:
+        return re.sub(
+            r"\n## Related Topics in This Hat\n(?:- .+\n?)+",
+            "",
+            normalized,
+            flags=re.MULTILINE,
+        ).rstrip() + "\n"
+    if section_heading in normalized:
+        normalized = re.sub(
+            r"## Related Topics in This Hat\n(?:- .+\n?)+(?:\n)?",
+            section_body + "\n\n",
+            normalized,
+            flags=re.MULTILINE,
+        )
+        return normalized.rstrip() + "\n"
+    if "## Sources" in normalized:
+        normalized = normalized.replace("## Sources", section_body + "\n\n## Sources", 1)
+        return normalized.rstrip() + "\n"
+    return normalized.rstrip() + "\n\n" + section_body + "\n"
 
 
 def compose_segment_markdown(document: ParsedDocument, section_indices: list[int], title: str) -> str:
@@ -542,6 +577,28 @@ def source_name(document: ParsedDocument) -> str:
 def _wiki_link(filename: str) -> str:
     stem = filename.rsplit(".", maxsplit=1)[0]
     return f"[[{stem}]]"
+
+
+def _related_topic_lines(related_topics: list[dict[str, object]]) -> list[str]:
+    lines: list[str] = []
+    for related in related_topics:
+        topic_folder = str(related.get("topic_folder") or "").strip()
+        if not topic_folder:
+            continue
+        title = str(related.get("title") or topic_folder).strip()
+        relation_type = str(related.get("relation_type") or "INFERRED").strip().upper()
+        confidence = float(related.get("confidence") or 0.0)
+        shared_terms = related.get("shared_terms") or []
+        if not isinstance(shared_terms, list):
+            shared_terms = []
+        rationale = str(related.get("rationale") or "").strip()
+        detail_parts: list[str] = [f"{relation_type.lower()} {confidence:.2f}"]
+        if shared_terms:
+            detail_parts.append(f"shared: {', '.join(str(term) for term in shared_terms[:4])}")
+        elif rationale:
+            detail_parts.append(rationale.rstrip("."))
+        lines.append(f"- [[{topic_folder}|{title}]] ({'; '.join(detail_parts)})")
+    return lines
 
 
 def summarize_sentences(sentences: list[str], limit: int) -> list[str]:
@@ -853,6 +910,7 @@ __all__ = [
     "compose_segment_markdown",
     "compose_topic_locator",
     "compose_topic_markdown",
+    "inject_related_topics_markdown",
     "topic_related_threads",
     "dedupe_preserve_order",
     "describe_documents",

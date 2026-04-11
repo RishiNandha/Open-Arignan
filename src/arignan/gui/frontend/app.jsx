@@ -78,6 +78,7 @@ function App() {
   }
 
   function openManageDialog() {
+    refreshLibrary();
     setManageDialogOpen(true);
   }
 

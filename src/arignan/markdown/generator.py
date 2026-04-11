@@ -7,7 +7,8 @@ from collections import Counter
 from pathlib import Path
 
 import arignan.markdown.rendering as _rendering
-from arignan.grouping import GroupingDecision, GroupingPlan, slugify
+from arignan.graph import TopicGraphEntry, build_topic_graph
+from arignan.grouping import GroupingDecision, GroupingPlan, SegmentPlan, slugify
 from arignan.models import DocumentSection, ParsedDocument, TopicArtifact
 from arignan.storage import StorageLayout
 
@@ -216,6 +217,7 @@ class MarkdownRepository:
                     keywords=list(payload.get("keywords", [])),
                 )
             )
+        self._synchronize_topic_graph(hat_layout, manifests)
         hat_layout.map_path.write_text(self.artifact_writer.render_hat_map(hat, entries), encoding="utf-8")
         return hat_layout.map_path
 
@@ -325,9 +327,84 @@ class MarkdownRepository:
         payload["support_markdown_paths"] = [str(path) for path in support_paths]
         payload["documents"] = [document.to_dict() for document in documents]
         payload["decision"] = plan.decision.value
+        payload["segments"] = [
+            {
+                "slug": segment.slug,
+                "title": segment.title,
+                "section_indices": list(segment.section_indices),
+                "estimated_length": segment.estimated_length,
+            }
+            for segment in plan.segments
+        ]
+        payload["related_topics"] = []
         manifest_path = topic_dir / ".topic_manifest.json"
         manifest_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
         return manifest_path
+
+    def _synchronize_topic_graph(self, hat_layout, manifests: list[Path]) -> None:
+        payloads = [json.loads(manifest_path.read_text(encoding="utf-8")) for manifest_path in manifests]
+        entries = [
+            TopicGraphEntry(
+                topic_folder=payload["topic_folder"],
+                title=payload.get("title") or payload["topic_folder"],
+                locator=payload.get("locator") or "",
+                description=payload.get("description") or "",
+                keywords=list(payload.get("keywords", [])),
+                summary_excerpt=_read_topic_summary_excerpt(Path(payload.get("markdown_paths", [""])[0]))
+                if payload.get("markdown_paths")
+                else "",
+            )
+            for payload in payloads
+        ]
+        graph = build_topic_graph(entries)
+        hat_layout.topic_graph_path.write_text(json.dumps(graph, indent=2) + "\n", encoding="utf-8")
+        for manifest_path, payload in zip(manifests, payloads, strict=True):
+            related_topics = graph.get(payload["topic_folder"], [])
+            payload["related_topics"] = related_topics
+            manifest_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+            self._rewrite_topic_support_files(manifest_path.parent, payload)
+
+    def _rewrite_topic_support_files(self, topic_dir: Path, payload: dict[str, object]) -> None:
+        related_topics = payload.get("related_topics") or []
+        if not isinstance(related_topics, list):
+            related_topics = []
+        documents = [ParsedDocument.from_dict(item) for item in payload.get("documents", [])]
+        plan = GroupingPlan(
+            decision=GroupingDecision(str(payload.get("decision") or GroupingDecision.STANDALONE.value)),
+            topic_folder=str(payload.get("topic_folder") or topic_dir.name),
+            estimated_length=0,
+            segments=[
+                SegmentPlan(
+                    slug=str(item.get("slug") or "segment"),
+                    title=str(item.get("title") or "Segment"),
+                    section_indices=list(item.get("section_indices", [])),
+                    estimated_length=int(item.get("estimated_length", 0) or 0),
+                )
+                for item in payload.get("segments", [])
+                if isinstance(item, dict)
+            ],
+            merge_target_topic=str(payload.get("topic_folder") or topic_dir.name),
+        )
+        support_paths = [Path(path) for path in payload.get("support_markdown_paths", [])]
+        topic_index_path = next((path for path in support_paths if path.name == "topic_index.md"), topic_dir / "topic_index.md")
+        topic_index_path.write_text(
+            compose_topic_index_markdown(
+                documents,
+                plan,
+                title=str(payload.get("title") or topic_dir.name),
+                locator=str(payload.get("locator") or compose_topic_locator(documents)),
+                keywords=list(payload.get("keywords", [])),
+                related_topics=related_topics,
+            ),
+            encoding="utf-8",
+        )
+        summary_path = topic_dir / "summary.md"
+        if summary_path.exists():
+            summary_text = summary_path.read_text(encoding="utf-8")
+            summary_path.write_text(
+                inject_related_topics_markdown(summary_text, related_topics),
+                encoding="utf-8",
+            )
 
 
 def compose_topic_markdown(documents: list[ParsedDocument], plan: GroupingPlan) -> str:
@@ -965,6 +1042,17 @@ def _keyword_overlap_key(term: str) -> str:
     return " ".join(words)
 
 
+def _read_topic_summary_excerpt(path: Path) -> str:
+    if not path.exists():
+        return ""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    flattened = " ".join(text.split())
+    return flattened[:700]
+
+
 # Shared deterministic rendering now resolves through the dedicated rendering module.
 compose_topic_markdown = _rendering.compose_topic_markdown
 compose_topic_index_markdown = _rendering.compose_topic_index_markdown
@@ -976,6 +1064,7 @@ display_topic_title = _rendering.display_topic_title
 topic_overview_sentences = _rendering.topic_overview_sentences
 compose_topic_locator = _rendering.compose_topic_locator
 compose_key_point = _rendering.compose_key_point
+inject_related_topics_markdown = _rendering.inject_related_topics_markdown
 document_outline = _rendering.document_outline
 source_name = _rendering.source_name
 summarize_sentences = _rendering.summarize_sentences

@@ -125,11 +125,10 @@ def create_gui_app(app: ArignanApp) -> FastAPI:
         loads = [
             _serialize_load_event(event)
             for event in sorted(
-                app.list_ingestions(),
+                app.list_live_ingestions(),
                 key=lambda item: item.created_at,
                 reverse=True,
             )
-            if event.operation is LoadOperation.INGEST
         ]
         return {
             "hats": hats,
@@ -175,7 +174,17 @@ def create_gui_app(app: ArignanApp) -> FastAPI:
                 result = task_app.load(str(batch_dir), hat=hat)
                 task_store.finish(task.task_id, _serialize_load_result(result, uploaded_files=written_files))
             except Exception as exc:
-                task_store.fail(task.task_id, str(exc))
+                task_store.fail(
+                    task.task_id,
+                    _task_error_message(
+                        task_app,
+                        component="gui",
+                        task="load task",
+                        exc=exc,
+                        context={"hat": hat, "uploaded_files": written_files},
+                        user_message="Something went wrong while loading files.",
+                    ),
+                )
             finally:
                 shutil.rmtree(batch_dir, ignore_errors=True)
 
@@ -207,7 +216,17 @@ def create_gui_app(app: ArignanApp) -> FastAPI:
                 result = task_app.ask(question, hat=payload.hat, answer_mode=payload.answer_mode)
                 task_store.finish(task.task_id, _serialize_ask_result(result))
             except Exception as exc:
-                task_store.fail(task.task_id, str(exc))
+                task_store.fail(
+                    task.task_id,
+                    _task_error_message(
+                        task_app,
+                        component="gui",
+                        task="ask task",
+                        exc=exc,
+                        context={"hat": payload.hat, "answer_mode": payload.answer_mode},
+                        user_message="Something went wrong while answering the question.",
+                    ),
+                )
 
         threading.Thread(target=_runner, daemon=True).start()
         return {"task_id": task.task_id}
@@ -231,7 +250,17 @@ def create_gui_app(app: ArignanApp) -> FastAPI:
                     result = task_app.delete_hat(hat)
                     task_store.finish(task.task_id, _serialize_delete_hat_result(result))
                 except Exception as exc:
-                    task_store.fail(task.task_id, str(exc))
+                    task_store.fail(
+                        task.task_id,
+                        _task_error_message(
+                            task_app,
+                            component="gui",
+                            task="delete hat task",
+                            exc=exc,
+                            context={"hat": hat},
+                            user_message=f"Something went wrong while deleting hat '{hat}'.",
+                        ),
+                    )
 
             threading.Thread(target=_runner, daemon=True).start()
             return {"task_id": task.task_id}
@@ -250,7 +279,17 @@ def create_gui_app(app: ArignanApp) -> FastAPI:
                 result = task_app.delete(load_ids)
                 task_store.finish(task.task_id, _serialize_delete_result(result))
             except Exception as exc:
-                task_store.fail(task.task_id, str(exc))
+                task_store.fail(
+                    task.task_id,
+                    _task_error_message(
+                        task_app,
+                        component="gui",
+                        task="delete loads task",
+                        exc=exc,
+                        context={"load_ids": load_ids},
+                        user_message="Something went wrong while deleting the selected loads.",
+                    ),
+                )
 
         threading.Thread(target=_runner, daemon=True).start()
         return {"task_id": task.task_id}
@@ -450,6 +489,24 @@ def _compact_delete_progress(message: str) -> str:
     if "Recording deletion log" in message:
         return "Recording deletion log..."
     return message
+
+
+def _task_error_message(
+    app: ArignanApp,
+    *,
+    component: str,
+    task: str,
+    exc: BaseException,
+    context: dict[str, object] | None,
+    user_message: str,
+) -> str:
+    return app.format_logged_exception_message(
+        component=component,
+        task=task,
+        exc=exc,
+        context=context,
+        user_message=user_message,
+    )
 
 
 def _frontend_dir() -> Path:

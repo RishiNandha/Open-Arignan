@@ -18,6 +18,18 @@ REFERENCE_BLOCK_PATTERN = re.compile(
     r"(?:^|\n)\s*(references|bibliography|works cited|citations?)\s*(?:\n|$).*$",
     re.IGNORECASE | re.DOTALL,
 )
+ACADEMIC_SECTION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("Abstract", re.compile(r"^abstract$", re.IGNORECASE)),
+    ("Introduction", re.compile(r"^(introduction|overview)$", re.IGNORECASE)),
+    ("Background", re.compile(r"^(background|preliminar(?:y|ies)|related work)$", re.IGNORECASE)),
+    ("Method", re.compile(r"^(method|methods|approach|architecture|model|training objective)$", re.IGNORECASE)),
+    ("Experiment", re.compile(r"^(experiment|experiments|evaluation|implementation details)$", re.IGNORECASE)),
+    ("Results", re.compile(r"^(results?|findings?)$", re.IGNORECASE)),
+    ("Discussion", re.compile(r"^(discussion|analysis)$", re.IGNORECASE)),
+    ("Conclusion", re.compile(r"^(conclusion|conclusions|future work)$", re.IGNORECASE)),
+    ("Appendix", re.compile(r"^(appendix|supplementary|supplemental)$", re.IGNORECASE)),
+    ("References", re.compile(r"^(references|bibliography|works cited|citations?)$", re.IGNORECASE)),
+)
 
 
 @dataclass(slots=True)
@@ -51,6 +63,7 @@ class Chunker:
         for section_index, section in enumerate(sections):
             section_chunks = self._chunk_section_text(section.text)
             for piece_index, chunk_text in enumerate(section_chunks):
+                chunk_payload = self._augment_chunk_text(document, section, chunk_text)
                 metadata = ChunkMetadata(
                     load_id=document.load_id,
                     hat=document.hat,
@@ -63,8 +76,8 @@ class Chunker:
                 )
                 chunks.append(
                     ChunkRecord(
-                        chunk_id=self._chunk_id(document, section_index, piece_index, chunk_text),
-                        text=chunk_text,
+                        chunk_id=self._chunk_id(document, section_index, piece_index, chunk_payload),
+                        text=chunk_payload,
                         metadata=metadata,
                     )
                 )
@@ -242,6 +255,10 @@ class Chunker:
             return False
 
         last_section = buffered_sections[-1]
+        last_role = self._section_role(last_section.heading or last_section.text[:80])
+        next_role = self._section_role(next_section.heading or next_section.text[:80])
+        if last_role and next_role and last_role != next_role:
+            return False
         if self._is_soft_boundary(last_section, next_section):
             return True
         return False
@@ -261,6 +278,9 @@ class Chunker:
             return _SectionSpan(text=text, heading=heading, page_number=page_numbers[0], section_label=f"Page {page_numbers[0]}")
         if len(page_numbers) > 1:
             return _SectionSpan(text=text, heading=heading, page_number=None, section_label=f"Pages {page_numbers[0]}-{page_numbers[-1]}")
+        dominant_role = self._section_role(heading or sections[0].heading or sections[0].text[:80])
+        if dominant_role and len(headings) <= 1:
+            return _SectionSpan(text=text, heading=heading or dominant_role, page_number=None, section_label=dominant_role)
         if len(headings) == 1:
             return _SectionSpan(text=text, heading=headings[0], page_number=None, section_label=headings[0])
         if len(headings) > 1:
@@ -296,6 +316,34 @@ class Chunker:
     def _is_page_heading(heading: str) -> bool:
         normalized = heading.strip().lower()
         return bool(re.fullmatch(r"page\s+\d+", normalized))
+
+    def _section_role(self, text: str) -> str | None:
+        normalized = " ".join(text.split()).strip()
+        if not normalized:
+            return None
+        normalized = re.sub(r"^\d+(?:\.\d+)*\s*", "", normalized)
+        for role, pattern in ACADEMIC_SECTION_PATTERNS:
+            if pattern.fullmatch(normalized):
+                return role
+        return None
+
+    def _augment_chunk_text(self, document: ParsedDocument, section: _SectionSpan, text: str) -> str:
+        title = (document.source.title or (document.source.local_path.name if document.source.local_path else "")).strip()
+        heading = (section.heading or "").strip()
+        role = self._section_role(heading or section.section_label)
+        context_parts: list[str] = []
+        if title:
+            context_parts.append(title)
+        if heading and heading.lower() != title.lower():
+            context_parts.append(heading)
+        elif section.section_label and not section.section_label.lower().startswith("section "):
+            context_parts.append(section.section_label)
+        if role and role.lower() not in {part.lower() for part in context_parts}:
+            context_parts.append(role)
+        if not context_parts:
+            return text
+        prefix = "Context: " + " | ".join(context_parts)
+        return f"{prefix}\n{text}"
 
     def _chunk_id(
         self,

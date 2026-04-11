@@ -28,6 +28,7 @@ class HatLayout:
     bm25_index_dir: Path
     summaries_dir: Path
     map_path: Path
+    topic_graph_path: Path
 
     def ensure(self) -> "HatLayout":
         self.vector_index_dir.mkdir(parents=True, exist_ok=True)
@@ -67,6 +68,7 @@ class StorageLayout:
             bm25_index_dir=hat_root / "bm25_index",
             summaries_dir=hat_root / "summaries",
             map_path=hat_root / "map.md",
+            topic_graph_path=hat_root / "topic_graph.json",
         )
 
     def ensure(self, include_default_hat: bool = True) -> "StorageLayout":
