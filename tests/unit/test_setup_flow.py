@@ -211,6 +211,36 @@ def test_initialize_local_state_can_keep_existing_settings_when_not_refreshing(t
         Path.home = original_home
 
 
+def test_initialize_local_state_keeps_existing_user_settings_payload_when_not_refreshing(tmp_path: Path) -> None:
+    original_home = Path.home
+    Path.home = staticmethod(lambda: tmp_path)
+    try:
+        app_home = tmp_path / ".arignan"
+        settings_path = write_default_settings(app_home=app_home)
+        payload = json.loads(settings_path.read_text(encoding="utf-8"))
+        payload["local_llm_backend"] = "ollama"
+        payload["local_llm_model"] = "custom-main"
+        payload["local_llm_light_model"] = "custom-light"
+        payload["default_hat"] = "SNNs"
+        payload["retrieval"]["dense_top_k"] = 99
+        payload["session"]["soft_token_limit"] = 12345
+        settings_path.write_text(json.dumps(payload), encoding="utf-8")
+
+        _, preserved_settings_path = initialize_local_state(
+            app_home=app_home,
+            refresh_existing=False,
+        )
+
+        preserved = json.loads(preserved_settings_path.read_text(encoding="utf-8"))
+        assert preserved["local_llm_model"] == "custom-main"
+        assert preserved["local_llm_light_model"] == "custom-light"
+        assert preserved["default_hat"] == "SNNs"
+        assert preserved["retrieval"]["dense_top_k"] == 99
+        assert preserved["session"]["soft_token_limit"] == 12345
+    finally:
+        Path.home = original_home
+
+
 def test_inspect_app_home_detects_existing_arignan_layout(tmp_path: Path) -> None:
     app_home = tmp_path / ".arignan"
     (app_home / "models").mkdir(parents=True)

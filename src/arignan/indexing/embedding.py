@@ -109,13 +109,16 @@ def create_embedder(
     exception_logger: "SessionExceptionLogger | None" = None,
 ) -> Embedder:
     model_dir = resolve_model_storage_dir(config.app_home, config.embedding_model)
+    if progress_sink is not None:
+        progress_sink(f"Preparing local embedding model ({config.embedding_model})...")
     if not model_dir.exists():
-        return HashingEmbedder(model_name=config.embedding_model)
+        raise RuntimeError(_embedder_runtime_error(config.embedding_model, model_dir))
     try:
-        if progress_sink is not None:
-            progress_sink(f"Preparing local embedding model ({config.embedding_model})...")
-        return SentenceTransformerEmbedder(model_name=config.embedding_model, model_source=model_dir)
+        embedder = SentenceTransformerEmbedder(model_name=config.embedding_model, model_source=model_dir)
+        embedder._ensure_model()
+        return embedder
     except Exception as exc:
+        log_path = None
         if exception_logger is not None:
             log_path = exception_logger.log_exception(
                 component="embedder",
@@ -123,8 +126,19 @@ def create_embedder(
                 exc=exc,
                 context={"model_name": config.embedding_model, "model_source": str(model_dir)},
             )
-            if progress_sink is not None:
-                progress_sink(
-                    f"Local embedding model unavailable; using hashing fallback. Log: {log_path.resolve()}"
-                )
-        return HashingEmbedder(model_name=config.embedding_model)
+        raise RuntimeError(_embedder_runtime_error(config.embedding_model, model_dir, log_path=log_path)) from exc
+
+
+def _embedder_runtime_error(model_name: str, model_dir: Path, *, log_path: Path | None = None) -> str:
+    message = [
+        "Arignan requires the Python retrieval ML stack for embeddings; hashing fallback is disabled.",
+        f"Configured embedding model: {model_name}",
+        f"Expected local model directory: {model_dir}",
+        "Required packages in this Python environment: "
+        "transformers>=4.48,<4.50, accelerate>=0.30,<1, sentence-transformers>=3.0,<4",
+        "Arignan will not auto-install or change your existing Torch/CUDA setup.",
+        "If the model files are missing, rerun `python setup.py --app-home <your app home>`.",
+    ]
+    if log_path is not None:
+        message.append(f"See exception log: {log_path.resolve()}")
+    return " ".join(message)

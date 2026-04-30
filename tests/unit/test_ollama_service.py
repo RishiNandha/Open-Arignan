@@ -13,11 +13,13 @@ from arignan.llm.service import (
     list_available_models,
     managed_runtime_dir,
     provision_managed_runtime,
+    resolve_ollama_executable,
 )
 
 
 def test_provision_managed_runtime_downloads_windows_bundle(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("arignan.llm.service.os.name", "nt")
+    monkeypatch.setattr("arignan.llm.service.shutil.which", lambda name: None)
     archive_bytes = io.BytesIO()
     captured: dict[str, object] = {}
     import zipfile
@@ -54,6 +56,39 @@ def test_provision_managed_runtime_downloads_windows_bundle(tmp_path: Path, monk
     assert captured["kwargs"]["follow_redirects"] is True
 
 
+def test_provision_managed_runtime_prefers_existing_ollama_on_path(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("arignan.llm.service.os.name", "nt")
+    discovered = tmp_path / "existing" / "ollama.exe"
+    discovered.parent.mkdir(parents=True, exist_ok=True)
+    discovered.write_text("", encoding="utf-8")
+    progress: list[str] = []
+
+    monkeypatch.setattr("arignan.llm.service.shutil.which", lambda name: str(discovered))
+
+    executable = provision_managed_runtime(tmp_path, progress=progress.append)
+
+    assert executable == discovered.resolve()
+    assert progress == ["Using existing local model runtime from PATH..."]
+
+
+def test_resolve_ollama_executable_prefers_existing_ollama_on_path_over_bundled_runtime(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr("arignan.llm.service.os.name", "nt")
+    discovered = tmp_path / "existing" / "ollama.exe"
+    discovered.parent.mkdir(parents=True, exist_ok=True)
+    discovered.write_text("", encoding="utf-8")
+    bundled = bundled_ollama_executable(tmp_path)
+    bundled.parent.mkdir(parents=True, exist_ok=True)
+    bundled.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr("arignan.llm.service.shutil.which", lambda name: str(discovered))
+
+    executable = resolve_ollama_executable(tmp_path)
+
+    assert executable == discovered.resolve()
+
+
 def test_ensure_service_running_starts_background_runtime_when_endpoint_is_down(tmp_path: Path, monkeypatch) -> None:
     executable = bundled_ollama_executable(tmp_path)
     executable.parent.mkdir(parents=True, exist_ok=True)
@@ -65,6 +100,7 @@ def test_ensure_service_running_starts_background_runtime_when_endpoint_is_down(
         pid = 3210
 
     monkeypatch.setattr("arignan.llm.service.is_service_ready", lambda endpoint, timeout_seconds=1.0: next(readiness))
+    monkeypatch.setattr("arignan.llm.service.shutil.which", lambda name: None)
     monkeypatch.setattr(
         "arignan.llm.service.subprocess.Popen",
         lambda command, **kwargs: calls.append({"command": command, "kwargs": kwargs}) or FakeProcess(),
@@ -87,7 +123,39 @@ def test_ensure_service_running_starts_background_runtime_when_endpoint_is_down(
     assert env["OLLAMA_KV_CACHE_TYPE"] == "q8_0"
     assert env["OLLAMA_NUM_PARALLEL"] == "1"
     assert env["OLLAMA_MAX_LOADED_MODELS"] == "1"
+    assert env["OLLAMA_MODELS"] == str((tmp_path / "models").resolve())
     assert (managed_runtime_dir(tmp_path) / "service.pid").read_text(encoding="utf-8") == "3210"
+
+
+def test_ensure_service_running_does_not_override_models_dir_for_system_ollama(tmp_path: Path, monkeypatch) -> None:
+    executable = tmp_path / "existing" / "ollama.exe"
+    executable.parent.mkdir(parents=True, exist_ok=True)
+    executable.write_text("", encoding="utf-8")
+    calls: list[dict[str, object]] = []
+    readiness = iter([False, True])
+
+    class FakeProcess:
+        pid = 6543
+
+    monkeypatch.setattr("arignan.llm.service.is_service_ready", lambda endpoint, timeout_seconds=1.0: next(readiness))
+    monkeypatch.setattr("arignan.llm.service.resolve_ollama_executable", lambda app_home: executable.resolve())
+    monkeypatch.setattr(
+        "arignan.llm.service.subprocess.Popen",
+        lambda command, **kwargs: calls.append({"command": command, "kwargs": kwargs}) or FakeProcess(),
+    )
+
+    ensure_service_running(
+        tmp_path,
+        "http://127.0.0.1:11434",
+        context_window=6144,
+        flash_attention=True,
+        kv_cache_type="q8_0",
+        num_parallel=1,
+        max_loaded_models=1,
+    )
+
+    env = calls[0]["kwargs"]["env"]
+    assert "OLLAMA_MODELS" not in env
 
 
 def test_list_available_models_reads_tag_names(monkeypatch) -> None:

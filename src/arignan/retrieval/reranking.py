@@ -84,13 +84,16 @@ def create_reranker(
     exception_logger: "SessionExceptionLogger | None" = None,
 ) -> Reranker:
     model_dir = resolve_model_storage_dir(config.app_home, config.reranker_model)
+    if progress_sink is not None:
+        progress_sink(f"Preparing local reranker model ({config.reranker_model})...")
     if not model_dir.exists():
-        return HeuristicReranker(model_name=config.reranker_model)
+        raise RuntimeError(_reranker_runtime_error(config.reranker_model, model_dir))
     try:
-        if progress_sink is not None:
-            progress_sink(f"Preparing local reranker model ({config.reranker_model})...")
-        return CrossEncoderReranker(model_name=config.reranker_model, model_source=model_dir)
+        reranker = CrossEncoderReranker(model_name=config.reranker_model, model_source=model_dir)
+        reranker._ensure_model()
+        return reranker
     except Exception as exc:
+        log_path = None
         if exception_logger is not None:
             log_path = exception_logger.log_exception(
                 component="reranker",
@@ -98,8 +101,19 @@ def create_reranker(
                 exc=exc,
                 context={"model_name": config.reranker_model, "model_source": str(model_dir)},
             )
-            if progress_sink is not None:
-                progress_sink(
-                    f"Local reranker model unavailable; using heuristic fallback. Log: {log_path.resolve()}"
-                )
-        return HeuristicReranker(model_name=config.reranker_model)
+        raise RuntimeError(_reranker_runtime_error(config.reranker_model, model_dir, log_path=log_path)) from exc
+
+
+def _reranker_runtime_error(model_name: str, model_dir: Path, *, log_path: Path | None = None) -> str:
+    message = [
+        "Arignan requires the Python retrieval ML stack for reranking; heuristic fallback is disabled.",
+        f"Configured reranker model: {model_name}",
+        f"Expected local model directory: {model_dir}",
+        "Required packages in this Python environment: "
+        "transformers>=4.48,<4.50, accelerate>=0.30,<1, sentence-transformers>=3.0,<4",
+        "Arignan will not auto-install or change your existing Torch/CUDA setup.",
+        "If the model files are missing, rerun `python setup.py --app-home <your app home>`.",
+    ]
+    if log_path is not None:
+        message.append(f"See exception log: {log_path.resolve()}")
+    return " ".join(message)

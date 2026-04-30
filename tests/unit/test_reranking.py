@@ -4,6 +4,8 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
 from arignan.config import load_config, write_default_settings
 from arignan.models import ChunkMetadata, RetrievalHit, RetrievalSource
 from arignan.retrieval import DEFAULT_RERANKER_MODEL, CrossEncoderReranker, HeuristicReranker, create_reranker
@@ -113,3 +115,15 @@ def test_create_reranker_uses_cross_encoder_when_model_cached(tmp_path: Path, mo
 
     assert reranker.backend_name == "cross-encoder"
     assert captured == {"model_name": str(model_dir), "device": "cuda"}
+
+
+def test_create_reranker_requires_local_ml_runtime_when_model_missing(tmp_path: Path) -> None:
+    app_home = tmp_path / ".arignan"
+    write_default_settings(app_home=app_home)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        create_reranker(load_config(app_home=app_home))
+
+    message = str(exc_info.value)
+    assert "Python retrieval ML stack for reranking" in message
+    assert "Arignan will not auto-install or change your existing Torch/CUDA setup." in message

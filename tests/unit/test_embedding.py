@@ -4,6 +4,8 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
 from arignan.config import load_config, write_default_settings
 from arignan.indexing import DEFAULT_EMBEDDING_MODEL, HashingEmbedder, cosine_similarity
 from arignan.indexing.embedding import SentenceTransformerEmbedder, create_embedder
@@ -98,3 +100,15 @@ def test_create_embedder_uses_sentence_transformer_when_model_cached(tmp_path: P
 
     assert embedder.backend_name == "sentence-transformers"
     assert captured == {"model_name": str(model_dir), "device": "cuda"}
+
+
+def test_create_embedder_requires_local_ml_runtime_when_model_missing(tmp_path: Path) -> None:
+    app_home = tmp_path / ".arignan"
+    write_default_settings(app_home=app_home)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        create_embedder(load_config(app_home=app_home))
+
+    message = str(exc_info.value)
+    assert "Python retrieval ML stack for embeddings" in message
+    assert "Arignan will not auto-install or change your existing Torch/CUDA setup." in message

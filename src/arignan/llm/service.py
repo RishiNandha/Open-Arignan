@@ -28,13 +28,20 @@ def bundled_ollama_executable(app_home: Path) -> Path:
     return managed_runtime_dir(app_home) / executable
 
 
+def system_ollama_executable() -> Path | None:
+    discovered = shutil.which("ollama")
+    if not discovered:
+        return None
+    return Path(discovered).resolve()
+
+
 def resolve_ollama_executable(app_home: Path) -> Path:
+    system = system_ollama_executable()
+    if system is not None:
+        return system
     bundled = bundled_ollama_executable(app_home)
     if bundled.exists():
         return bundled.resolve()
-    discovered = shutil.which("ollama")
-    if discovered:
-        return Path(discovered).resolve()
     raise RuntimeError(
         "The local model runtime is not provisioned. Re-run `python setup.py --app-home <install dir>`."
     )
@@ -44,15 +51,16 @@ def provision_managed_runtime(
     app_home: Path,
     progress: Callable[[str], None] | None = None,
 ) -> Path:
+    system = system_ollama_executable()
+    if system is not None:
+        _emit(progress, "Using existing local model runtime from PATH...")
+        return system
     executable = bundled_ollama_executable(app_home)
     if executable.exists():
         return executable
     if os.name == "nt":
         _emit(progress, "Installing local model runtime...")
         return _install_windows_runtime(app_home)
-    discovered = shutil.which("ollama")
-    if discovered:
-        return Path(discovered).resolve()
     raise RuntimeError(
         "Automatic local model runtime provisioning is only bundled for Windows right now. "
         "Re-run setup on Windows or install Ollama manually on this platform."
@@ -80,7 +88,8 @@ def ensure_service_running(
     pid_path = managed_runtime_dir(app_home) / "service.pid"
     _emit(progress, "Starting local model runtime...")
     env = os.environ.copy()
-    env["OLLAMA_MODELS"] = str((app_home / "models").resolve())
+    if executable == bundled_ollama_executable(app_home).resolve():
+        env["OLLAMA_MODELS"] = str((app_home / "models").resolve())
     env["OLLAMA_HOST"] = _ollama_host(endpoint)
     if flash_attention:
         env["OLLAMA_FLASH_ATTENTION"] = "1"
