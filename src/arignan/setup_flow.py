@@ -6,7 +6,9 @@ import shutil
 import stat
 import subprocess
 import sys
+from importlib import metadata
 from dataclasses import dataclass
+from packaging.specifiers import SpecifierSet
 from pathlib import Path
 from typing import Callable
 
@@ -19,6 +21,8 @@ from arignan.model_registry import (
     DEFAULT_LIGHT_LOCAL_LLM_REPO_ID,
     DEFAULT_LIGHT_RERANKER_MODEL_REPO_ID,
     DEFAULT_RERANKER_MODEL_REPO_ID,
+    LEGACY_EMBEDDING_MODEL_REPO_ID,
+    LEGACY_MODERNBERT_RERANKER_MODEL_REPO_ID,
     LEGACY_TRANSFORMERS_LOCAL_LLM_DISPLAY_NAME,
     LEGACY_TRANSFORMERS_LOCAL_LLM_REPO_ID,
     LEGACY_RERANKER_MODEL_REPO_ID,
@@ -27,6 +31,12 @@ from arignan.model_registry import (
     resolve_model_repo_id,
     sanitize_model_id,
 )
+
+REQUIRED_ML_PACKAGES: dict[str, str] = {
+    "transformers": ">=4.48,<4.50",
+    "accelerate": ">=0.30,<1",
+    "sentence-transformers": ">=3.0,<4",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +53,14 @@ class SetupResult:
     bin_dir: Path
     windows_launcher: Path
     posix_launcher: Path
+
+
+@dataclass(frozen=True, slots=True)
+class AppHomeInspection:
+    app_home: Path
+    exists: bool
+    entries: list[str]
+    looks_like_arignan: bool
 
 
 def repo_root() -> Path:
@@ -65,11 +83,80 @@ def install_package(root: Path | None = None, dev: bool = False) -> str:
     resolved_root = (root or repo_root()).resolve()
     target = install_target(dev=dev)
     subprocess.run(
-        [sys.executable, "-m", "pip", "install", target],
+        [sys.executable, "-m", "pip", "install", "--no-deps", target],
         cwd=resolved_root,
         check=True,
     )
     return target
+
+
+def verify_required_ml_runtime() -> None:
+    missing_or_incompatible: list[str] = []
+    for package_name, spec in REQUIRED_ML_PACKAGES.items():
+        try:
+            version = metadata.version(package_name)
+        except metadata.PackageNotFoundError:
+            missing_or_incompatible.append(f"{package_name}{spec}")
+            continue
+        if version not in SpecifierSet(spec):
+            missing_or_incompatible.append(f"{package_name}{spec} (found {version})")
+    if not missing_or_incompatible:
+        return
+    install_parts = [f'"{name}{spec}"' for name, spec in REQUIRED_ML_PACKAGES.items()]
+    raise RuntimeError(
+        "Arignan setup requires the Python retrieval ML stack in this environment. "
+        "Missing or incompatible packages: "
+        + ", ".join(missing_or_incompatible)
+        + ". "
+        + "Install or repair them with: "
+        + f"{sys.executable} -m pip install {' '.join(install_parts)} "
+        + "Arignan will not auto-install or rewrite your existing Torch/CUDA setup."
+    )
+
+
+def inspect_app_home(app_home: Path) -> AppHomeInspection:
+    resolved = Path(app_home).expanduser().resolve()
+    if not resolved.exists():
+        return AppHomeInspection(app_home=resolved, exists=False, entries=[], looks_like_arignan=False)
+    entries = sorted(path.name for path in resolved.iterdir())
+    markers = {
+        "settings.json",
+        "ingestion_log.jsonl",
+        "hats",
+        "sessions",
+        "models",
+        "runtime",
+    }
+    looks_like_arignan = any(entry in markers for entry in entries)
+    return AppHomeInspection(
+        app_home=resolved,
+        exists=True,
+        entries=entries,
+        looks_like_arignan=looks_like_arignan,
+    )
+
+
+def prepare_app_home(
+    app_home: Path,
+    *,
+    choose_action: Callable[[AppHomeInspection], str] | None = None,
+    progress: Callable[[str], None] | None = None,
+) -> tuple[Path, str]:
+    resolved = Path(app_home).expanduser().resolve()
+    inspection = inspect_app_home(resolved)
+    if not inspection.exists:
+        return resolved, "new"
+    if not inspection.entries:
+        return resolved, "empty"
+    action = (choose_action(inspection) if choose_action is not None else "keep").strip().lower()
+    if action not in {"keep", "fresh"}:
+        action = "keep"
+    if action == "fresh":
+        _emit(progress, "Refreshing existing app home while preserving models/ and runtime/...")
+        _clear_app_home_preserving_runtime(resolved)
+    else:
+        _emit(progress, "Keeping existing app-home contents as-is.")
+    return resolved, action
 def update_local_llm_settings(
     settings_path: Path,
     local_llm_backend: str | None,
@@ -109,22 +196,47 @@ def initialize_local_state(
     local_llm_light_model: str | None = None,
     embedding_model: str | None = None,
     reranker_model: str | None = None,
+    refresh_existing: bool = True,
 ) -> tuple[Path, Path]:
     from arignan.config import write_default_settings
     from arignan.paths import write_persisted_app_home
     from arignan.storage import StorageLayout
 
-    settings_path = write_default_settings(app_home=app_home, overwrite=True)
+    existing_settings_path = (Path(app_home).expanduser().resolve() / "settings.json") if app_home is not None else None
+    had_settings_before = bool(existing_settings_path and existing_settings_path.exists())
+    settings_path = write_default_settings(app_home=app_home, overwrite=refresh_existing)
     resolved_home = settings_path.parent.resolve()
     write_persisted_app_home(resolved_home)
-    update_local_llm_settings(
-        settings_path,
-        local_llm_backend=local_llm_backend,
-        local_llm_model=local_llm_model,
-        local_llm_light_model=local_llm_light_model,
-        embedding_model=embedding_model,
-        reranker_model=reranker_model,
-    )
+    if refresh_existing or not had_settings_before:
+        update_local_llm_settings(
+            settings_path,
+            local_llm_backend=local_llm_backend,
+            local_llm_model=local_llm_model,
+            local_llm_light_model=local_llm_light_model,
+            embedding_model=embedding_model,
+            reranker_model=reranker_model,
+        )
+    elif any(
+        value is not None
+        for value in (local_llm_backend, local_llm_model, local_llm_light_model, embedding_model, reranker_model)
+    ):
+        update_local_llm_settings(
+            settings_path,
+            local_llm_backend=local_llm_backend,
+            local_llm_model=local_llm_model,
+            local_llm_light_model=local_llm_light_model,
+            embedding_model=embedding_model,
+            reranker_model=reranker_model,
+        )
+    else:
+        update_local_llm_settings(
+            settings_path,
+            local_llm_backend=None,
+            local_llm_model=None,
+            local_llm_light_model=None,
+            embedding_model=None,
+            reranker_model=None,
+        )
     layout = StorageLayout.from_home(app_home).ensure()
     return layout.root, settings_path
 
@@ -261,10 +373,15 @@ def _migrate_legacy_local_llm_defaults(settings_path: Path) -> None:
 def _migrate_legacy_retrieval_defaults(settings_path: Path) -> None:
     payload = json.loads(settings_path.read_text(encoding="utf-8"))
     changed = False
-    if payload.get("embedding_model") in {None, ""}:
+    if payload.get("embedding_model") in {None, "", LEGACY_EMBEDDING_MODEL_REPO_ID}:
         payload["embedding_model"] = DEFAULT_EMBEDDING_MODEL_REPO_ID
         changed = True
-    if payload.get("reranker_model") in {None, "", LEGACY_RERANKER_MODEL_REPO_ID}:
+    if payload.get("reranker_model") in {
+        None,
+        "",
+        LEGACY_RERANKER_MODEL_REPO_ID,
+        LEGACY_MODERNBERT_RERANKER_MODEL_REPO_ID,
+    }:
         payload["reranker_model"] = DEFAULT_RERANKER_MODEL_REPO_ID
         changed = True
     if changed:
@@ -304,6 +421,7 @@ def run_setup(
     llm_model: str | None = None,
     lightweight: bool = False,
     progress: Callable[[str], None] | None = None,
+    choose_app_home_action: Callable[[AppHomeInspection], str] | None = None,
 ) -> SetupResult:
     root = repo_root()
     ensure_repo_on_syspath(root)
@@ -313,14 +431,24 @@ def run_setup(
     effective_reranker_model = DEFAULT_LIGHT_RERANKER_MODEL_REPO_ID if lightweight else None
     _emit(progress, "[1/4] Installing Python package...")
     target = install_package(root=root, dev=dev)
+    verify_required_ml_runtime()
     _emit(progress, "[2/4] Initializing local Arignan state...")
+    from arignan.paths import resolve_app_home
+
+    desired_app_home = resolve_app_home(app_home=app_home)
+    prepared_home, app_home_action = prepare_app_home(
+        desired_app_home,
+        choose_action=choose_app_home_action,
+        progress=progress,
+    )
     resolved_home, settings_path = initialize_local_state(
-        app_home=app_home,
+        app_home=prepared_home,
         local_llm_backend=llm_backend,
         local_llm_model=effective_llm_model,
         local_llm_light_model=effective_light_model,
         embedding_model=effective_embedding_model,
         reranker_model=effective_reranker_model,
+        refresh_existing=app_home_action == "fresh" or app_home_action in {"new", "empty"},
     )
     _emit(progress, "[3/4] Downloading required models...")
     models_dir = download_required_models(resolved_home, progress=progress)
@@ -402,6 +530,17 @@ def _display_path(value: Path | str) -> str:
     if text.startswith("\\\\?\\"):
         return text[4:]
     return text
+
+
+def _clear_app_home_preserving_runtime(app_home: Path) -> None:
+    preserve = {"models", "runtime"}
+    for child in app_home.iterdir():
+        if child.name in preserve:
+            continue
+        if child.is_dir():
+            shutil.rmtree(child)
+        else:
+            child.unlink(missing_ok=True)
 
 
 def _configured_local_models(config) -> list[str]:

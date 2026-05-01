@@ -6,7 +6,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
 
-from arignan.compute import preferred_torch_device
+from arignan.compute import format_torch_cuda_memory, preferred_torch_device, release_torch_cuda_memory
 from arignan.model_registry import DEFAULT_EMBEDDING_MODEL_REPO_ID, resolve_model_storage_dir
 
 if False:  # pragma: no cover
@@ -94,6 +94,20 @@ class SentenceTransformerEmbedder:
         self._model = SentenceTransformer(self.model_source, device=self.device)
         return self._model
 
+    def release_device_memory(self) -> bool:
+        model = self._model
+        self._model = None
+        if model is None:
+            return False
+        if self.device == "cuda" and hasattr(model, "cpu"):
+            try:
+                model.cpu()
+            except Exception:  # pragma: no cover - depends on local runtime
+                pass
+        del model
+        release_torch_cuda_memory()
+        return True
+
 
 def _query_prompt_for_model(model_name: str) -> str | None:
     normalized = model_name.lower()
@@ -109,13 +123,20 @@ def create_embedder(
     exception_logger: "SessionExceptionLogger | None" = None,
 ) -> Embedder:
     model_dir = resolve_model_storage_dir(config.app_home, config.embedding_model)
+    if progress_sink is not None:
+        progress_sink(f"Preparing local embedding model ({config.embedding_model})...")
     if not model_dir.exists():
-        return HashingEmbedder(model_name=config.embedding_model)
+        raise RuntimeError(_missing_embedder_model_error(config.embedding_model, model_dir))
     try:
-        if progress_sink is not None:
-            progress_sink(f"Preparing local embedding model ({config.embedding_model})...")
-        return SentenceTransformerEmbedder(model_name=config.embedding_model, model_source=model_dir)
+        embedder = SentenceTransformerEmbedder(model_name=config.embedding_model, model_source=model_dir)
+        embedder._ensure_model()
+        if progress_sink is not None and embedder.device == "cuda":
+            message = format_torch_cuda_memory(f"GPU after embedding model load ({config.embedding_model})")
+            if message:
+                progress_sink(message)
+        return embedder
     except Exception as exc:
+        log_path = None
         if exception_logger is not None:
             log_path = exception_logger.log_exception(
                 component="embedder",
@@ -123,8 +144,31 @@ def create_embedder(
                 exc=exc,
                 context={"model_name": config.embedding_model, "model_source": str(model_dir)},
             )
-            if progress_sink is not None:
-                progress_sink(
-                    f"Local embedding model unavailable; using hashing fallback. Log: {log_path.resolve()}"
-                )
-        return HashingEmbedder(model_name=config.embedding_model)
+        raise RuntimeError(_embedder_runtime_error(config.embedding_model, model_dir, log_path=log_path)) from exc
+
+
+def _embedder_runtime_error(model_name: str, model_dir: Path, *, log_path: Path | None = None) -> str:
+    message = [
+        "Arignan requires the Python retrieval ML stack for embeddings; hashing fallback is disabled.",
+        f"Configured embedding model: {model_name}",
+        f"Expected local model directory: {model_dir}",
+        "Required packages in this Python environment: "
+        "transformers>=4.48,<4.50, accelerate>=0.30,<1, sentence-transformers>=3.0,<4",
+        "Arignan will not auto-install or change your existing Torch/CUDA setup.",
+        "If the model files are missing, rerun `python setup.py --app-home <your app home>`.",
+    ]
+    if log_path is not None:
+        message.append(f"See exception log: {log_path.resolve()}")
+    return " ".join(message)
+
+
+def _missing_embedder_model_error(model_name: str, model_dir: Path) -> str:
+    message = [
+        "Arignan could not find the cached embedding model files on disk.",
+        f"Configured embedding model: {model_name}",
+        f"Expected local model directory: {model_dir}",
+        "This is a model-cache problem, not proof that your Python packages are missing.",
+        "If you already installed the required Python packages, rerun `python setup.py --app-home <your app home>` to download the retrieval models into the app home.",
+        "Arignan will not auto-install or change your existing Torch/CUDA setup.",
+    ]
+    return " ".join(message)

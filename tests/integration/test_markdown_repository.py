@@ -212,6 +212,47 @@ def test_markdown_repository_grouped_topic_summary_reads_like_lookup_page(app_ho
     assert "Useful entry points" in summary_text or "Useful entry points inside the topic include" in summary_text
 
 
+def test_markdown_repository_writes_topic_graph_and_related_topic_links(app_home: Path) -> None:
+    layout = StorageLayout.from_home(app_home).ensure()
+    repository = MarkdownRepository()
+    first = _document(
+        app_home / "skipgram.md",
+        load_id="load-skipgram",
+        title="Skipgram Distributed Representations",
+        text=(
+            "Skipgram learns word representations from surrounding context words. "
+            "These notes focus on skipgram objectives and negative sampling."
+        ),
+        heading="Skipgram",
+    )
+    second = _document(
+        app_home / "word2vec.md",
+        load_id="load-word2vec",
+        title="Training Skipgrams",
+        text=(
+            "Word2Vec training often uses negative sampling and subsampling. "
+            "This page covers optimization details for skipgram training."
+        ),
+        heading="Word2Vec",
+    )
+    first.keywords = ["skipgram", "word2vec", "negative sampling"]
+    second.keywords = ["word2vec", "skipgram", "negative sampling"]
+    plan_a = GroupingPlan(decision=GroupingDecision.STANDALONE, topic_folder="skipgram", estimated_length=300)
+    plan_b = GroupingPlan(decision=GroupingDecision.STANDALONE, topic_folder="word2vec-training", estimated_length=300)
+
+    repository.write_topic(layout, hat="default", documents=[first], plan=plan_a)
+    repository.write_topic(layout, hat="default", documents=[second], plan=plan_b)
+
+    summary_text = (layout.hat("default").summaries_dir / "skipgram" / "summary.md").read_text(encoding="utf-8")
+    topic_index_text = (layout.hat("default").summaries_dir / "skipgram" / "topic_index.md").read_text(encoding="utf-8")
+    topic_graph = (layout.hat("default").topic_graph_path).read_text(encoding="utf-8")
+
+    assert "## Related Topics in This Hat" in summary_text
+    assert "[[word2vec-training|Training Skipgrams]]" in summary_text
+    assert "## Related Topics in This Hat" in topic_index_text
+    assert "\"word2vec-training\"" in topic_graph
+
+
 def test_derive_keywords_filters_page_noise_and_numbers() -> None:
     document = ParsedDocument(
         load_id="load-keywords",

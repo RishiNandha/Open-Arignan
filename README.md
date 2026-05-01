@@ -30,6 +30,7 @@
 - **Load and store knowledge over time**: Maybe software help docs as you discover them, research papers as you read them, personal notes, tutorial markdowns, textbooks, etc
 - **Session history**: For detailed prompting workflows where the user might choose to ask a series of questions
 - **User switches for topic/category**: For advanced users who might wear different "hats" and maintain different knowledge bases for each of them.
+- **Wiki-first knowledge organization**: Topic pages are maintained as auditable wiki markdowns with related-topic links so the knowledge base remains useful for both humans and LLMs.
 
 ### Technical
 
@@ -95,7 +96,9 @@ The ingestion log allows for deleting any past loads. An LLM-generated global ma
     |   |       |-- original_files/
     |   |       |-- summary.md
     |   |       |-- topic_index.md
-    |   |       `-- <optional_segment_markdowns>
+    |   |       |-- <optional_segment_markdowns>
+    |   |       `-- .topic_manifest.json
+    |   |-- topic_graph.json
     |   `-- map.md
     |-- <hat_name>/
     |   |-- vector_index/
@@ -105,17 +108,19 @@ The ingestion log allows for deleting any past loads. An LLM-generated global ma
     |   |       |-- original_files/
     |   |       |-- summary.md
     |   |       |-- topic_index.md
-    |   |       `-- <optional_segment_markdowns>
+    |   |       |-- <optional_segment_markdowns>
+    |   |       `-- .topic_manifest.json
+    |   |-- topic_graph.json
     |   `-- map.md
     `-- global_map.md
 ```
-In each `<topic_folder>`, the main wiki article page lives at `summary.md` and the compact lookup companion lives at `topic_index.md`.
+In each `<topic_folder>`, the main wiki article page lives at `summary.md`, the compact lookup companion lives at `topic_index.md`, and the manifest keeps grouped-source metadata explicit. Each hat also keeps a lightweight `topic_graph.json` so related topics can link to each other with confidence-scored backlinks.
 
 #### Knowledge-base Organization
 
 The summaries/ directory is LLM-organized and human-auditable. Each subfolder represents a topic grouping and the folder name inferred from the grouping decision.
 
-Each folder contains the original source file(s) and the generated wiki markdowns directly under the topic folder. The main wiki-style article page is `summary.md`, while `topic_index.md` is a lighter companion page for quick lookup cues, connections, and source coverage. If a topic becomes too large, the same topic folder can also contain additional segment markdowns. The system gives the LLM the flexibility to do grouping based on size and semantic relatedness:
+Each folder contains the original source file(s) and the generated wiki markdowns directly under the topic folder. The main wiki-style article page is `summary.md`, while `topic_index.md` is a lighter companion page for quick lookup cues, connections, source coverage, and related-topic links. If a topic becomes too large, the same topic folder can also contain additional segment markdowns. The system gives the LLM the flexibility to do grouping based on size and semantic relatedness:
 
 - **Related documents can be grouped in one folder**: For example: multiple papers on a related coherent topic JEPA can be summarized into one markdown in one folder
 - **Large documents can have multiple markdowns**: For example: Behzad Razavi RFIC Design might typically one per section
@@ -134,9 +139,11 @@ Each document ingestion is a tracked event with its own `load_id`. Accepted inpu
 Parsing for the vector index and keyword index are done using headings wherever possible, or with chunk size limits. The rules used are:
 
 - Prefer section-based chunking using detected headings
+- Treat common academic sections such as abstract, introduction, methods, experiments, results, and conclusion as stronger boundaries when parsing research PDFs
 - Fall back to text splitting for unstructured or long text
 - Maintain small overlap between adjacent chunks
 - Preserve metadata such as load_id, source path, section / header / page number
+- Enrich chunk text with lightweight local context so retrieval sees what document and section family a chunk came from
 
 #### Embedding
 
@@ -157,7 +164,7 @@ Grouping of files into a single topic or segmentation of a single file into mult
 **Grouping:**
 
 1. The system first writes provisional topic pages for the current load
-2. At the end of the load, the light local LLM reviews the full list of topic summaries in the hat and proposes possible groups with confidence scores
+2. At the end of the load, the main local LLM reviews the full list of topic summaries in the hat and proposes possible groups with confidence scores
 3. A proposed group is only applied if the confidence is high enough and the estimated combined markdown stays within `max_md_length`
 4. If topics are grouped, the wiki-style markdown is regenerated from the grouped sources
 
@@ -196,8 +203,9 @@ Using the Ingestion log, the files are remove, map.md is updated and the vector 
    - Descending down the maps retrieves the knowledge base markdown. (If the markdown is large, headings are treated as individual chunks).
 4. **Reciprocal Rank Fusion**: Chunks that appear in both Qdrant and BM25 are awarded higher score, and the rest are pruned
 5. **Cross-Encoder Reranking**: The chunks are reranked. This removes false positives, and removes irrelevant chunks from the markdown. Default cross-encoder used is `Alibaba-NLP/gte-reranker-modernbert-base`, while `--lightweight` setup uses `mixedbread-ai/mxbai-rerank-xsmall-v1`
-6. **Final Answer Mode**: `ask` can use the default local LLM, a lighter local LLM, deterministic retrieval synthesis, or a raw reranked-context dump via `--answer-mode default|light|none|raw`
-7. (To implement in future): Adjacent Content Expansion.
+6. **Wiki Links and Topic Graph**: Related-topic links and the per-hat topic graph give the retrieval flow additional wiki structure to descend through when grouped topics are close but not identical.
+7. **Final Answer Mode**: `ask` can use the default local LLM, a lighter local LLM, deterministic retrieval synthesis, or a raw reranked-context dump via `--answer-mode default|light|none|raw`
+8. (To implement in future): Adjacent Content Expansion.
 
 ### Session Scope
 
@@ -258,6 +266,10 @@ When the chat history is becoming too long:
 ## Declaration
 
 Some parts of the repository were generated using LLM-assisted coding applications. There may be potential mismatches between the features described in the README and the implementation. If you come across any, please raise an issue in the github repository!
+
+## Acknowledgements
+
+Some features are inspired by [Graphify](https://github.com/safishamsi/graphify) and [RAGFlow](https://github.com/infiniflow/ragflow).
 
 ## Feedback
 
