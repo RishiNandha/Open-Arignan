@@ -415,10 +415,10 @@ def test_application_uses_per_mode_answer_context_limits(app_home: Path, monkeyp
     )
     app = ArignanApp(load_config(app_home=app_home))
 
-    assert app._answer_context_limit("default") == 10
-    assert app._answer_context_limit("light") == 8
-    assert app._answer_context_limit("none") == 14
-    assert app._answer_context_limit("raw") == 14
+    assert app._answer_context_limit("default") == 3
+    assert app._answer_context_limit("light") == 3
+    assert app._answer_context_limit("none") == 5
+    assert app._answer_context_limit("raw") == 5
 
 
 def test_application_ask_falls_back_to_fused_hits_when_reranker_returns_none(app_home: Path, monkeypatch) -> None:

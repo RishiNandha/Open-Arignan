@@ -4,16 +4,21 @@ import io
 from pathlib import Path
 
 import httpx
+import pytest
 
 from arignan.llm.service import (
     bundled_ollama_executable,
+    describe_running_models,
     ensure_model_available,
+    release_running_models,
     ensure_service_running,
     is_service_ready,
     list_available_models,
+    list_running_models,
     managed_runtime_dir,
     provision_managed_runtime,
     resolve_ollama_executable,
+    unload_model,
 )
 
 
@@ -131,31 +136,21 @@ def test_ensure_service_running_does_not_override_models_dir_for_system_ollama(t
     executable = tmp_path / "existing" / "ollama.exe"
     executable.parent.mkdir(parents=True, exist_ok=True)
     executable.write_text("", encoding="utf-8")
-    calls: list[dict[str, object]] = []
-    readiness = iter([False, True])
-
-    class FakeProcess:
-        pid = 6543
-
-    monkeypatch.setattr("arignan.llm.service.is_service_ready", lambda endpoint, timeout_seconds=1.0: next(readiness))
+    monkeypatch.setattr("arignan.llm.service.is_service_ready", lambda endpoint, timeout_seconds=1.0: False)
     monkeypatch.setattr("arignan.llm.service.resolve_ollama_executable", lambda app_home: executable.resolve())
-    monkeypatch.setattr(
-        "arignan.llm.service.subprocess.Popen",
-        lambda command, **kwargs: calls.append({"command": command, "kwargs": kwargs}) or FakeProcess(),
-    )
 
-    ensure_service_running(
-        tmp_path,
-        "http://127.0.0.1:11434",
-        context_window=6144,
-        flash_attention=True,
-        kv_cache_type="q8_0",
-        num_parallel=1,
-        max_loaded_models=1,
-    )
+    with pytest.raises(RuntimeError) as exc_info:
+        ensure_service_running(
+            tmp_path,
+            "http://127.0.0.1:11434",
+            context_window=6144,
+            flash_attention=True,
+            kv_cache_type="q8_0",
+            num_parallel=1,
+            max_loaded_models=1,
+        )
 
-    env = calls[0]["kwargs"]["env"]
-    assert "OLLAMA_MODELS" not in env
+    assert "will not launch a separate system-Ollama daemon" in str(exc_info.value)
 
 
 def test_list_available_models_reads_tag_names(monkeypatch) -> None:
@@ -171,6 +166,88 @@ def test_list_available_models_reads_tag_names(monkeypatch) -> None:
     monkeypatch.setattr("arignan.llm.service.httpx.get", lambda *args, **kwargs: FakeResponse())
 
     assert list_available_models("http://127.0.0.1:11434") == {"qwen3:4b-q4_K_M", "other"}
+
+
+def test_list_available_models_reads_name_and_model_fields(monkeypatch) -> None:
+    class FakeResponse:
+        @staticmethod
+        def raise_for_status() -> None:
+            return None
+
+        @staticmethod
+        def json() -> dict[str, object]:
+            return {"models": [{"name": "gemma4:e2b"}, {"model": "qwen3:4b-q4_K_M"}]}
+
+    monkeypatch.setattr("arignan.llm.service.httpx.get", lambda *args, **kwargs: FakeResponse())
+
+    assert list_available_models("http://127.0.0.1:11434") == {"gemma4:e2b", "qwen3:4b-q4_K_M"}
+
+
+def test_list_running_models_reads_name_and_model_fields(monkeypatch) -> None:
+    class FakeResponse:
+        @staticmethod
+        def raise_for_status() -> None:
+            return None
+
+        @staticmethod
+        def json() -> dict[str, object]:
+            return {"models": [{"name": "gemma4:e2b"}, {"model": "qwen3:4b-q4_K_M"}]}
+
+    monkeypatch.setattr("arignan.llm.service.httpx.get", lambda *args, **kwargs: FakeResponse())
+
+    assert list_running_models("http://127.0.0.1:11434") == ["gemma4:e2b", "qwen3:4b-q4_K_M"]
+
+
+def test_release_running_models_unloads_each_non_excluded_model(monkeypatch) -> None:
+    released_requests: list[dict[str, object]] = []
+    progress: list[str] = []
+
+    monkeypatch.setattr(
+        "arignan.llm.service.list_running_models",
+        lambda endpoint: ["gemma4:e2b", "qwen3:4b-q4_K_M"],
+    )
+
+    class FakeResponse:
+        @staticmethod
+        def raise_for_status() -> None:
+            return None
+
+    monkeypatch.setattr(
+        "arignan.llm.service.httpx.post",
+        lambda url, json, timeout: released_requests.append({"url": url, "json": json, "timeout": timeout})
+        or FakeResponse(),
+    )
+
+    released = release_running_models(
+        "http://127.0.0.1:11434",
+        progress=progress.append,
+        exclude={"qwen3:4b-q4_K_M"},
+    )
+
+    assert released == ["gemma4:e2b"]
+    assert released_requests == [
+        {
+            "url": "http://127.0.0.1:11434/api/generate",
+            "json": {"model": "gemma4:e2b", "prompt": "", "stream": False, "keep_alive": 0},
+            "timeout": 30.0,
+        }
+    ]
+    assert progress == ["Unloaded local model runtime model 'gemma4:e2b' to recover memory."]
+
+
+def test_describe_running_models_includes_vram_usage(monkeypatch) -> None:
+    class FakeResponse:
+        @staticmethod
+        def raise_for_status() -> None:
+            return None
+
+        @staticmethod
+        def json() -> dict[str, object]:
+            return {"models": [{"name": "qwen3:4b-q4_K_M", "size_vram": 3221225472}]}
+
+    monkeypatch.setattr("arignan.llm.service.httpx.get", lambda *args, **kwargs: FakeResponse())
+
+    assert describe_running_models("http://127.0.0.1:11434") == ["qwen3:4b-q4_K_M (3.00 GiB VRAM)"]
 
 
 def test_is_service_ready_returns_false_on_http_error(monkeypatch) -> None:

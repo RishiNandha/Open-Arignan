@@ -7,6 +7,7 @@ import threading
 import time
 import uuid
 import webbrowser
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -102,6 +103,7 @@ class GuiTaskStore:
 def create_gui_app(app: ArignanApp) -> FastAPI:
     gui_app = FastAPI(title="Open Arignan GUI")
     task_store = GuiTaskStore()
+    task_lock = threading.Lock()
     frontend_dir = _frontend_dir()
     gui_app.mount("/gui-static", StaticFiles(directory=str(frontend_dir)), name="gui-static")
 
@@ -166,18 +168,16 @@ def create_gui_app(app: ArignanApp) -> FastAPI:
         task = task_store.create("load", "Scanning input for load...")
 
         def _runner() -> None:
-            task_app = _build_task_app(
-                app,
-                lambda message: task_store.update(task.task_id, _compact_gui_progress("load", message)),
-            )
+            progress_sink = lambda message: task_store.update(task.task_id, _compact_gui_progress("load", message))
             try:
-                result = task_app.load(str(batch_dir), hat=hat)
-                task_store.finish(task.task_id, _serialize_load_result(result, uploaded_files=written_files))
+                with _gui_task_context(app, task_lock, progress_sink):
+                    result = app.load(str(batch_dir), hat=hat)
+                    task_store.finish(task.task_id, _serialize_load_result(result, uploaded_files=written_files))
             except Exception as exc:
                 task_store.fail(
                     task.task_id,
                     _task_error_message(
-                        task_app,
+                        app,
                         component="gui",
                         task="load task",
                         exc=exc,
@@ -208,18 +208,16 @@ def create_gui_app(app: ArignanApp) -> FastAPI:
         task = task_store.create("ask", "Preparing question...")
 
         def _runner() -> None:
-            task_app = _build_task_app(
-                app,
-                lambda message: task_store.update(task.task_id, _compact_gui_progress("ask", message)),
-            )
+            progress_sink = lambda message: task_store.update(task.task_id, _compact_gui_progress("ask", message))
             try:
-                result = task_app.ask(question, hat=payload.hat, answer_mode=payload.answer_mode)
-                task_store.finish(task.task_id, _serialize_ask_result(result))
+                with _gui_task_context(app, task_lock, progress_sink):
+                    result = app.ask(question, hat=payload.hat, answer_mode=payload.answer_mode)
+                    task_store.finish(task.task_id, _serialize_ask_result(result))
             except Exception as exc:
                 task_store.fail(
                     task.task_id,
                     _task_error_message(
-                        task_app,
+                        app,
                         component="gui",
                         task="ask task",
                         exc=exc,
@@ -242,18 +240,16 @@ def create_gui_app(app: ArignanApp) -> FastAPI:
             task = task_store.create("delete", f"Deleting hat '{hat}'...")
 
             def _runner() -> None:
-                task_app = _build_task_app(
-                    app,
-                    lambda message: task_store.update(task.task_id, _compact_gui_progress("delete", message)),
-                )
+                progress_sink = lambda message: task_store.update(task.task_id, _compact_gui_progress("delete", message))
                 try:
-                    result = task_app.delete_hat(hat)
-                    task_store.finish(task.task_id, _serialize_delete_hat_result(result))
+                    with _gui_task_context(app, task_lock, progress_sink):
+                        result = app.delete_hat(hat)
+                        task_store.finish(task.task_id, _serialize_delete_hat_result(result))
                 except Exception as exc:
                     task_store.fail(
                         task.task_id,
                         _task_error_message(
-                            task_app,
+                            app,
                             component="gui",
                             task="delete hat task",
                             exc=exc,
@@ -271,18 +267,16 @@ def create_gui_app(app: ArignanApp) -> FastAPI:
         task = task_store.create("delete", "Deleting selected loads...")
 
         def _runner() -> None:
-            task_app = _build_task_app(
-                app,
-                lambda message: task_store.update(task.task_id, _compact_gui_progress("delete", message)),
-            )
+            progress_sink = lambda message: task_store.update(task.task_id, _compact_gui_progress("delete", message))
             try:
-                result = task_app.delete(load_ids)
-                task_store.finish(task.task_id, _serialize_delete_result(result))
+                with _gui_task_context(app, task_lock, progress_sink):
+                    result = app.delete(load_ids)
+                    task_store.finish(task.task_id, _serialize_delete_result(result))
             except Exception as exc:
                 task_store.fail(
                     task.task_id,
                     _task_error_message(
-                        task_app,
+                        app,
                         component="gui",
                         task="delete loads task",
                         exc=exc,
@@ -310,7 +304,7 @@ def run_gui(
 
     resolved_port = port or _find_free_port()
     config = load_config(settings_path=settings_path, app_home=app_home)
-    app = ArignanApp(config, terminal_pid=terminal_pid)
+    app = ArignanApp(config, progress_sink=_terminal_progress_sink(), terminal_pid=terminal_pid)
     gui_app = create_gui_app(app)
     url = f"http://{host}:{resolved_port}"
     print(f"[arignan] Opening GUI at {url}", flush=True)
@@ -362,12 +356,57 @@ async def _write_uploaded_files(batch_dir: Path, files: list[UploadFile]) -> lis
     return written_files
 
 
-def _build_task_app(app: ArignanApp, progress_sink) -> ArignanApp:
-    task_app = ArignanApp(app.config, progress_sink=progress_sink, terminal_pid=app.terminal_pid)
-    for name in ("load", "ask", "delete", "delete_hat", "list_ingestions"):
-        if name in app.__dict__:
-            setattr(task_app, name, getattr(app, name))
-    return task_app
+@contextmanager
+def _gui_task_context(app: ArignanApp, task_lock: threading.Lock, progress_sink):
+    with task_lock:
+        restore = _bind_progress_sink(app, _tee_progress(app.progress_sink, progress_sink))
+        try:
+            yield app
+        finally:
+            restore()
+
+
+def _terminal_progress_sink():
+    def _emit(message: str) -> None:
+        print(f"[arignan] {message}", flush=True)
+
+    return _emit
+
+
+def _tee_progress(*sinks):
+    def _emit(message: str) -> None:
+        for sink in sinks:
+            if sink is not None:
+                sink(message)
+
+    return _emit
+
+
+def _bind_progress_sink(app: ArignanApp, progress_sink):
+    original_app_sink = app.progress_sink
+    original_local_sink = getattr(app.local_text_generator, "progress_sink", None)
+    original_light_sink = getattr(app.light_text_generator, "progress_sink", None)
+    artifact_writer = getattr(app.markdown_repository, "artifact_writer", None)
+    original_writer_sink = getattr(artifact_writer, "progress_sink", None) if artifact_writer is not None else None
+
+    app.progress_sink = progress_sink
+    if hasattr(app.local_text_generator, "progress_sink"):
+        app.local_text_generator.progress_sink = progress_sink
+    if hasattr(app.light_text_generator, "progress_sink"):
+        app.light_text_generator.progress_sink = progress_sink
+    if artifact_writer is not None and hasattr(artifact_writer, "progress_sink"):
+        artifact_writer.progress_sink = progress_sink
+
+    def _restore() -> None:
+        app.progress_sink = original_app_sink
+        if hasattr(app.local_text_generator, "progress_sink"):
+            app.local_text_generator.progress_sink = original_local_sink
+        if hasattr(app.light_text_generator, "progress_sink"):
+            app.light_text_generator.progress_sink = original_light_sink
+        if artifact_writer is not None and hasattr(artifact_writer, "progress_sink"):
+            artifact_writer.progress_sink = original_writer_sink
+
+    return _restore
 
 
 def _serialize_load_result(result, *, uploaded_files: list[str]) -> dict[str, object]:

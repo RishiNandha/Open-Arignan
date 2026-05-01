@@ -154,6 +154,10 @@ class ArignanApp:
             progress_sink=self.progress_sink,
             model_name=config.local_llm_light_model,
         )
+        for generator in (self.local_text_generator, self.light_text_generator):
+            memory_recovery = getattr(generator, "memory_recovery", None)
+            if callable(memory_recovery) or hasattr(generator, "memory_recovery"):
+                setattr(generator, "memory_recovery", self._release_retrieval_gpu_memory)
         self.heuristic_artifact_writer = HeuristicArtifactWriter()
         self.provisional_markdown_repository = MarkdownRepository(artifact_writer=self.heuristic_artifact_writer)
         artifact_writer = LLMArtifactWriter(
@@ -486,6 +490,21 @@ class ArignanApp:
             deleted_load_ids=deleted_load_ids,
             deleted_topics=deleted_topics,
         )
+
+    def _release_retrieval_gpu_memory(self, reason: str) -> bool:
+        released = False
+        released_parts: list[str] = []
+        for label, component in (("embedding model", self.embedder), ("reranker", self.reranker)):
+            release = getattr(component, "release_device_memory", None)
+            if not callable(release):
+                continue
+            if release():
+                released = True
+                released_parts.append(label)
+        if released_parts:
+            joined = ", ".join(released_parts)
+            self._emit_progress(f"Released {joined} from CUDA after local LLM memory pressure ({reason}).")
+        return released
 
     def save_session(self, terminal_pid: int | None = None, destination: Path | None = None) -> Path:
         pid = terminal_pid or self.terminal_pid

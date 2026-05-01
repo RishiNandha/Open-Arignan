@@ -4,12 +4,13 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 from typing import Callable, Protocol
+import time
 
 import httpx
 
-from arignan.compute import preferred_torch_device
+from arignan.compute import format_torch_cuda_memory, preferred_torch_device
 from arignan.config import AppConfig
-from arignan.llm.service import ensure_model_available
+from arignan.llm.service import describe_running_models, ensure_model_available, release_running_models
 from arignan.model_registry import (
     infer_local_llm_backend,
     resolve_model_repo_id,
@@ -43,10 +44,12 @@ class LocalTextGenerator(Protocol):
 class OllamaTextGenerator:
     config: AppConfig
     progress_sink: Callable[[str], None] | None = None
+    memory_recovery: Callable[[str], bool] | None = None
     model_name: str = field(init=False)
     backend_name: str = field(init=False)
     _client: httpx.Client | None = field(default=None, init=False, repr=False)
     _model_ready: bool = field(default=False, init=False, repr=False)
+    _gpu_reported: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.model_name = resolve_ollama_model_id(self.config.local_llm_model)
@@ -93,22 +96,36 @@ class OllamaTextGenerator:
             payload["format"] = response_format
         if _supports_no_think(self.model_name):
             payload["think"] = False
-        try:
-            response = client.post(endpoint, json=payload)
-            response.raise_for_status()
-        except httpx.ConnectError as exc:
-            raise RuntimeError(
-                f"failed to reach the local model runtime at {self.config.local_llm_endpoint}. "
-                "Re-run setup if the managed runtime was not provisioned correctly."
-            ) from exc
-        except httpx.HTTPError as exc:
-            details = exc.response.text if exc.response is not None else str(exc)
-            raise RuntimeError(f"local model runtime request failed for model {self.model_name}: {details}") from exc
+        last_http_error: httpx.HTTPError | None = None
+        last_details = ""
+        for attempt in range(2):
+            try:
+                response = client.post(endpoint, json=payload)
+                response.raise_for_status()
+                break
+            except httpx.ConnectError as exc:
+                raise RuntimeError(
+                    f"failed to reach the local model runtime at {self.config.local_llm_endpoint}. "
+                    "Re-run setup if the managed runtime was not provisioned correctly."
+                ) from exc
+            except httpx.HTTPError as exc:
+                details = exc.response.text if exc.response is not None else str(exc)
+                if attempt == 0 and self._recover_from_memory_pressure(details):
+                    time.sleep(0.5)
+                    continue
+                last_http_error = exc
+                last_details = details
+                break
+        else:  # pragma: no cover - loop always breaks or continues into second iteration
+            response = None
+        if last_http_error is not None:
+            raise RuntimeError(f"local model runtime request failed for model {self.model_name}: {last_details}") from last_http_error
 
         try:
             payload = response.json()
         except ValueError as exc:
             raise RuntimeError("Ollama returned a non-JSON response") from exc
+        self._report_gpu_state_once()
         content = payload.get("message", {}).get("content")
         if not isinstance(content, str) or not content.strip():
             raise RuntimeError(f"Ollama returned an empty response for model {self.model_name}")
@@ -118,6 +135,46 @@ class OllamaTextGenerator:
         if self._client is None:
             self._client = httpx.Client(timeout=self.config.local_llm_timeout_seconds)
         return self._client
+
+    def _recover_from_memory_pressure(self, details: str) -> bool:
+        if not _is_ollama_memory_pressure(details):
+            return False
+        self._emit_progress(
+            f"Local model '{self.model_name}' hit a memory limit; releasing CUDA retrieval state and retrying once..."
+        )
+        recovered = False
+        if self.memory_recovery is not None and self.memory_recovery(details):
+            recovered = True
+        try:
+            released_models = release_running_models(
+                self.config.local_llm_endpoint,
+                progress=self.progress_sink,
+                exclude={self.model_name},
+            )
+        except httpx.HTTPError:
+            released_models = []
+        if released_models:
+            recovered = True
+        return recovered
+
+    def _emit_progress(self, message: str) -> None:
+        if self.progress_sink is not None:
+            self.progress_sink(message)
+
+    def _report_gpu_state_once(self) -> None:
+        if self._gpu_reported:
+            return
+        self._gpu_reported = True
+        descriptions: list[str] = []
+        try:
+            descriptions = describe_running_models(self.config.local_llm_endpoint)
+        except httpx.HTTPError:
+            descriptions = []
+        if descriptions:
+            self._emit_progress("Ollama GPU state: " + ", ".join(descriptions))
+        message = format_torch_cuda_memory(f"GPU after first LLM response ({self.model_name})")
+        if message:
+            self._emit_progress(message)
 
 
 @dataclass(slots=True)
@@ -336,3 +393,13 @@ def _strip_think_blocks(text: str) -> str:
     cleaned = re.sub(r"<think>.*?</think>", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
     cleaned = re.sub(r"<thinking>.*?</thinking>", "", cleaned, flags=re.DOTALL | re.IGNORECASE)
     return cleaned.strip()
+
+
+def _is_ollama_memory_pressure(details: str) -> bool:
+    normalized = details.lower()
+    return (
+        "requires more system memory" in normalized
+        or "out of memory" in normalized
+        or "insufficient memory" in normalized
+        or "cuda out of memory" in normalized
+    )

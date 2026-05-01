@@ -11,6 +11,8 @@ from arignan.model_registry import (
     DEFAULT_LIGHT_LOCAL_LLM_REPO_ID,
     DEFAULT_LOCAL_LLM_REPO_ID,
     DEFAULT_RERANKER_MODEL_REPO_ID,
+    LEGACY_EMBEDDING_MODEL_REPO_ID,
+    LEGACY_MODERNBERT_RERANKER_MODEL_REPO_ID,
     infer_local_llm_backend,
 )
 from arignan.paths import resolve_app_home, resolve_settings_path
@@ -20,21 +22,21 @@ APP_HOME_ENV = "ARIGNAN_HOME"
 
 @dataclass(slots=True)
 class ChunkingConfig:
-    chunk_size: int = 4200
-    chunk_overlap: int = 120
+    chunk_size: int = 5600
+    chunk_overlap: int = 80
 
 
 @dataclass(slots=True)
 class RetrievalConfig:
-    dense_top_k: int = 16
-    lexical_top_k: int = 16
-    map_top_k: int = 8
-    fused_top_k: int = 24
-    rerank_top_k: int = 16
-    answer_context_top_k_default: int = 10
-    answer_context_top_k_light: int = 8
-    answer_context_top_k_none: int = 14
-    answer_context_top_k_raw: int = 14
+    dense_top_k: int = 8
+    lexical_top_k: int = 8
+    map_top_k: int = 3
+    fused_top_k: int = 8
+    rerank_top_k: int = 3
+    answer_context_top_k_default: int = 3
+    answer_context_top_k_light: int = 3
+    answer_context_top_k_none: int = 5
+    answer_context_top_k_raw: int = 5
 
 
 @dataclass(slots=True)
@@ -115,6 +117,11 @@ def load_config(
 
     if "local_llm_backend" not in raw:
         raw["local_llm_backend"] = infer_local_llm_backend(raw.get("local_llm_model"), default=config.local_llm_backend)
+
+    if raw.get("embedding_model") == LEGACY_EMBEDDING_MODEL_REPO_ID:
+        raw["embedding_model"] = DEFAULT_EMBEDDING_MODEL_REPO_ID
+    if raw.get("reranker_model") == LEGACY_MODERNBERT_RERANKER_MODEL_REPO_ID:
+        raw["reranker_model"] = DEFAULT_RERANKER_MODEL_REPO_ID
 
     if "app_home" in raw:
         raw["app_home"] = Path(raw["app_home"])

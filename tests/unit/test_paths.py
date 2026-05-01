@@ -39,19 +39,12 @@ def test_resolve_app_home_uses_persisted_pointer(tmp_path: Path, monkeypatch) ->
     assert resolved == persisted_home.resolve()
 
 
-def test_resolve_app_home_falls_back_to_user_home() -> None:
-    original_home = Path.home
-    tmp_home = Path.cwd() / ".tmp-test-home"
-    tmp_home.mkdir(parents=True, exist_ok=True)
-    Path.home = staticmethod(lambda: tmp_home)
+def test_resolve_app_home_falls_back_to_user_home(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
     resolved = resolve_app_home(environ={})
-    try:
-        assert resolved.name == DEFAULT_HOME_DIRNAME
-    finally:
-        pointer = tmp_home / APP_HOME_POINTER_FILENAME
-        if pointer.exists():
-            pointer.unlink()
-        Path.home = original_home
+
+    assert resolved == (tmp_path / DEFAULT_HOME_DIRNAME).resolve()
 
 
 def test_pointer_helpers_round_trip(tmp_path: Path, monkeypatch) -> None:

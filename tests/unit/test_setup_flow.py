@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+from importlib import metadata
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,7 @@ from arignan.setup_flow import (
     resolve_ollama_model_id,
     resolve_model_repo_id,
     sanitize_model_id,
+    verify_required_ml_runtime,
 )
 
 
@@ -31,7 +33,7 @@ def test_install_target_switches_for_dev() -> None:
     assert install_target(dev=True) == ".[dev]"
 
 
-def test_install_package_uses_standard_pip_build_isolation(tmp_path: Path, monkeypatch) -> None:
+def test_install_package_uses_no_deps_to_avoid_resolving_user_environment(tmp_path: Path, monkeypatch) -> None:
     calls: list[tuple[list[str], Path, bool]] = []
 
     def fake_run(command, cwd=None, check=None):
@@ -45,7 +47,11 @@ def test_install_package_uses_standard_pip_build_isolation(tmp_path: Path, monke
 
     assert target == ".[dev]"
     assert calls == [
-        ([str((tmp_path / "python.exe").resolve()), "-m", "pip", "install", ".[dev]"], tmp_path.resolve(), True)
+        (
+            [str((tmp_path / "python.exe").resolve()), "-m", "pip", "install", "--no-deps", ".[dev]"],
+            tmp_path.resolve(),
+            True,
+        )
     ]
 
 
@@ -81,8 +87,8 @@ def test_render_summary_mentions_next_steps(tmp_path: Path) -> None:
         local_llm_backend="ollama",
         local_llm_model="qwen3:4b-q4_K_M",
         local_llm_light_model="qwen3:0.6b",
-        embedding_model="Alibaba-NLP/gte-modernbert-base",
-        reranker_model="Alibaba-NLP/gte-reranker-modernbert-base",
+        embedding_model="BAAI/bge-base-en-v1.5",
+        reranker_model="mixedbread-ai/mxbai-rerank-base-v1",
         bin_dir=tmp_path / "bin",
         windows_launcher=tmp_path / "bin" / "arignan.cmd",
         posix_launcher=tmp_path / "bin" / "arignan",
@@ -101,144 +107,153 @@ def test_display_path_strips_windows_extended_prefix() -> None:
 
 
 def test_sanitize_model_id_normalizes_paths() -> None:
-    assert sanitize_model_id("Alibaba-NLP/gte-modernbert-base") == "Alibaba-NLP__gte-modernbert-base"
+    assert sanitize_model_id("BAAI/bge-base-en-v1.5") == "BAAI__bge-base-en-v1.5"
 
 
 def test_resolve_model_repo_id_maps_readme_default() -> None:
     assert resolve_model_repo_id("Qwen3-1.7B") == "Qwen/Qwen3-1.7B"
     assert resolve_model_repo_id("Qwen/Qwen3-1.7B") == "Qwen/Qwen3-1.7B"
-    assert resolve_model_repo_id("Alibaba-NLP/gte-modernbert-base") == "Alibaba-NLP/gte-modernbert-base"
+    assert resolve_model_repo_id("BAAI/bge-base-en-v1.5") == "BAAI/bge-base-en-v1.5"
 
 
-def test_initialize_local_state_can_override_local_llm_model(tmp_path: Path) -> None:
-    original_home = Path.home
-    Path.home = staticmethod(lambda: tmp_path)
-    try:
-        app_home, settings_path = initialize_local_state(
-            app_home=tmp_path / ".arignan",
-            local_llm_backend="ollama",
-            local_llm_model="qwen3:4b-q4_K_M",
-        )
+def test_initialize_local_state_can_override_local_llm_model(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-        payload = json.loads(settings_path.read_text(encoding="utf-8"))
+    app_home, settings_path = initialize_local_state(
+        app_home=tmp_path / ".arignan",
+        local_llm_backend="ollama",
+        local_llm_model="qwen3:4b-q4_K_M",
+    )
 
-        assert app_home == (tmp_path / ".arignan").resolve()
-        assert payload["local_llm_backend"] == "ollama"
-        assert payload["local_llm_model"] == "qwen3:4b-q4_K_M"
-        assert payload["local_llm_light_model"] == "qwen3:0.6b"
-        assert payload["local_llm_context_window"] == 6144
-        assert payload["local_llm_flash_attention"] is True
-        assert payload["local_llm_kv_cache_type"] == "q8_0"
-        assert payload["embedding_model"] == "Alibaba-NLP/gte-modernbert-base"
-        assert payload["reranker_model"] == "Alibaba-NLP/gte-reranker-modernbert-base"
-        assert read_persisted_app_home() == (tmp_path / ".arignan").resolve()
-    finally:
-        Path.home = original_home
+    payload = json.loads(settings_path.read_text(encoding="utf-8"))
+
+    assert app_home == (tmp_path / ".arignan").resolve()
+    assert payload["local_llm_backend"] == "ollama"
+    assert payload["local_llm_model"] == "qwen3:4b-q4_K_M"
+    assert payload["local_llm_light_model"] == "qwen3:0.6b"
+    assert payload["local_llm_context_window"] == 6144
+    assert payload["local_llm_flash_attention"] is True
+    assert payload["local_llm_kv_cache_type"] == "q8_0"
+    assert payload["embedding_model"] == "BAAI/bge-base-en-v1.5"
+    assert payload["reranker_model"] == "mixedbread-ai/mxbai-rerank-base-v1"
+    assert read_persisted_app_home() == (tmp_path / ".arignan").resolve()
 
 
-def test_initialize_local_state_can_pin_lightweight_full_model(tmp_path: Path) -> None:
-    original_home = Path.home
-    Path.home = staticmethod(lambda: tmp_path)
-    try:
-        _, settings_path = initialize_local_state(
-            app_home=tmp_path / ".arignan",
-            local_llm_backend="ollama",
-            local_llm_model="qwen3:0.6b",
-            local_llm_light_model="qwen3:0.6b",
-            embedding_model="BAAI/bge-small-en-v1.5",
-            reranker_model="mixedbread-ai/mxbai-rerank-xsmall-v1",
-        )
+def test_initialize_local_state_can_pin_lightweight_full_model(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-        payload = json.loads(settings_path.read_text(encoding="utf-8"))
+    _, settings_path = initialize_local_state(
+        app_home=tmp_path / ".arignan",
+        local_llm_backend="ollama",
+        local_llm_model="qwen3:0.6b",
+        local_llm_light_model="qwen3:0.6b",
+        embedding_model="BAAI/bge-small-en-v1.5",
+        reranker_model="mixedbread-ai/mxbai-rerank-xsmall-v1",
+    )
 
-        assert payload["local_llm_model"] == "qwen3:0.6b"
-        assert payload["local_llm_light_model"] == "qwen3:0.6b"
-        assert payload["embedding_model"] == "BAAI/bge-small-en-v1.5"
-        assert payload["reranker_model"] == "mixedbread-ai/mxbai-rerank-xsmall-v1"
-    finally:
-        Path.home = original_home
+    payload = json.loads(settings_path.read_text(encoding="utf-8"))
+
+    assert payload["local_llm_model"] == "qwen3:0.6b"
+    assert payload["local_llm_light_model"] == "qwen3:0.6b"
+    assert payload["embedding_model"] == "BAAI/bge-small-en-v1.5"
+    assert payload["reranker_model"] == "mixedbread-ai/mxbai-rerank-xsmall-v1"
 
 
-def test_initialize_local_state_refreshes_existing_settings_to_current_defaults(tmp_path: Path) -> None:
-    original_home = Path.home
-    Path.home = staticmethod(lambda: tmp_path)
-    try:
-        app_home = tmp_path / ".arignan"
-        settings_path = write_default_settings(app_home=app_home)
-        payload = json.loads(settings_path.read_text(encoding="utf-8"))
-        payload["local_llm_backend"] = "transformers"
-        payload["local_llm_model"] = "some-custom-old-model"
-        payload["local_llm_light_model"] = "another-old-model"
-        payload["embedding_model"] = "legacy-embedding"
-        payload["reranker_model"] = "legacy-reranker"
-        settings_path.write_text(json.dumps(payload), encoding="utf-8")
+def test_initialize_local_state_refreshes_existing_settings_to_current_defaults(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-        _, refreshed_settings_path = initialize_local_state(app_home=app_home)
+    app_home = tmp_path / ".arignan"
+    settings_path = write_default_settings(app_home=app_home)
+    payload = json.loads(settings_path.read_text(encoding="utf-8"))
+    payload["local_llm_backend"] = "transformers"
+    payload["local_llm_model"] = "some-custom-old-model"
+    payload["local_llm_light_model"] = "another-old-model"
+    payload["embedding_model"] = "legacy-embedding"
+    payload["reranker_model"] = "legacy-reranker"
+    settings_path.write_text(json.dumps(payload), encoding="utf-8")
 
-        refreshed = json.loads(refreshed_settings_path.read_text(encoding="utf-8"))
-        assert refreshed["local_llm_backend"] == "ollama"
-        assert refreshed["local_llm_model"] == "qwen3:4b-q4_K_M"
-        assert refreshed["local_llm_light_model"] == "qwen3:0.6b"
-        assert refreshed["local_llm_context_window"] == 6144
-        assert refreshed["local_llm_flash_attention"] is True
-        assert refreshed["embedding_model"] == "Alibaba-NLP/gte-modernbert-base"
-        assert refreshed["reranker_model"] == "Alibaba-NLP/gte-reranker-modernbert-base"
-    finally:
-        Path.home = original_home
+    _, refreshed_settings_path = initialize_local_state(app_home=app_home)
+
+    refreshed = json.loads(refreshed_settings_path.read_text(encoding="utf-8"))
+    assert refreshed["local_llm_backend"] == "ollama"
+    assert refreshed["local_llm_model"] == "qwen3:4b-q4_K_M"
+    assert refreshed["local_llm_light_model"] == "qwen3:0.6b"
+    assert refreshed["local_llm_context_window"] == 6144
+    assert refreshed["local_llm_flash_attention"] is True
+    assert refreshed["embedding_model"] == "BAAI/bge-base-en-v1.5"
+    assert refreshed["reranker_model"] == "mixedbread-ai/mxbai-rerank-base-v1"
 
 
-def test_initialize_local_state_can_keep_existing_settings_when_not_refreshing(tmp_path: Path) -> None:
-    original_home = Path.home
-    Path.home = staticmethod(lambda: tmp_path)
-    try:
-        app_home = tmp_path / ".arignan"
-        settings_path = write_default_settings(app_home=app_home)
-        payload = json.loads(settings_path.read_text(encoding="utf-8"))
-        payload["local_llm_backend"] = "ollama"
-        payload["local_llm_model"] = "custom-main"
-        payload["local_llm_light_model"] = "custom-light"
-        settings_path.write_text(json.dumps(payload), encoding="utf-8")
+def test_initialize_local_state_migrates_legacy_modernbert_defaults_when_not_refreshing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-        _, preserved_settings_path = initialize_local_state(
-            app_home=app_home,
-            refresh_existing=False,
-        )
+    app_home = tmp_path / ".arignan"
+    settings_path = write_default_settings(app_home=app_home)
+    payload = json.loads(settings_path.read_text(encoding="utf-8"))
+    payload["embedding_model"] = "Alibaba-NLP/gte-modernbert-base"
+    payload["reranker_model"] = "Alibaba-NLP/gte-reranker-modernbert-base"
+    settings_path.write_text(json.dumps(payload), encoding="utf-8")
 
-        preserved = json.loads(preserved_settings_path.read_text(encoding="utf-8"))
-        assert preserved["local_llm_model"] == "custom-main"
-        assert preserved["local_llm_light_model"] == "custom-light"
-    finally:
-        Path.home = original_home
+    _, migrated_settings_path = initialize_local_state(
+        app_home=app_home,
+        refresh_existing=False,
+    )
+
+    migrated = json.loads(migrated_settings_path.read_text(encoding="utf-8"))
+    assert migrated["embedding_model"] == "BAAI/bge-base-en-v1.5"
+    assert migrated["reranker_model"] == "mixedbread-ai/mxbai-rerank-base-v1"
 
 
-def test_initialize_local_state_keeps_existing_user_settings_payload_when_not_refreshing(tmp_path: Path) -> None:
-    original_home = Path.home
-    Path.home = staticmethod(lambda: tmp_path)
-    try:
-        app_home = tmp_path / ".arignan"
-        settings_path = write_default_settings(app_home=app_home)
-        payload = json.loads(settings_path.read_text(encoding="utf-8"))
-        payload["local_llm_backend"] = "ollama"
-        payload["local_llm_model"] = "custom-main"
-        payload["local_llm_light_model"] = "custom-light"
-        payload["default_hat"] = "SNNs"
-        payload["retrieval"]["dense_top_k"] = 99
-        payload["session"]["soft_token_limit"] = 12345
-        settings_path.write_text(json.dumps(payload), encoding="utf-8")
+def test_initialize_local_state_can_keep_existing_settings_when_not_refreshing(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-        _, preserved_settings_path = initialize_local_state(
-            app_home=app_home,
-            refresh_existing=False,
-        )
+    app_home = tmp_path / ".arignan"
+    settings_path = write_default_settings(app_home=app_home)
+    payload = json.loads(settings_path.read_text(encoding="utf-8"))
+    payload["local_llm_backend"] = "ollama"
+    payload["local_llm_model"] = "custom-main"
+    payload["local_llm_light_model"] = "custom-light"
+    settings_path.write_text(json.dumps(payload), encoding="utf-8")
 
-        preserved = json.loads(preserved_settings_path.read_text(encoding="utf-8"))
-        assert preserved["local_llm_model"] == "custom-main"
-        assert preserved["local_llm_light_model"] == "custom-light"
-        assert preserved["default_hat"] == "SNNs"
-        assert preserved["retrieval"]["dense_top_k"] == 99
-        assert preserved["session"]["soft_token_limit"] == 12345
-    finally:
-        Path.home = original_home
+    _, preserved_settings_path = initialize_local_state(
+        app_home=app_home,
+        refresh_existing=False,
+    )
+
+    preserved = json.loads(preserved_settings_path.read_text(encoding="utf-8"))
+    assert preserved["local_llm_model"] == "custom-main"
+    assert preserved["local_llm_light_model"] == "custom-light"
+
+
+def test_initialize_local_state_keeps_existing_user_settings_payload_when_not_refreshing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    app_home = tmp_path / ".arignan"
+    settings_path = write_default_settings(app_home=app_home)
+    payload = json.loads(settings_path.read_text(encoding="utf-8"))
+    payload["local_llm_backend"] = "ollama"
+    payload["local_llm_model"] = "custom-main"
+    payload["local_llm_light_model"] = "custom-light"
+    payload["default_hat"] = "SNNs"
+    payload["retrieval"]["dense_top_k"] = 99
+    payload["session"]["soft_token_limit"] = 12345
+    settings_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    _, preserved_settings_path = initialize_local_state(
+        app_home=app_home,
+        refresh_existing=False,
+    )
+
+    preserved = json.loads(preserved_settings_path.read_text(encoding="utf-8"))
+    assert preserved["local_llm_model"] == "custom-main"
+    assert preserved["local_llm_light_model"] == "custom-light"
+    assert preserved["default_hat"] == "SNNs"
+    assert preserved["retrieval"]["dense_top_k"] == 99
+    assert preserved["session"]["soft_token_limit"] == 12345
 
 
 def test_inspect_app_home_detects_existing_arignan_layout(tmp_path: Path) -> None:
@@ -339,12 +354,12 @@ def test_download_required_models_pulls_default_ollama_model(tmp_path: Path, mon
         "local_llm_backend": "ollama",
         "local_llm_model": "qwen3:4b-q4_K_M",
         "local_llm_light_model": "qwen3:0.6b",
-        "embedding_model": "Alibaba-NLP/gte-modernbert-base",
-        "reranker_model": "Alibaba-NLP/gte-reranker-modernbert-base",
+        "embedding_model": "BAAI/bge-base-en-v1.5",
+        "reranker_model": "mixedbread-ai/mxbai-rerank-base-v1",
     }
     assert [repo_id for repo_id, _, _ in downloaded_transformer_models] == [
-        "Alibaba-NLP/gte-modernbert-base",
-        "Alibaba-NLP/gte-reranker-modernbert-base",
+        "BAAI/bge-base-en-v1.5",
+        "mixedbread-ai/mxbai-rerank-base-v1",
     ]
 
 
@@ -404,3 +419,36 @@ def test_emit_forwards_progress_messages() -> None:
     _emit(messages.append, "[1/4] Installing Python package...")
 
     assert messages == ["[1/4] Installing Python package..."]
+
+
+def test_verify_required_ml_runtime_raises_clear_error_when_stack_missing(monkeypatch) -> None:
+    def fake_version(name: str) -> str:
+        if name == "transformers":
+            raise metadata.PackageNotFoundError(name)
+        return {
+            "accelerate": "0.34.2",
+            "sentence-transformers": "3.1.1",
+        }[name]
+
+    monkeypatch.setattr("arignan.setup_flow.metadata.version", fake_version)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        verify_required_ml_runtime()
+
+    message = str(exc_info.value)
+    assert "requires the Python retrieval ML stack" in message
+    assert 'transformers>=4.48,<4.50' in message
+    assert "will not auto-install or rewrite your existing Torch/CUDA setup" in message
+
+
+def test_verify_required_ml_runtime_accepts_installed_version_ranges(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "arignan.setup_flow.metadata.version",
+        lambda name: {
+            "transformers": "4.49.0",
+            "accelerate": "0.34.2",
+            "sentence-transformers": "3.1.1",
+        }[name],
+    )
+
+    verify_required_ml_runtime()

@@ -82,25 +82,33 @@ def ensure_service_running(
     if is_service_ready(endpoint):
         return
     executable = resolve_ollama_executable(app_home)
+    bundled_executable = bundled_ollama_executable(app_home).resolve()
+    if executable != bundled_executable:
+        raise RuntimeError(
+            "A system Ollama installation was found on PATH, but no running Ollama service was reachable at "
+            f"{endpoint}. Arignan will not launch a separate system-Ollama daemon during setup or model preparation, "
+            "because that can point at a different model store than the one your existing Ollama app is using. "
+            "Start your normal Ollama app/service first, then rerun the command."
+        )
     log_dir = managed_runtime_logs_dir(app_home)
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "service.log"
     pid_path = managed_runtime_dir(app_home) / "service.pid"
     _emit(progress, "Starting local model runtime...")
     env = os.environ.copy()
-    if executable == bundled_ollama_executable(app_home).resolve():
+    if executable == bundled_executable:
         env["OLLAMA_MODELS"] = str((app_home / "models").resolve())
-    env["OLLAMA_HOST"] = _ollama_host(endpoint)
-    if flash_attention:
-        env["OLLAMA_FLASH_ATTENTION"] = "1"
-    if isinstance(context_window, int) and context_window > 0:
-        env["OLLAMA_CONTEXT_LENGTH"] = str(context_window)
-    if kv_cache_type:
-        env["OLLAMA_KV_CACHE_TYPE"] = kv_cache_type
-    if isinstance(num_parallel, int) and num_parallel > 0:
-        env["OLLAMA_NUM_PARALLEL"] = str(num_parallel)
-    if isinstance(max_loaded_models, int) and max_loaded_models > 0:
-        env["OLLAMA_MAX_LOADED_MODELS"] = str(max_loaded_models)
+        env["OLLAMA_HOST"] = _ollama_host(endpoint)
+        if flash_attention:
+            env["OLLAMA_FLASH_ATTENTION"] = "1"
+        if isinstance(context_window, int) and context_window > 0:
+            env["OLLAMA_CONTEXT_LENGTH"] = str(context_window)
+        if kv_cache_type:
+            env["OLLAMA_KV_CACHE_TYPE"] = kv_cache_type
+        if isinstance(num_parallel, int) and num_parallel > 0:
+            env["OLLAMA_NUM_PARALLEL"] = str(num_parallel)
+        if isinstance(max_loaded_models, int) and max_loaded_models > 0:
+            env["OLLAMA_MAX_LOADED_MODELS"] = str(max_loaded_models)
     handle = log_path.open("a", encoding="utf-8")
     try:
         process = subprocess.Popen(
@@ -170,10 +178,77 @@ def list_available_models(endpoint: str) -> set[str]:
         return names
     for item in models:
         if isinstance(item, dict):
-            name = item.get("name")
-            if isinstance(name, str):
-                names.add(name)
+            for key in ("name", "model"):
+                value = item.get(key)
+                if isinstance(value, str):
+                    names.add(value)
     return names
+
+
+def list_running_models(endpoint: str) -> list[str]:
+    response = httpx.get(endpoint.rstrip("/") + "/api/ps", timeout=5.0)
+    response.raise_for_status()
+    payload = response.json()
+    models = payload.get("models", [])
+    names: list[str] = []
+    if not isinstance(models, list):
+        return names
+    for item in models:
+        if not isinstance(item, dict):
+            continue
+        for key in ("name", "model"):
+            value = item.get(key)
+            if isinstance(value, str) and value not in names:
+                names.append(value)
+    return names
+
+
+def unload_model(endpoint: str, model: str) -> None:
+    response = httpx.post(
+        endpoint.rstrip("/") + "/api/generate",
+        json={"model": model, "prompt": "", "stream": False, "keep_alive": 0},
+        timeout=30.0,
+    )
+    response.raise_for_status()
+
+
+def release_running_models(
+    endpoint: str,
+    *,
+    progress: Callable[[str], None] | None = None,
+    exclude: set[str] | None = None,
+) -> list[str]:
+    excluded = exclude or set()
+    released: list[str] = []
+    for model in list_running_models(endpoint):
+        if model in excluded:
+            continue
+        unload_model(endpoint, model)
+        released.append(model)
+        _emit(progress, f"Unloaded local model runtime model '{model}' to recover memory.")
+    return released
+
+
+def describe_running_models(endpoint: str) -> list[str]:
+    response = httpx.get(endpoint.rstrip("/") + "/api/ps", timeout=5.0)
+    response.raise_for_status()
+    payload = response.json()
+    models = payload.get("models", [])
+    descriptions: list[str] = []
+    if not isinstance(models, list):
+        return descriptions
+    for item in models:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name") or item.get("model")
+        if not isinstance(name, str) or not name:
+            continue
+        size_vram = item.get("size_vram")
+        if isinstance(size_vram, (int, float)):
+            descriptions.append(f"{name} ({float(size_vram) / (1024 ** 3):.2f} GiB VRAM)")
+            continue
+        descriptions.append(name)
+    return descriptions
 
 
 def is_service_ready(endpoint: str, timeout_seconds: float = 1.0) -> bool:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 import sys
+import traceback
 
 from setuptools import setup as setuptools_setup
 
@@ -94,6 +95,7 @@ def main() -> int:
             choose_app_home_action=_choose_app_home_action,
         )
     except Exception as exc:
+        traceback.print_exc()
         print(f"[error] {exc}", file=sys.stderr)
         return 1
     print(render_summary(result))

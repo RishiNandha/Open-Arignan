@@ -6,7 +6,9 @@ import shutil
 import stat
 import subprocess
 import sys
+from importlib import metadata
 from dataclasses import dataclass
+from packaging.specifiers import SpecifierSet
 from pathlib import Path
 from typing import Callable
 
@@ -19,6 +21,8 @@ from arignan.model_registry import (
     DEFAULT_LIGHT_LOCAL_LLM_REPO_ID,
     DEFAULT_LIGHT_RERANKER_MODEL_REPO_ID,
     DEFAULT_RERANKER_MODEL_REPO_ID,
+    LEGACY_EMBEDDING_MODEL_REPO_ID,
+    LEGACY_MODERNBERT_RERANKER_MODEL_REPO_ID,
     LEGACY_TRANSFORMERS_LOCAL_LLM_DISPLAY_NAME,
     LEGACY_TRANSFORMERS_LOCAL_LLM_REPO_ID,
     LEGACY_RERANKER_MODEL_REPO_ID,
@@ -27,6 +31,12 @@ from arignan.model_registry import (
     resolve_model_repo_id,
     sanitize_model_id,
 )
+
+REQUIRED_ML_PACKAGES: dict[str, str] = {
+    "transformers": ">=4.48,<4.50",
+    "accelerate": ">=0.30,<1",
+    "sentence-transformers": ">=3.0,<4",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,11 +83,35 @@ def install_package(root: Path | None = None, dev: bool = False) -> str:
     resolved_root = (root or repo_root()).resolve()
     target = install_target(dev=dev)
     subprocess.run(
-        [sys.executable, "-m", "pip", "install", target],
+        [sys.executable, "-m", "pip", "install", "--no-deps", target],
         cwd=resolved_root,
         check=True,
     )
     return target
+
+
+def verify_required_ml_runtime() -> None:
+    missing_or_incompatible: list[str] = []
+    for package_name, spec in REQUIRED_ML_PACKAGES.items():
+        try:
+            version = metadata.version(package_name)
+        except metadata.PackageNotFoundError:
+            missing_or_incompatible.append(f"{package_name}{spec}")
+            continue
+        if version not in SpecifierSet(spec):
+            missing_or_incompatible.append(f"{package_name}{spec} (found {version})")
+    if not missing_or_incompatible:
+        return
+    install_parts = [f'"{name}{spec}"' for name, spec in REQUIRED_ML_PACKAGES.items()]
+    raise RuntimeError(
+        "Arignan setup requires the Python retrieval ML stack in this environment. "
+        "Missing or incompatible packages: "
+        + ", ".join(missing_or_incompatible)
+        + ". "
+        + "Install or repair them with: "
+        + f"{sys.executable} -m pip install {' '.join(install_parts)} "
+        + "Arignan will not auto-install or rewrite your existing Torch/CUDA setup."
+    )
 
 
 def inspect_app_home(app_home: Path) -> AppHomeInspection:
@@ -193,6 +227,15 @@ def initialize_local_state(
             local_llm_light_model=local_llm_light_model,
             embedding_model=embedding_model,
             reranker_model=reranker_model,
+        )
+    else:
+        update_local_llm_settings(
+            settings_path,
+            local_llm_backend=None,
+            local_llm_model=None,
+            local_llm_light_model=None,
+            embedding_model=None,
+            reranker_model=None,
         )
     layout = StorageLayout.from_home(app_home).ensure()
     return layout.root, settings_path
@@ -330,10 +373,15 @@ def _migrate_legacy_local_llm_defaults(settings_path: Path) -> None:
 def _migrate_legacy_retrieval_defaults(settings_path: Path) -> None:
     payload = json.loads(settings_path.read_text(encoding="utf-8"))
     changed = False
-    if payload.get("embedding_model") in {None, ""}:
+    if payload.get("embedding_model") in {None, "", LEGACY_EMBEDDING_MODEL_REPO_ID}:
         payload["embedding_model"] = DEFAULT_EMBEDDING_MODEL_REPO_ID
         changed = True
-    if payload.get("reranker_model") in {None, "", LEGACY_RERANKER_MODEL_REPO_ID}:
+    if payload.get("reranker_model") in {
+        None,
+        "",
+        LEGACY_RERANKER_MODEL_REPO_ID,
+        LEGACY_MODERNBERT_RERANKER_MODEL_REPO_ID,
+    }:
         payload["reranker_model"] = DEFAULT_RERANKER_MODEL_REPO_ID
         changed = True
     if changed:
@@ -383,6 +431,7 @@ def run_setup(
     effective_reranker_model = DEFAULT_LIGHT_RERANKER_MODEL_REPO_ID if lightweight else None
     _emit(progress, "[1/4] Installing Python package...")
     target = install_package(root=root, dev=dev)
+    verify_required_ml_runtime()
     _emit(progress, "[2/4] Initializing local Arignan state...")
     from arignan.paths import resolve_app_home
 
