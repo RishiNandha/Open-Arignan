@@ -11,13 +11,15 @@ This file is a fast orientation guide for agents that need to patch the reposito
 - ingestion for markdown, PDFs, folders, and URLs
 - hybrid retrieval across dense, lexical, and markdown/map artifacts
 - local-LLM-authored `summary.md`, `map.md`, `global_map.md`, and final `ask` answers
-- deterministic local stand-ins for embedding, reranking, and session summarization
+- auditable wiki-style topic pages with related-topic links and per-hat topic graphs
 
 Important current reality:
 
 - setup provisions a managed local text-model runtime and runtime uses it for markdown artifacts and final `ask` answers
 - the default local text model is `qwen3:4b-q4_K_M`
 - the lightweight local answer model is `qwen3:0.6b`
+- the default retrieval models are `Alibaba-NLP/gte-modernbert-base` and `Alibaba-NLP/gte-reranker-modernbert-base`
+- `--lightweight` setup switches retrieval to `BAAI/bge-small-en-v1.5` and `mixedbread-ai/mxbai-rerank-xsmall-v1`
 - on Windows, setup bundles the local model runtime inside the app-home so users do not need a separate install/serve step
 - dense retrieval prefers local Qdrant storage when available and falls back to JSON storage otherwise
 - normal `ask` runs now use a compact in-place status line on `stderr`
@@ -113,8 +115,9 @@ Flow:
 
 Implemented MCP surface:
 
-- tool: `retrieve_context`
+- tools: `ask`, `retrieve_context`, `load`, `list_loads`, `delete_loads`, `delete_hat`, `save_session`, `load_session`, `reset_session`
 - resource: `arignan://global-map`
+- client-answer mode uses MCP sampling when available and falls back gracefully when the client does not expose sampling
 
 ## Source Map by Area
 
@@ -163,9 +166,11 @@ Implemented MCP surface:
   - heading-aware chunking with overlap
   - current defaults favor larger chunks and fewer fragments
   - adjacent page-like sections can now be merged into one chunk-sized span instead of being forced into one chunk per PDF page
+  - academic PDFs now treat roles like abstract / methods / results / conclusion as stronger boundaries
+  - chunk text is enriched with a short `Context: ...` prefix so retrieval sees local document/section cues
 - `src/arignan/indexing/embedding.py`
-  - `HashingEmbedder` for deterministic local behavior
-  - sentence-transformer boundary is present for future real embedding runtime
+  - `HashingEmbedder` for deterministic fallback behavior
+  - sentence-transformer embedder is now used by the live app when cached retrieval models are available
 - `src/arignan/indexing/dense.py`
   - `DenseIndexer`
   - `LocalDenseIndex`
@@ -176,6 +181,9 @@ Implemented MCP surface:
 
 ### Grouping and Markdown Artifacts
 
+- `src/arignan/graph/topic_graph.py`
+  - builds a lightweight per-hat topic graph from topic manifests and summary excerpts
+  - emits confidence-scored related-topic edges with `EXTRACTED` / `INFERRED` relation labels
 - `src/arignan/grouping/planner.py`
   - decides standalone vs merge vs segment
   - deterministic length/segmentation guardrail around the grouping policy
@@ -190,6 +198,7 @@ Implemented MCP surface:
   - writes topic manifests
   - writes topic markdown files directly under the topic folder
   - each non-empty topic folder now also gets `topic_index.md` as a compact wiki navigation companion to the main article page
+  - synchronizes a per-hat `topic_graph.json` file and pushes related-topic links back into manifests and topic markdowns
   - regenerates hat/global maps from manifests
   - now supports batching by skipping map refreshes until the caller requests them
 - `src/arignan/markdown/writer.py`
@@ -221,6 +230,14 @@ Topic folder invariant:
 `-- .topic_manifest.json
 ```
 
+Hat-level graph invariant:
+
+```text
+<app_home>/hats/<hat>/
+|-- topic_graph.json
+`-- map.md
+```
+
 ### Retrieval and Reranking
 
 - `src/arignan/retrieval/pipeline.py`
@@ -229,6 +246,7 @@ Topic folder invariant:
   - dense search
   - lexical search
   - markdown/map retrieval
+  - topic-link information becomes visible to retrieval through `topic_index.md` and updated summary pages
   - reciprocal rank fusion
   - current defaults intentionally pull a larger candidate set so more context can survive into reranking and final answers
   - progress reporting for multi-step retrieval
@@ -295,7 +313,7 @@ Active session log invariant:
 
 ## Behavior That Is Intentionally Simplified
 
-These are common places where an agent may assume there is a real model/runtime when there is not yet one:
+These are the main places where the repo still keeps deterministic fallbacks even though the live app prefers real local models when available:
 
 - `src/arignan/application.py:generate_answer`
   - primary final-answer path
@@ -306,9 +324,9 @@ These are common places where an agent may assume there is a real model/runtime 
 - `src/arignan/application.py:synthesize_answer`
   - deterministic fallback for final answers when the local LLM is unavailable
 - `src/arignan/indexing/embedding.py:HashingEmbedder`
-  - used for deterministic embedding behavior in tests and local flows
+  - used for deterministic fallback behavior in tests or empty app-homes
 - `src/arignan/retrieval/reranking.py:HeuristicReranker`
-  - current default reranker in the app
+  - deterministic fallback reranker when cached local reranker weights are unavailable
 - `src/arignan/session/summarizer.py`
   - rollover summary is deterministic, not LLM-authored
 

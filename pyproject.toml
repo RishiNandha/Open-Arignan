@@ -15,17 +15,19 @@ authors = [
 dependencies = [
   "httpx>=0.27,<1",
   "fastapi>=0.115,<1",
+  "numpy>=1.24,<2",
   "pypdf>=4.2,<6",
-  "pillow>=10,<12",
+  "pillow>=10.3,<13",
+  "onnx>=1.15,<2",
   "python-multipart>=0.0.9,<1",
   "pypdfium2>=4.30,<5",
   "rapidocr-onnxruntime>=1.4,<2",
   "huggingface_hub>=0.23,<1",
   "qdrant-client>=1.9,<2",
-  "transformers>=4.48,<5",
+  "uvicorn>=0.30,<1",
+  "transformers>=4.48,<4.50",
   "accelerate>=0.30,<1",
   "sentence-transformers>=3.0,<4",
-  "uvicorn>=0.30,<1",
 ]
 
 [project.optional-dependencies]

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 import sys
+import traceback
 
 from setuptools import setup as setuptools_setup
 
@@ -55,6 +56,26 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _choose_app_home_action(inspection) -> str:
+    if not inspection.exists or not inspection.entries:
+        return "fresh"
+    location = str(inspection.app_home)
+    if inspection.looks_like_arignan:
+        print(f"Existing Arignan app-home detected at '{location}'.")
+    else:
+        print(f"The app-home '{location}' already contains files and does not clearly look like an Arignan home.")
+    print("Choose what to do:")
+    print("- K: Keep existing contents as-is")
+    print("- C: Clear everything except models/ and runtime/)")
+    while True:
+        answer = input("Enter K or C: ").strip().lower()
+        if not answer or answer in {"k", "keep"}:
+            return "keep"
+        if answer in {"c", "clear"}:
+            return "fresh"
+        print("Please enter K to keep the existing app-home or C to clear it.")
+
+
 def main() -> int:
     if is_packaging_invocation(sys.argv):
         setuptools_setup()
@@ -71,8 +92,10 @@ def main() -> int:
             llm_backend=args.llm_backend,
             llm_model=args.llm_model,
             progress=print,
+            choose_app_home_action=_choose_app_home_action,
         )
     except Exception as exc:
+        traceback.print_exc()
         print(f"[error] {exc}", file=sys.stderr)
         return 1
     print(render_summary(result))

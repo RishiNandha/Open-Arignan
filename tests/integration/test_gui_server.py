@@ -93,6 +93,9 @@ def test_gui_task_endpoints_use_existing_app_flows(tmp_path: Path, monkeypatch) 
     def fake_list_ingestions():
         return fake_events
 
+    def fake_list_live_ingestions():
+        return fake_events
+
     def fake_delete(load_ids):
         captured["deleted_load_ids"] = list(load_ids)
         return DeleteResult(deleted_load_ids=list(load_ids), missing_load_ids=[], deleted_topics=["jepa-notes"])
@@ -104,6 +107,7 @@ def test_gui_task_endpoints_use_existing_app_flows(tmp_path: Path, monkeypatch) 
     monkeypatch.setattr(app, "load", fake_load)
     monkeypatch.setattr(app, "ask", fake_ask)
     monkeypatch.setattr(app, "list_ingestions", fake_list_ingestions)
+    monkeypatch.setattr(app, "list_live_ingestions", fake_list_live_ingestions)
     monkeypatch.setattr(app, "delete", fake_delete)
     monkeypatch.setattr(app, "delete_hat", fake_delete_hat)
     client = TestClient(create_gui_app(app))
@@ -172,6 +176,46 @@ def test_gui_load_rejects_unsupported_file_types(tmp_path: Path) -> None:
 
     assert response.status_code == 400
     assert "Unsupported file type" in response.json()["detail"]
+
+
+def test_gui_library_filters_stale_loads_for_missing_hat(tmp_path: Path) -> None:
+    app_home = tmp_path / ".arignan"
+    app = ArignanApp(load_config(app_home=app_home))
+    stale_event = LoadEvent(
+        load_id="load-stale",
+        operation=LoadOperation.INGEST,
+        hat="SNNs",
+        created_at="2026-04-11T12:00:00+00:00",
+        source_items=["paper.pdf"],
+        topic_folders=["word2vec"],
+    )
+    app.ingestion_log.append(stale_event)
+
+    client = TestClient(create_gui_app(app))
+    library = client.get("/api/library")
+
+    assert library.status_code == 200
+    payload = library.json()
+    assert all(item["load_id"] != "load-stale" for item in payload["loads"])
+
+
+def test_gui_task_failure_returns_session_log_hint(tmp_path: Path, monkeypatch) -> None:
+    app_home = tmp_path / ".arignan"
+    app = ArignanApp(load_config(app_home=app_home))
+
+    def failing_delete(load_ids):
+        raise RuntimeError("delete exploded")
+
+    monkeypatch.setattr(app, "delete", failing_delete)
+    client = TestClient(create_gui_app(app))
+
+    delete_start = client.post("/api/delete/start", json={"load_ids": ["load-gui"]})
+    assert delete_start.status_code == 200
+    payload = _wait_for_task(client, delete_start.json()["task_id"])
+
+    assert payload["status"] == "error"
+    assert "Something went wrong while deleting the selected loads." in payload["error"]
+    assert "exceptions.log" in payload["error"]
 
 
 def _wait_for_task(client: TestClient, task_id: str) -> dict[str, object]:
