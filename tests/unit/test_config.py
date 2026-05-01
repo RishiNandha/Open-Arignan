@@ -24,13 +24,13 @@ def test_load_config_uses_defaults_when_settings_missing(app_home: Path) -> None
     assert config.local_llm_kv_cache_type == "q8_0"
     assert config.chunking.chunk_size == 5600
     assert config.chunking.chunk_overlap == 80
-    assert config.retrieval.dense_top_k == 8
-    assert config.retrieval.fused_top_k == 8
-    assert config.retrieval.rerank_top_k == 3
-    assert config.retrieval.answer_context_top_k_default == 3
-    assert config.retrieval.answer_context_top_k_light == 3
-    assert config.retrieval.answer_context_top_k_none == 5
-    assert config.retrieval.answer_context_top_k_raw == 5
+    assert config.retrieval.dense_top_k == 10
+    assert config.retrieval.fused_top_k == 16
+    assert config.retrieval.rerank_top_k == 8
+    assert config.retrieval.answer_context_top_k_default == 8
+    assert config.retrieval.answer_context_top_k_light == 6
+    assert config.retrieval.answer_context_top_k_none == 8
+    assert config.retrieval.answer_context_top_k_raw == 8
     assert config.session.soft_token_limit == 18000
     assert config.session.keep_recent_turns == 10
     assert config.markdown.max_md_length == 5000
@@ -103,13 +103,13 @@ def test_write_default_settings_creates_file(app_home: Path) -> None:
     assert payload["local_llm_max_loaded_models"] == 1
     assert payload["chunking"]["chunk_size"] == 5600
     assert payload["chunking"]["chunk_overlap"] == 80
-    assert payload["retrieval"]["dense_top_k"] == 8
-    assert payload["retrieval"]["fused_top_k"] == 8
-    assert payload["retrieval"]["rerank_top_k"] == 3
-    assert payload["retrieval"]["answer_context_top_k_default"] == 3
-    assert payload["retrieval"]["answer_context_top_k_light"] == 3
-    assert payload["retrieval"]["answer_context_top_k_none"] == 5
-    assert payload["retrieval"]["answer_context_top_k_raw"] == 5
+    assert payload["retrieval"]["dense_top_k"] == 10
+    assert payload["retrieval"]["fused_top_k"] == 16
+    assert payload["retrieval"]["rerank_top_k"] == 8
+    assert payload["retrieval"]["answer_context_top_k_default"] == 8
+    assert payload["retrieval"]["answer_context_top_k_light"] == 6
+    assert payload["retrieval"]["answer_context_top_k_none"] == 8
+    assert payload["retrieval"]["answer_context_top_k_raw"] == 8
     assert payload["session"]["soft_token_limit"] == 18000
     assert payload["session"]["keep_recent_turns"] == 10
     assert payload["markdown"]["max_md_length"] == 5000

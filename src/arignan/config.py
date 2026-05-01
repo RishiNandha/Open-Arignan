@@ -28,15 +28,15 @@ class ChunkingConfig:
 
 @dataclass(slots=True)
 class RetrievalConfig:
-    dense_top_k: int = 8
-    lexical_top_k: int = 8
-    map_top_k: int = 3
-    fused_top_k: int = 8
-    rerank_top_k: int = 3
-    answer_context_top_k_default: int = 3
-    answer_context_top_k_light: int = 3
-    answer_context_top_k_none: int = 5
-    answer_context_top_k_raw: int = 5
+    dense_top_k: int = 10
+    lexical_top_k: int = 10
+    map_top_k: int = 4
+    fused_top_k: int = 16
+    rerank_top_k: int = 8
+    answer_context_top_k_default: int = 8
+    answer_context_top_k_light: int = 6
+    answer_context_top_k_none: int = 8
+    answer_context_top_k_raw: int = 8
 
 
 @dataclass(slots=True)

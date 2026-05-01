@@ -15,6 +15,10 @@ import httpx
 WINDOWS_OLLAMA_AMD64_ZIP_URL = "https://ollama.com/download/ollama-windows-amd64.zip"
 
 
+def _is_windows_platform() -> bool:
+    return os.name == "nt"
+
+
 def managed_runtime_dir(app_home: Path) -> Path:
     return app_home / "runtime" / "local_llm"
 
@@ -24,7 +28,7 @@ def managed_runtime_logs_dir(app_home: Path) -> Path:
 
 
 def bundled_ollama_executable(app_home: Path) -> Path:
-    executable = "ollama.exe" if os.name == "nt" else "ollama"
+    executable = "ollama.exe" if _is_windows_platform() else "ollama"
     return managed_runtime_dir(app_home) / executable
 
 
@@ -58,7 +62,7 @@ def provision_managed_runtime(
     executable = bundled_ollama_executable(app_home)
     if executable.exists():
         return executable
-    if os.name == "nt":
+    if _is_windows_platform():
         _emit(progress, "Installing local model runtime...")
         return _install_windows_runtime(app_home)
     raise RuntimeError(
@@ -279,7 +283,7 @@ def _install_windows_runtime(app_home: Path) -> Path:
 
 
 def _background_process_kwargs() -> dict[str, object]:
-    if os.name == "nt":
+    if _is_windows_platform():
         return {
             "creationflags": (
                 subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW

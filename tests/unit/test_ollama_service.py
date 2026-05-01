@@ -23,7 +23,7 @@ from arignan.llm.service import (
 
 
 def test_provision_managed_runtime_downloads_windows_bundle(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("arignan.llm.service.os.name", "nt")
+    monkeypatch.setattr("arignan.llm.service._is_windows_platform", lambda: True)
     monkeypatch.setattr("arignan.llm.service.shutil.which", lambda name: None)
     archive_bytes = io.BytesIO()
     captured: dict[str, object] = {}
@@ -62,7 +62,7 @@ def test_provision_managed_runtime_downloads_windows_bundle(tmp_path: Path, monk
 
 
 def test_provision_managed_runtime_prefers_existing_ollama_on_path(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("arignan.llm.service.os.name", "nt")
+    monkeypatch.setattr("arignan.llm.service._is_windows_platform", lambda: True)
     discovered = tmp_path / "existing" / "ollama.exe"
     discovered.parent.mkdir(parents=True, exist_ok=True)
     discovered.write_text("", encoding="utf-8")
@@ -79,7 +79,7 @@ def test_provision_managed_runtime_prefers_existing_ollama_on_path(tmp_path: Pat
 def test_resolve_ollama_executable_prefers_existing_ollama_on_path_over_bundled_runtime(
     tmp_path: Path, monkeypatch
 ) -> None:
-    monkeypatch.setattr("arignan.llm.service.os.name", "nt")
+    monkeypatch.setattr("arignan.llm.service._is_windows_platform", lambda: True)
     discovered = tmp_path / "existing" / "ollama.exe"
     discovered.parent.mkdir(parents=True, exist_ok=True)
     discovered.write_text("", encoding="utf-8")
