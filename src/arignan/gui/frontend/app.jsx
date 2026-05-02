@@ -8,6 +8,7 @@ function App() {
     default_hat: "default",
     answer_modes: ANSWER_MODES,
     default_rerank_top_k: 8,
+    default_show_thinking: true,
   });
   const [library, setLibrary] = useState({
     hats: [],
@@ -16,6 +17,7 @@ function App() {
   const [hat, setHat] = useState("auto");
   const [answerMode, setAnswerMode] = useState("default");
   const [rerankTopK, setRerankTopK] = useState(8);
+  const [showThinking, setShowThinking] = useState(true);
   const [question, setQuestion] = useState("");
   const [messages, setMessages] = useState([
     createMessage({
@@ -57,6 +59,7 @@ function App() {
     setLoadHat(payload.default_hat || "default");
     setAnswerMode("default");
     setRerankTopK(payload.default_rerank_top_k || 8);
+    setShowThinking(payload.default_show_thinking !== false);
     await refreshLibrary();
   }
 
@@ -290,16 +293,22 @@ function appendMessage(message) {
           hat,
           answer_mode: answerMode,
           rerank_top_k: normalizeRerankTopK(rerankTopK, options.default_rerank_top_k || 8),
+          show_thinking: showThinking,
         }),
       });
       await followTask({
         taskId: payload.task_id,
         pendingId,
-        onComplete: (result) => {
+        onComplete: (snapshot) => {
+          const result = snapshot.result || {};
           patchMessage(pendingId, {
             pending: false,
             body: result.answer,
             citations: result.citations || [],
+            partialThinking: snapshot.partial_thinking || "",
+            thoughtStartedAt: snapshot.thought_started_at || null,
+            thoughtFinishedAt: snapshot.thought_finished_at || null,
+            thoughtUsage: snapshot.thought_usage || null,
           });
         },
       });
@@ -318,16 +327,20 @@ function appendMessage(message) {
     let keepPolling = true;
     while (keepPolling) {
       const snapshot = await fetchJson(`/api/tasks/${taskId}`);
-      if (snapshot.message || snapshot.partial_answer || snapshot.progress_log) {
+      if (snapshot.message || snapshot.partial_answer || snapshot.partial_thinking || snapshot.progress_log) {
         patchMessage(pendingId, {
           body: snapshot.message || "Working...",
           pending: snapshot.status === "running",
           progressLog: snapshot.progress_log || [],
           partialAnswer: snapshot.partial_answer || "",
+          partialThinking: snapshot.partial_thinking || "",
+          thoughtStartedAt: snapshot.thought_started_at || null,
+          thoughtFinishedAt: snapshot.thought_finished_at || null,
+          thoughtUsage: snapshot.thought_usage || null,
         });
       }
       if (snapshot.status === "done") {
-        onComplete(snapshot.result || {});
+        onComplete(snapshot);
         keepPolling = false;
         return;
       }
@@ -407,6 +420,14 @@ function appendMessage(message) {
               onChange={(event) => setRerankTopK(event.target.value)}
             />
           </label>
+          <label className="toggle-control">
+            <input
+              type="checkbox"
+              checked={showThinking}
+              onChange={(event) => setShowThinking(event.target.checked)}
+            />
+            <span>Show Thinking</span>
+          </label>
         </div>
         <div className="question-row">
           <textarea
@@ -469,6 +490,9 @@ function appendMessage(message) {
 }
 
 function MessageBubble({ message }) {
+  const [thinkingOpen, setThinkingOpen] = useState(false);
+  const thinkingSummary = summarizeThinking(message);
+
   return (
     <div className={`message-row ${message.role}`}>
       <article className="message-bubble">
@@ -492,10 +516,26 @@ function MessageBubble({ message }) {
                   ))}
                 </div>
               )}
+              {message.partialThinking ? (
+                <div className="thinking-stream">
+                  <div className="thinking-label">Thinking…</div>
+                  <div className="thinking-content">{message.partialThinking}</div>
+                </div>
+              ) : null}
               {message.partialAnswer ? <div className="streaming-answer">{message.partialAnswer}</div> : null}
             </div>
           ) : (
-            message.body
+            <>
+              {message.body}
+              {message.partialThinking ? (
+                <div className="thinking-panel">
+                  <button type="button" className="thinking-toggle" onClick={() => setThinkingOpen((open) => !open)}>
+                    {thinkingOpen ? "Hide" : "Show"} {thinkingSummary}
+                  </button>
+                  {thinkingOpen ? <div className="thinking-content">{message.partialThinking}</div> : null}
+                </div>
+              ) : null}
+            </>
           )}
         </div>
         {!message.pending && Boolean(message.citations?.length) && (
@@ -715,8 +755,35 @@ function createMessage({ role, title, body, citations = [], pending = false }) {
     pending,
     progressLog: pending ? [body] : [],
     partialAnswer: "",
+    partialThinking: "",
+    thoughtStartedAt: null,
+    thoughtFinishedAt: null,
+    thoughtUsage: null,
     timeLabel: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
   };
+}
+
+function summarizeThinking(message) {
+  const seconds = thinkingDurationSeconds(message);
+  if (seconds !== null) {
+    return `thought for ${seconds.toFixed(seconds >= 10 ? 0 : 1)}s`;
+  }
+  return "thinking trace";
+}
+
+function thinkingDurationSeconds(message) {
+  if (message.thoughtStartedAt && message.thoughtFinishedAt) {
+    const started = Date.parse(message.thoughtStartedAt);
+    const finished = Date.parse(message.thoughtFinishedAt);
+    if (Number.isFinite(started) && Number.isFinite(finished) && finished >= started) {
+      return (finished - started) / 1000;
+    }
+  }
+  const totalDuration = message.thoughtUsage?.total_duration;
+  if (typeof totalDuration === "number" && totalDuration > 0) {
+    return totalDuration / 1_000_000_000;
+  }
+  return null;
 }
 
 async function fetchJson(url, init = {}) {

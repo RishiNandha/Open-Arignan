@@ -245,6 +245,39 @@ textarea {
   line-height: 1.55;
 }
 
+.thinking-stream,
+.thinking-panel {
+  padding: 12px 14px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.thinking-label {
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-size: 0.82rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.thinking-toggle {
+  border: none;
+  padding: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.thinking-content {
+  margin-top: 10px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.55;
+  color: #d6def4;
+}
+
 .spinner {
   width: 12px;
   height: 12px;
@@ -297,6 +330,20 @@ textarea {
 .compact-control {
   min-width: 164px;
   max-width: 188px;
+}
+
+.toggle-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 0.88rem;
+  min-height: 44px;
+}
+
+.toggle-control input {
+  width: 16px;
+  height: 16px;
 }
 
 .select-control,

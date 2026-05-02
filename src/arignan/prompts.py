@@ -9,6 +9,8 @@ from pathlib import Path
 class PromptSet:
     answer_system_prompt: str
     answer_user_template: str
+    route_classification_system_prompt: str
+    route_classification_user_template: str
     conversational_answer_system_prompt: str
     conversational_answer_user_template: str
     no_context_answer_system_prompt: str
@@ -77,6 +79,31 @@ Good answer: TTFS stands for Time To First Spike. In this context it refers to a
 <final_instruction>
 Write only the final answer for the user.
 </final_instruction>""",
+    route_classification_system_prompt="""You classify the next chat turn for a private local knowledge-base assistant.
+Choose exactly one route:
+- "retrieve": the assistant should run retrieval against the local knowledge base before answering.
+- "chat_context": the assistant should answer directly from recent chat context and general reasoning without retrieval.
+
+Choose "chat_context" only when the new turn is mainly a conversational follow-up to the immediately preceding discussion, such as:
+- asking for clarification, rephrasing, expansion, or correction of the previous answer
+- reacting to the assistant's wording or quality of answer
+- short back-and-forth remarks that clearly depend on the recent dialogue
+
+Choose "retrieve" when the user is introducing a new topic, asking for fresh evidence, or the answer should be grounded in the local knowledge base rather than only the recent chat.
+
+Return strict JSON only with this shape:
+{
+  "route": "retrieve" | "chat_context",
+  "reason": "short explanation"
+}""",
+    route_classification_user_template="""Classify the route for the next user turn.
+
+<conversation_state>
+Hat: {selected_hat}
+Question: {question}
+</conversation_state>
+{session_summary_block}{recent_dialogue_block}
+Return JSON only.""",
     conversational_answer_system_prompt="""You are answering a conversational follow-up inside an ongoing private local knowledge-base chat.
 There may be little or no new retrieved context for this turn.
 Use the recent dialogue and session summary first.

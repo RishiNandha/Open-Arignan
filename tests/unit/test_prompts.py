@@ -16,6 +16,7 @@ def test_write_default_prompts_creates_prompts_json(tmp_path: Path) -> None:
     assert path == tmp_path / "prompts.json"
     assert payload["answer_system_prompt"] == DEFAULT_PROMPT_SET.answer_system_prompt
     assert "topic_user_template" in payload
+    assert "route_classification_user_template" in payload
 
 
 def test_load_prompt_set_merges_user_overrides(tmp_path: Path) -> None:

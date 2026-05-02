@@ -17,7 +17,7 @@ Important current reality:
 
 - setup provisions a managed local text-model runtime and runtime uses it for markdown artifacts and final `ask` answers
 - the default local text model is `qwen3:4b-q4_K_M`
-- the lightweight local answer model is `qwen3:0.6b`
+- `ask` now reuses the main local text generator across default/light conversational flows so the app does not swap in a second full chat LLM at ask time
 - the default retrieval models are `BAAI/bge-base-en-v1.5` and `mixedbread-ai/mxbai-rerank-base-v1`
 - `--lightweight` setup switches retrieval to `BAAI/bge-small-en-v1.5` and `mixedbread-ai/mxbai-rerank-xsmall-v1`
 - on Windows, setup bundles the local model runtime inside the app-home so users do not need a separate install/serve step
@@ -26,6 +26,7 @@ Important current reality:
 - `ask --debug` still prints detailed retrieval/model trace output
 - swallowed LLM failures now write full tracebacks to a session-local `exceptions.log`
 - markdown-generation and RAG-answer prompts now live in `<app_home>/prompts.json` and can be edited without reinstalling
+- ask-route classification prompts also live in `<app_home>/prompts.json`, and default/light asks classify `retrieve` vs `chat_context` before running RAG
 
 ## Top-Level Layout
 
@@ -47,6 +48,7 @@ Read these first:
 - `README.md`: source-of-truth architecture intent
   - now includes a short `prompts.json` editing note covering retrieval placeholders vs. chat-history placeholders
 - `src/arignan/application.py`: main orchestration layer
+  - now owns the ask-route classifier, shared session-context prompt blocks, and single-main-LLM reuse for ask flows
 - `src/arignan/cli.py`: CLI surface and user-visible flow
 - `src/arignan/config.py`: defaults and settings behavior
 - `src/arignan/setup_flow.py`: user bootstrap flow
@@ -104,6 +106,7 @@ CLI behavior worth remembering:
 - progress messages print to `stderr` with an `[arignan] ...` prefix
 - normal `ask` uses a compact spinner-style status reporter instead of line-by-line progress spam
 - `ask` supports `--answer-mode default|light|none|raw`
+- default/light `ask` first runs a small route classifier to decide whether to retrieve or continue directly from chat context
 - `load --debug` and `ask --debug` print model-call traces and internal details
 - uncaught CLI exceptions are logged to the active session log before being re-raised
 

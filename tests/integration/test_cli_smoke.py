@@ -62,8 +62,6 @@ class FakeLocalGenerator:
                 "| --- | --- | --- | --- |\n"
                 "| default | `hats/default/map.md` | overview of JEPA concepts | JEPA, representation learning |\n"
             )
-        if self.model_name == "qwen3:0.6b":
-            return "Light mode answer: JEPA stands for Joint Embedding Predictive Architecture."
         return "JEPA stands for Joint Embedding Predictive Architecture."
 
 
@@ -109,7 +107,7 @@ def test_cli_load_ask_and_delete_smoke(tmp_path: Path, capsys, monkeypatch) -> N
         ["--app-home", str(app_home), "--pid", "1234", "ask", "What is JEPA?", "--hat", "default", "--answer-mode", "light"]
     ) == 0
     light_capture = capsys.readouterr()
-    assert "Light mode answer: JEPA stands for Joint Embedding Predictive Architecture." in light_capture.out
+    assert "JEPA stands for Joint Embedding Predictive Architecture." in light_capture.out
     assert "Hitting LLM" in light_capture.err
 
     assert main(

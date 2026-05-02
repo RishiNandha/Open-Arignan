@@ -30,6 +30,7 @@ class AskPayload(BaseModel):
     hat: str = "auto"
     answer_mode: str = "default"
     rerank_top_k: int | None = None
+    show_thinking: bool = True
 
 
 class DeletePayload(BaseModel):
@@ -47,6 +48,10 @@ class GuiTaskState:
     error: str | None = None
     progress_log: list[str] = field(default_factory=list)
     partial_answer: str = ""
+    partial_thinking: str = ""
+    thought_started_at: str | None = None
+    thought_finished_at: str | None = None
+    thought_usage: dict[str, object] | None = None
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     updated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
@@ -60,6 +65,10 @@ class GuiTaskState:
             "error": self.error,
             "progress_log": list(self.progress_log),
             "partial_answer": self.partial_answer,
+            "partial_thinking": self.partial_thinking,
+            "thought_started_at": self.thought_started_at,
+            "thought_finished_at": self.thought_finished_at,
+            "thought_usage": self.thought_usage,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -92,6 +101,8 @@ class GuiTaskStore:
             return
         with self._lock:
             task = self._tasks[task_id]
+            if task.partial_thinking and task.thought_finished_at is None:
+                task.thought_finished_at = datetime.now(timezone.utc).isoformat()
             task.partial_answer += text
             if task.message != "Streaming answer":
                 task.message = "Streaming answer"
@@ -99,12 +110,29 @@ class GuiTaskStore:
                     task.progress_log.append("Streaming answer")
             task.updated_at = datetime.now(timezone.utc).isoformat()
 
-    def finish(self, task_id: str, result: dict[str, object]) -> None:
+    def append_partial_thinking(self, task_id: str, text: str) -> None:
+        if not text:
+            return
+        with self._lock:
+            task = self._tasks[task_id]
+            if task.thought_started_at is None:
+                task.thought_started_at = datetime.now(timezone.utc).isoformat()
+            task.partial_thinking += text
+            if task.message == "Preparing question...":
+                task.message = "Thinking"
+                if not task.progress_log or task.progress_log[-1] != "Thinking":
+                    task.progress_log.append("Thinking")
+            task.updated_at = datetime.now(timezone.utc).isoformat()
+
+    def finish(self, task_id: str, result: dict[str, object], *, thought_usage: dict[str, object] | None = None) -> None:
         with self._lock:
             task = self._tasks[task_id]
             task.status = "done"
             task.result = result
             task.message = "Done"
+            if task.partial_thinking and task.thought_finished_at is None:
+                task.thought_finished_at = datetime.now(timezone.utc).isoformat()
+            task.thought_usage = thought_usage
             task.updated_at = datetime.now(timezone.utc).isoformat()
 
     def fail(self, task_id: str, error: str) -> None:
@@ -143,6 +171,7 @@ def create_gui_app(app: ArignanApp) -> FastAPI:
             "hats": list(dict.fromkeys(hats)),
             "answer_modes": ["default", "light", "none", "raw"],
             "default_rerank_top_k": app.config.retrieval.rerank_top_k,
+            "default_show_thinking": True,
         }
 
     @gui_app.get("/api/library")
@@ -239,15 +268,20 @@ def create_gui_app(app: ArignanApp) -> FastAPI:
         def _runner() -> None:
             progress_sink = lambda message: task_store.update(task.task_id, _compact_gui_progress("ask", message))
             stream_sink = lambda text: task_store.append_partial_answer(task.task_id, text)
+            thinking_sink = (lambda text: task_store.append_partial_thinking(task.task_id, text)) if payload.show_thinking else None
             try:
-                with _gui_task_context(app, task_lock, progress_sink, stream_sink=stream_sink):
+                with _gui_task_context(app, task_lock, progress_sink, stream_sink=stream_sink, thinking_sink=thinking_sink):
                     result = app.ask(
                         question,
                         hat=payload.hat,
                         answer_mode=payload.answer_mode,
                         rerank_top_k=payload.rerank_top_k,
                     )
-                    task_store.finish(task.task_id, _serialize_ask_result(result))
+                    task_store.finish(
+                        task.task_id,
+                        _serialize_ask_result(result),
+                        thought_usage=_serialize_thought_usage(app.local_text_generator),
+                    )
             except Exception as exc:
                 task_store.fail(
                     task.task_id,
@@ -260,6 +294,7 @@ def create_gui_app(app: ArignanApp) -> FastAPI:
                             "hat": payload.hat,
                             "answer_mode": payload.answer_mode,
                             "rerank_top_k": payload.rerank_top_k,
+                            "show_thinking": payload.show_thinking,
                         },
                         user_message="Something went wrong while answering the question.",
                     ),
@@ -396,12 +431,13 @@ async def _write_uploaded_files(batch_dir: Path, files: list[UploadFile]) -> lis
 
 
 @contextmanager
-def _gui_task_context(app: ArignanApp, task_lock: threading.Lock, progress_sink, stream_sink=None):
+def _gui_task_context(app: ArignanApp, task_lock: threading.Lock, progress_sink, stream_sink=None, thinking_sink=None):
     with task_lock:
         restore = _bind_task_sinks(
             app,
             progress_sink=_tee_progress(app.progress_sink, progress_sink),
             stream_sink=stream_sink,
+            thinking_sink=thinking_sink,
         )
         try:
             yield app
@@ -425,12 +461,14 @@ def _tee_progress(*sinks):
     return _emit
 
 
-def _bind_task_sinks(app: ArignanApp, *, progress_sink, stream_sink=None):
+def _bind_task_sinks(app: ArignanApp, *, progress_sink, stream_sink=None, thinking_sink=None):
     original_app_sink = app.progress_sink
     original_local_sink = getattr(app.local_text_generator, "progress_sink", None)
     original_light_sink = getattr(app.light_text_generator, "progress_sink", None)
     original_local_stream = getattr(app.local_text_generator, "stream_sink", None)
     original_light_stream = getattr(app.light_text_generator, "stream_sink", None)
+    original_local_thinking = getattr(app.local_text_generator, "thinking_sink", None)
+    original_light_thinking = getattr(app.light_text_generator, "thinking_sink", None)
     artifact_writer = getattr(app.markdown_repository, "artifact_writer", None)
     original_writer_sink = getattr(artifact_writer, "progress_sink", None) if artifact_writer is not None else None
 
@@ -443,6 +481,10 @@ def _bind_task_sinks(app: ArignanApp, *, progress_sink, stream_sink=None):
         app.local_text_generator.stream_sink = stream_sink
     if hasattr(app.light_text_generator, "stream_sink"):
         app.light_text_generator.stream_sink = stream_sink
+    if hasattr(app.local_text_generator, "thinking_sink"):
+        app.local_text_generator.thinking_sink = thinking_sink
+    if hasattr(app.light_text_generator, "thinking_sink"):
+        app.light_text_generator.thinking_sink = thinking_sink
     if artifact_writer is not None and hasattr(artifact_writer, "progress_sink"):
         artifact_writer.progress_sink = progress_sink
 
@@ -456,6 +498,10 @@ def _bind_task_sinks(app: ArignanApp, *, progress_sink, stream_sink=None):
             app.local_text_generator.stream_sink = original_local_stream
         if hasattr(app.light_text_generator, "stream_sink"):
             app.light_text_generator.stream_sink = original_light_stream
+        if hasattr(app.local_text_generator, "thinking_sink"):
+            app.local_text_generator.thinking_sink = original_local_thinking
+        if hasattr(app.light_text_generator, "thinking_sink"):
+            app.light_text_generator.thinking_sink = original_light_thinking
         if artifact_writer is not None and hasattr(artifact_writer, "progress_sink"):
             artifact_writer.progress_sink = original_writer_sink
 
@@ -483,6 +529,13 @@ def _serialize_ask_result(result) -> dict[str, object]:
         "selected_hat": result.selected_hat,
         "answer_mode": result.answer_mode,
     }
+
+
+def _serialize_thought_usage(generator) -> dict[str, object] | None:
+    usage = getattr(generator, "last_usage", None)
+    if not isinstance(usage, dict):
+        return None
+    return dict(usage)
 
 
 def _serialize_delete_result(result) -> dict[str, object]:

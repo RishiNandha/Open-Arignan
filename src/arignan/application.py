@@ -103,6 +103,12 @@ class AskResult:
 
 
 @dataclass(slots=True)
+class AskRouteDecision:
+    route: Literal["retrieve", "chat_context"]
+    reason: str
+
+
+@dataclass(slots=True)
 class DeleteResult:
     deleted_load_ids: list[str]
     missing_load_ids: list[str]
@@ -151,12 +157,9 @@ class ArignanApp:
             exception_logger=self.exception_logger,
         )
         self.local_text_generator = create_local_text_generator(config, progress_sink=self.progress_sink)
-        self.light_text_generator = create_local_text_generator(
-            config,
-            progress_sink=self.progress_sink,
-            model_name=config.local_llm_light_model,
-        )
-        for generator in (self.local_text_generator, self.light_text_generator):
+        # Reuse the same live generator throughout ask flows to avoid swapping a second Ollama model into memory.
+        self.light_text_generator = self.local_text_generator
+        for generator in {id(self.local_text_generator): self.local_text_generator}.values():
             memory_recovery = getattr(generator, "memory_recovery", None)
             if callable(memory_recovery) or hasattr(generator, "memory_recovery"):
                 setattr(generator, "memory_recovery", self._release_retrieval_gpu_memory)
@@ -297,15 +300,26 @@ class ArignanApp:
         prior_session = self.session_manager.get_or_create(pid, hat=hat)
         session = self.session_manager.append_turn(pid, role="user", content=question)
         effective_rerank_top_k = self._effective_rerank_top_k(rerank_top_k)
-        if answer_mode in {"default", "light"} and _is_conversational_followup(question, prior_session):
-            self._emit_progress("Detected conversational follow-up; skipping retrieval and using chat context...")
+        route_decision = self._classify_ask_route(
+            question,
+            hat=hat,
+            answer_mode=answer_mode,
+            session=prior_session,
+        )
+        selected_hat = self._fallback_selected_hat(hat, prior_session)
+        if route_decision.route == "chat_context":
+            self._emit_progress(
+                "Answering from recent chat context without retrieval"
+                + (f" ({route_decision.reason})" if route_decision.reason else "")
+                + "..."
+            )
             answer, citations = compose_answer(
                 question,
                 [],
                 answer_mode=answer_mode,
                 context_limit=self._answer_context_limit(answer_mode, rerank_top_k=effective_rerank_top_k),
                 expanded_query=question,
-                selected_hat=self._fallback_selected_hat(hat, prior_session),
+                selected_hat=selected_hat,
                 default_generator=self.local_text_generator,
                 light_generator=self.light_text_generator,
                 trace_sink=self.trace_collector,
@@ -320,7 +334,7 @@ class ArignanApp:
             debug = AskDebug(
                 answer_mode=answer_mode,
                 expanded_query=question,
-                selected_hat=self._fallback_selected_hat(hat, prior_session),
+                selected_hat=selected_hat,
                 dense_hits=[],
                 lexical_hits=[],
                 map_hits=[],
@@ -408,6 +422,68 @@ class ArignanApp:
             citations=citations,
             debug=debug,
         )
+
+    def _classify_ask_route(
+        self,
+        question: str,
+        *,
+        hat: str,
+        answer_mode: Literal["default", "light", "none", "raw"],
+        session: SessionState | None,
+    ) -> AskRouteDecision:
+        if answer_mode not in {"default", "light"}:
+            return AskRouteDecision(route="retrieve", reason="non-conversational answer mode")
+        if session is None or not any(turn.role.lower() == "assistant" for turn in session.turns):
+            return AskRouteDecision(route="retrieve", reason="no prior assistant context")
+        if not question.strip():
+            return AskRouteDecision(route="retrieve", reason="empty question")
+        selected_hat = self._fallback_selected_hat(hat, session)
+        self._emit_progress("Classifying whether this turn needs retrieval or can continue from chat context...")
+        prompt = _build_route_classification_prompt(
+            question,
+            selected_hat=selected_hat,
+            session=session,
+            template=self.prompts.route_classification_user_template,
+        )
+        try:
+            raw = self.local_text_generator.generate(
+                system_prompt=self.prompts.route_classification_system_prompt,
+                user_prompt=prompt,
+                max_new_tokens=120,
+                temperature=0.0,
+                response_format=ASK_ROUTE_RESPONSE_FORMAT,
+            )
+            decision = _parse_ask_route_decision(raw)
+        except Exception as exc:
+            log_path = self.log_exception(
+                component="llm",
+                task="ask route classification",
+                exc=exc,
+                context={"hat": selected_hat, "answer_mode": answer_mode},
+            )
+            if self.progress_sink is not None:
+                self.progress_sink(
+                    "Route classification failed; continuing with retrieval."
+                    + (f" See {log_path}" if log_path else "")
+                )
+            self.trace_collector.record(
+                component="llm",
+                task="ask route classification",
+                model_name=self.local_text_generator.model_name,
+                backend=getattr(self.local_text_generator, "backend_name", type(self.local_text_generator).__name__),
+                status="fallback",
+                detail=f"{selected_hat} -> retrieve",
+            )
+            return AskRouteDecision(route="retrieve", reason="classification fallback")
+        self.trace_collector.record(
+            component="llm",
+            task="ask route classification",
+            model_name=self.local_text_generator.model_name,
+            backend=getattr(self.local_text_generator, "backend_name", type(self.local_text_generator).__name__),
+            status="ok",
+            detail=f"{selected_hat} -> {decision.route}",
+        )
+        return decision
 
     def list_events(self) -> list[LoadEvent]:
         return self.ingestion_log.read_all()
@@ -1295,20 +1371,7 @@ def _build_answer_prompt(
     template: str = DEFAULT_PROMPT_SET.answer_user_template,
 ) -> str:
     question_intent, focus_topic, answer_brief = describe_question(question)
-    summary = (session.summary or "").strip() if session is not None else ""
-    session_summary_block = ""
-    if summary:
-        session_summary_block = "\n\n<session_summary>\n" + summary + "\n</session_summary>"
-
-    recent_turns = _recent_turns_for_prompt(session, question=question)
-    recent_dialogue_block = ""
-    if recent_turns:
-        lines = ["<recent_dialogue>"]
-        for turn in recent_turns:
-            role = "User" if turn.role.lower() == "user" else "Assistant"
-            lines.append(f"{role}: {turn.content.strip()}")
-        lines.append("</recent_dialogue>")
-        recent_dialogue_block = "\n\n" + "\n".join(lines)
+    session_summary_block, recent_dialogue_block = _session_prompt_blocks(session, question=question)
 
     retrieved_passages: list[str] = []
     for index, hit in enumerate(hits[:context_limit], start=1):
@@ -1343,6 +1406,38 @@ def _build_no_context_answer_prompt(
     session: SessionState | None,
     template: str,
 ) -> str:
+    session_summary_block, recent_dialogue_block = _session_prompt_blocks(session, question=question)
+
+    return render_prompt_template(
+        "no_context_answer_user_template",
+        template,
+        selected_hat=selected_hat,
+        question=question,
+        expanded_query=expanded_query,
+        session_summary_block=session_summary_block,
+        recent_dialogue_block=recent_dialogue_block,
+    )
+
+
+def _build_route_classification_prompt(
+    question: str,
+    *,
+    selected_hat: str,
+    session: SessionState | None,
+    template: str,
+) -> str:
+    session_summary_block, recent_dialogue_block = _session_prompt_blocks(session, question=question)
+    return render_prompt_template(
+        "route_classification_user_template",
+        template,
+        selected_hat=selected_hat,
+        question=question,
+        session_summary_block=session_summary_block,
+        recent_dialogue_block=recent_dialogue_block,
+    )
+
+
+def _session_prompt_blocks(session: SessionState | None, *, question: str) -> tuple[str, str]:
     summary = (session.summary or "").strip() if session is not None else ""
     session_summary_block = ""
     if summary:
@@ -1357,16 +1452,7 @@ def _build_no_context_answer_prompt(
             lines.append(f"{role}: {turn.content.strip()}")
         lines.append("</recent_dialogue>")
         recent_dialogue_block = "\n\n" + "\n".join(lines)
-
-    return render_prompt_template(
-        "no_context_answer_user_template",
-        template,
-        selected_hat=selected_hat,
-        question=question,
-        expanded_query=expanded_query,
-        session_summary_block=session_summary_block,
-        recent_dialogue_block=recent_dialogue_block,
-    )
+    return session_summary_block, recent_dialogue_block
 
 
 def _recent_turns_for_prompt(session: SessionState | None, *, question: str) -> list:
@@ -1470,6 +1556,17 @@ GROUPING_REVIEW_RESPONSE_FORMAT = {
 }
 
 
+ASK_ROUTE_RESPONSE_FORMAT = {
+    "type": "object",
+    "properties": {
+        "route": {"type": "string", "enum": ["retrieve", "chat_context"]},
+        "reason": {"type": "string"},
+    },
+    "required": ["route", "reason"],
+    "additionalProperties": False,
+}
+
+
 def _build_grouping_review_prompt(
     hat: str,
     topics: list[TopicGroupingRecord],
@@ -1535,6 +1632,19 @@ def _parse_grouping_review(raw: str, topics: list[TopicGroupingRecord]) -> list[
         )
     recommendations.sort(key=lambda item: item.confidence, reverse=True)
     return recommendations
+
+
+def _parse_ask_route_decision(raw: str) -> AskRouteDecision:
+    normalized = raw.strip()
+    fenced = re.match(r"```(?:json)?\s*(.*?)\s*```$", normalized, re.DOTALL)
+    if fenced:
+        normalized = fenced.group(1).strip()
+    payload = json.loads(normalized)
+    route = str(payload.get("route", "")).strip().lower()
+    if route not in {"retrieve", "chat_context"}:
+        raise RuntimeError(f"Unknown ask route '{route or '<missing>'}'.")
+    reason = str(payload.get("reason", "")).strip()
+    return AskRouteDecision(route=route, reason=reason)
 
 
 def _read_topic_summary_excerpt(summary_path: Path) -> str:
@@ -1710,35 +1820,3 @@ def _citation_location(metadata, filename: str) -> str:
         return ", ".join(locations)
     return Path(filename).stem or filename
 
-
-CONVERSATIONAL_FOLLOWUP_PATTERNS = (
-    r"^(yes|yeah|yep|no|nope|nah)\b",
-    r"^(okay|ok|alright|right|wait)\b",
-    r"^(but|and|so)\b",
-    r"\bi meant\b",
-    r"\byou mean\b",
-    r"\bdon't just\b",
-    r"\banswer properly\b",
-    r"\bthat's not what i asked\b",
-    r"\bwhat do you mean\b",
-    r"\bcan you rephrase\b",
-    r"\btry again\b",
-)
-
-
-def _is_conversational_followup(question: str, session: SessionState | None) -> bool:
-    if session is None:
-        return False
-    if not any(turn.role.lower() == "assistant" for turn in session.turns):
-        return False
-    normalized = " ".join(question.split()).strip()
-    if not normalized:
-        return False
-    lowered = normalized.lower()
-    if any(re.search(pattern, lowered) for pattern in CONVERSATIONAL_FOLLOWUP_PATTERNS):
-        return True
-    if len(normalized) <= 80 and not normalized.endswith(("?", ".")) and any(
-        marker in lowered for marker in ("that", "this", "it", "you", "your answer")
-    ):
-        return True
-    return False

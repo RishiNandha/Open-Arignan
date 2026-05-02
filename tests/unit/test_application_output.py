@@ -54,6 +54,30 @@ class FakeGenerator:
         return self.output
 
 
+class RouteAwareGenerator:
+    model_name = "qwen3:4b-q4_K_M"
+    backend_name = "fake-backend"
+
+    def __init__(self, *, route: str, answer: str) -> None:
+        self.route = route
+        self.answer = answer
+        self.calls: list[tuple[str, str, object]] = []
+
+    def generate(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        max_new_tokens: int = 800,
+        temperature: float = 0.1,
+        response_format=None,
+    ) -> str:
+        self.calls.append((system_prompt, user_prompt, response_format))
+        if response_format is not None:
+            return json.dumps({"route": self.route, "reason": "follow-up to the recent answer"})
+        return self.answer
+
+
 class FailingGenerator:
     model_name = "fake-llm"
     backend_name = "fake-backend"
@@ -468,7 +492,10 @@ def test_application_ask_respects_rerank_override(app_home: Path, monkeypatch) -
 
 
 def test_application_skips_retrieval_for_conversational_followup(app_home: Path, monkeypatch) -> None:
-    generator = FakeGenerator("You're right. Let me answer it directly instead of echoing the prompt.")
+    generator = RouteAwareGenerator(
+        route="chat_context",
+        answer="You're right. Let me answer it directly instead of echoing the prompt.",
+    )
 
     def fail_retrieval_pipeline(*args, **kwargs):
         raise AssertionError("Retrieval should not run for conversational follow-up")
@@ -492,7 +519,21 @@ def test_application_skips_retrieval_for_conversational_followup(app_home: Path,
     assert result.answer == "You're right. Let me answer it directly instead of echoing the prompt."
     assert result.citations == []
     assert result.debug.fused_hits == []
-    assert "conversational follow-up" in generator.calls[0][0].lower()
+    assert "classify the next chat turn" in generator.calls[0][0].lower()
+    assert generator.calls[0][2] is not None
+
+
+def test_application_reuses_main_generator_for_light_flow(app_home: Path, monkeypatch) -> None:
+    generator = FakeGenerator("Answer from the main model.")
+
+    monkeypatch.setattr(
+        "arignan.application.create_local_text_generator",
+        lambda config, progress_sink=None, **kwargs: generator,
+    )
+
+    app = ArignanApp(load_config(app_home=app_home))
+
+    assert app.light_text_generator is app.local_text_generator
 
 
 def test_application_no_context_still_uses_llm_with_warning(app_home: Path, monkeypatch) -> None:

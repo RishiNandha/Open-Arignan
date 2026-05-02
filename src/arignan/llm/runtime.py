@@ -28,6 +28,7 @@ class LocalTextGenerator(Protocol):
     model_name: str
     backend_name: str
     stream_sink: Callable[[str], None] | None
+    thinking_sink: Callable[[str], None] | None
 
     def generate(
         self,
@@ -46,12 +47,15 @@ class OllamaTextGenerator:
     config: AppConfig
     progress_sink: Callable[[str], None] | None = None
     stream_sink: Callable[[str], None] | None = None
+    thinking_sink: Callable[[str], None] | None = None
     memory_recovery: Callable[[str], bool] | None = None
     model_name: str = field(init=False)
     backend_name: str = field(init=False)
     _client: httpx.Client | None = field(default=None, init=False, repr=False)
     _model_ready: bool = field(default=False, init=False, repr=False)
     _gpu_reported: bool = field(default=False, init=False, repr=False)
+    last_thinking: str = field(default="", init=False, repr=False)
+    last_usage: dict[str, Any] | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.model_name = resolve_ollama_model_id(self.config.local_llm_model)
@@ -82,8 +86,15 @@ class OllamaTextGenerator:
             self._model_ready = True
         client = self._ensure_client()
         endpoint = self.config.local_llm_endpoint.rstrip("/") + "/api/chat"
-        messages = _build_ollama_messages(self.model_name, system_prompt=system_prompt, user_prompt=user_prompt)
-        use_stream = self.stream_sink is not None and response_format is None
+        want_thinking_stream = self.thinking_sink is not None and response_format is None and _supports_thinking(self.model_name)
+        disable_thinking = not want_thinking_stream and _supports_no_think(self.model_name)
+        messages = _build_ollama_messages(
+            self.model_name,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            disable_thinking=disable_thinking,
+        )
+        use_stream = (self.stream_sink is not None or want_thinking_stream) and response_format is None
         payload = {
             "model": self.model_name,
             "messages": messages,
@@ -96,9 +107,13 @@ class OllamaTextGenerator:
             },
         }
         stream_content = ""
+        self.last_thinking = ""
+        self.last_usage = None
         if response_format is not None:
             payload["format"] = response_format
-        if _supports_no_think(self.model_name):
+        if want_thinking_stream:
+            payload["think"] = True
+        elif _supports_no_think(self.model_name):
             payload["think"] = False
         last_http_error: httpx.HTTPError | None = None
         last_details = ""
@@ -190,6 +205,8 @@ class OllamaTextGenerator:
 
     def _collect_streamed_content(self, response: httpx.Response) -> str:
         parts: list[str] = []
+        thinking_parts: list[str] = []
+        usage: dict[str, Any] | None = None
         for raw_line in response.iter_lines():
             if not raw_line:
                 continue
@@ -197,11 +214,32 @@ class OllamaTextGenerator:
                 payload = httpx.Response(200, content=raw_line).json()
             except ValueError:
                 continue
+            message = payload.get("message", {})
+            thinking = message.get("thinking")
+            if isinstance(thinking, str) and thinking:
+                thinking_parts.append(thinking)
+                if self.thinking_sink is not None:
+                    self.thinking_sink(thinking)
             content = payload.get("message", {}).get("content")
             if isinstance(content, str) and content:
                 parts.append(content)
                 if self.stream_sink is not None:
                     self.stream_sink(content)
+            if payload.get("done"):
+                usage = {
+                    key: payload.get(key)
+                    for key in (
+                        "total_duration",
+                        "load_duration",
+                        "prompt_eval_count",
+                        "prompt_eval_duration",
+                        "eval_count",
+                        "eval_duration",
+                    )
+                    if payload.get(key) is not None
+                }
+        self.last_thinking = "".join(thinking_parts)
+        self.last_usage = usage
         return "".join(parts)
 
 
@@ -210,6 +248,7 @@ class TransformersTextGenerator:
     config: AppConfig
     progress_sink: Callable[[str], None] | None = None
     stream_sink: Callable[[str], None] | None = None
+    thinking_sink: Callable[[str], None] | None = None
     model_name: str = field(init=False)
     backend_name: str = field(init=False)
     _tokenizer: object | None = None
@@ -398,9 +437,15 @@ def _model_device(model):
         return "cpu"
 
 
-def _build_ollama_messages(model_name: str, *, system_prompt: str, user_prompt: str) -> list[dict[str, str]]:
+def _build_ollama_messages(
+    model_name: str,
+    *,
+    system_prompt: str,
+    user_prompt: str,
+    disable_thinking: bool,
+) -> list[dict[str, str]]:
     system_content = system_prompt.strip()
-    if _supports_no_think(model_name):
+    if disable_thinking and _supports_no_think(model_name):
         system_content = "/no_think\n" + system_content
     return [
         {"role": "system", "content": system_content},
@@ -411,6 +456,11 @@ def _build_ollama_messages(model_name: str, *, system_prompt: str, user_prompt: 
 def _supports_no_think(model_name: str) -> bool:
     normalized = model_name.lower()
     return normalized.startswith("qwen3")
+
+
+def _supports_thinking(model_name: str) -> bool:
+    normalized = model_name.lower()
+    return normalized.startswith(("qwen3", "deepseek-r1", "deepseek-v3.1", "gpt-oss"))
 
 
 def _strip_think_blocks(text: str) -> str:

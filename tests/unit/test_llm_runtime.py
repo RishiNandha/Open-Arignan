@@ -192,6 +192,54 @@ def test_ollama_text_generator_reports_gpu_state_once_after_success(app_home, mo
     assert sum("GPU after first LLM response" in message for message in progress) == 1
 
 
+def test_ollama_text_generator_streams_thinking_and_answer_separately(app_home) -> None:
+    thinking_chunks: list[str] = []
+    answer_chunks: list[str] = []
+
+    class FakeStreamResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def raise_for_status(self) -> None:
+            return None
+
+        @staticmethod
+        def iter_lines():
+            return iter(
+                [
+                    b'{"message":{"thinking":"Let me think."},"done":false}',
+                    b'{"message":{"thinking":" More reasoning."},"done":false}',
+                    b'{"message":{"content":"Final"},"done":false}',
+                    b'{"message":{"content":" answer."},"done":false}',
+                    b'{"done":true,"total_duration":2000000000,"eval_count":12}',
+                ]
+            )
+
+    class FakeClient:
+        def stream(self, method: str, url: str, json: dict[str, object]):
+            assert method == "POST"
+            assert json["stream"] is True
+            assert json["think"] is True
+            return FakeStreamResponse()
+
+    generator = OllamaTextGenerator(AppConfig(app_home=app_home))
+    generator._model_ready = True
+    generator._client = FakeClient()  # type: ignore[assignment]
+    generator.thinking_sink = thinking_chunks.append
+    generator.stream_sink = answer_chunks.append
+
+    output = generator.generate(system_prompt="System prompt", user_prompt="User prompt")
+
+    assert output == "Final answer."
+    assert "".join(thinking_chunks) == "Let me think. More reasoning."
+    assert "".join(answer_chunks) == "Final answer."
+    assert generator.last_thinking == "Let me think. More reasoning."
+    assert generator.last_usage == {"total_duration": 2000000000, "eval_count": 12}
+
+
 def test_transformers_text_generator_prefers_cuda_load_when_available(app_home, monkeypatch) -> None:
     captured: dict[str, object] = {}
 
