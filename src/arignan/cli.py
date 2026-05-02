@@ -4,10 +4,12 @@ import argparse
 import os
 import sys
 from pathlib import Path
-from typing import Sequence, TextIO
+from typing import TYPE_CHECKING, Sequence, TextIO
 
-from arignan.application import ArignanApp, AskResult, LoadResult, format_citation
 from arignan.config import load_config
+
+if TYPE_CHECKING:
+    from arignan.application import ArignanApp, AskResult, LoadResult, RetrievalResult
 
 
 class ArignanHelpFormatter(argparse.HelpFormatter):
@@ -107,6 +109,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--settings", type=Path, default=None, help="Use a specific settings.json file.")
     parser.add_argument("--pid", type=int, default=None, help="Override the terminal PID used for session state.")
     parser.add_argument("-gui", "--gui", action="store_true", help="Launch the local browser GUI.")
+    parser.add_argument("--mcp", action="store_true", help="Run the MCP stdio server.")
 
     subparsers = parser.add_subparsers(dest="command", required=False, title="commands", metavar="<command>")
 
@@ -135,6 +138,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Choose how the final answer is produced: default LLM, light LLM, deterministic summary, or raw reranked context.",
     )
     ask_parser.add_argument("--debug", action="store_true", help="Print retrieval and reranking context details.")
+
+    retrieve_parser = subparsers.add_parser(
+        "retrieve",
+        help="Retrieve reranked local context without calling any LLM.",
+        description="Retrieve reranked local context without calling any LLM.",
+        formatter_class=ArignanHelpFormatter,
+    )
+    retrieve_parser.add_argument("question", help="Question or query to retrieve context for.")
+    retrieve_parser.add_argument("--hat", default="auto", help="Restrict retrieval to a hat. Defaults to auto.")
+    retrieve_parser.add_argument("--rerank-top-k", type=int, default=None, help="Override the reranker candidate limit.")
+    retrieve_parser.add_argument(
+        "--answer-context-top-k",
+        type=int,
+        default=None,
+        help="Override how many post-rerank context items are finally returned.",
+    )
+    retrieve_parser.add_argument("--debug", action="store_true", help="Print retrieval and reranking context details.")
 
     delete_parser = subparsers.add_parser(
         "delete",
@@ -181,10 +201,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     resolved_pid = args.pid or os.getppid() or os.getpid()
+    if args.mcp:
+        return launch_mcp(app_home=args.app_home, settings_path=args.settings, terminal_pid=resolved_pid)
     if args.gui:
         return launch_gui(app_home=args.app_home, settings_path=args.settings, terminal_pid=resolved_pid)
     if args.command is None:
         parser.error("either a command or -gui is required")
+    from arignan.application import ArignanApp
+
     config = load_config(settings_path=args.settings, app_home=args.app_home)
     reporter = _build_progress_reporter(command=args.command, debug=getattr(args, "debug", False))
     app = ArignanApp(config, progress_sink=reporter.emit, terminal_pid=resolved_pid)
@@ -210,6 +234,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             _print_output_block("\n".join(ask_lines))
             if args.debug:
                 _print_output_block(_format_ask_debug(result))
+            return 0
+
+        if args.command == "retrieve":
+            result = app.retrieve_context(
+                args.question,
+                hat=args.hat,
+                rerank_top_k=args.rerank_top_k,
+                answer_context_top_k=args.answer_context_top_k,
+            )
+            reporter.finish()
+            _print_output_block(_format_retrieve_output(result))
+            if args.debug:
+                _print_output_block(_format_retrieve_debug(result))
             return 0
 
         if args.command == "delete":
@@ -311,6 +348,25 @@ def launch_gui(*, app_home: Path | None, settings_path: Path | None, terminal_pi
     return run_gui(app_home=app_home, settings_path=settings_path, terminal_pid=terminal_pid)
 
 
+def launch_mcp(*, app_home: Path | None, settings_path: Path | None, terminal_pid: int) -> int:
+    from arignan.application import ArignanApp
+    from arignan.mcp import ArignanMCPServer
+    from arignan.mcp.stdio_server import run_stdio_server
+
+    def _mcp_progress(message: str) -> None:
+        print(f"[arignan-mcp] {message}", file=sys.stderr, flush=True)
+
+    return run_stdio_server(
+        ArignanMCPServer(
+            app_factory=lambda: ArignanApp(
+                load_config(settings_path=settings_path, app_home=app_home),
+                progress_sink=_mcp_progress,
+                terminal_pid=terminal_pid,
+            )
+        )
+    )
+
+
 def _print_output_block(text: str) -> None:
     print()
     if text:
@@ -331,6 +387,32 @@ def _format_load_summary(result: LoadResult) -> str:
         for failure in result.failures:
             lines.append(f"- {failure.source_uri}")
     return "\n".join(lines)
+
+
+def _format_retrieve_output(result: RetrievalResult) -> str:
+    return render_retrieved_context(result.answer_hits)
+
+
+def _format_retrieve_debug(result: RetrievalResult) -> str:
+    lines = [
+        "Debug: retrieval only",
+        f"Selected hat: {result.selected_hat}",
+        f"Expanded query: {result.expanded_query}",
+        (
+            "Hit counts: "
+            f"dense={len(result.dense_hits)}, lexical={len(result.lexical_hits)}, "
+            f"map={len(result.map_hits)}, fused={len(result.fused_hits)}, "
+            f"reranked={len(result.reranked_hits)}, final={len(result.answer_hits)}"
+        ),
+        "",
+    ]
+    lines.extend(_format_hit_group("Dense hits", result.dense_hits))
+    lines.extend(_format_hit_group("Lexical hits", result.lexical_hits))
+    lines.extend(_format_hit_group("Map hits", result.map_hits))
+    lines.extend(_format_hit_group("Fused hits", result.fused_hits))
+    lines.extend(_format_hit_group("Reranked hits", result.reranked_hits))
+    lines.extend(_format_hit_group("Final context", result.answer_hits))
+    return "\n".join(lines).rstrip()
 
 
 def _format_load_debug(result: LoadResult) -> str:
@@ -407,6 +489,8 @@ def _format_model_calls(calls) -> list[str]:
 
 
 def _format_hit_group(title: str, hits) -> list[str]:
+    from arignan.application import format_citation
+
     lines = [f"{title} ({len(hits)}):"]
     if not hits:
         lines.append("  none")
@@ -422,3 +506,21 @@ def _format_hit_group(title: str, hits) -> list[str]:
         lines.append(f"     {snippet}")
     lines.append("")
     return lines
+
+
+def render_retrieved_context(hits) -> str:
+    from arignan.application import format_citation
+
+    if not hits:
+        return "No relevant local knowledge was found for that question."
+    lines = ["Top retrieved context:"]
+    for index, hit in enumerate(hits, start=1):
+        score = float(hit.extras.get("rerank_score", hit.extras.get("rrf_score", hit.score)))
+        snippet = " ".join(hit.text.split())
+        if len(snippet) > 520:
+            snippet = snippet[:517].rstrip() + "..."
+        lines.append(f"{index}. [{score:.3f}] {format_citation(hit)}")
+        lines.append(f"   {snippet}")
+        if index < len(hits):
+            lines.append("")
+    return "\n".join(lines)

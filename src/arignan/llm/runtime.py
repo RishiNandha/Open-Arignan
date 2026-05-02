@@ -27,13 +27,16 @@ configure_text_runtime_environment()
 class LocalTextGenerator(Protocol):
     model_name: str
     backend_name: str
+    stream_sink: Callable[[str], None] | None
+    thinking_sink: Callable[[str], None] | None
 
     def generate(
         self,
         *,
         system_prompt: str,
         user_prompt: str,
-        max_new_tokens: int = 800,
+        chat_messages: list[dict[str, str]] | None = None,
+        max_new_tokens: int = 4096,
         temperature: float = 0.1,
         response_format: dict[str, Any] | None = None,
     ) -> str:
@@ -44,12 +47,17 @@ class LocalTextGenerator(Protocol):
 class OllamaTextGenerator:
     config: AppConfig
     progress_sink: Callable[[str], None] | None = None
+    stream_sink: Callable[[str], None] | None = None
+    thinking_sink: Callable[[str], None] | None = None
     memory_recovery: Callable[[str], bool] | None = None
     model_name: str = field(init=False)
     backend_name: str = field(init=False)
     _client: httpx.Client | None = field(default=None, init=False, repr=False)
     _model_ready: bool = field(default=False, init=False, repr=False)
     _gpu_reported: bool = field(default=False, init=False, repr=False)
+    last_thinking: str = field(default="", init=False, repr=False)
+    last_usage: dict[str, Any] | None = field(default=None, init=False, repr=False)
+    last_failure_detail: str | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.model_name = resolve_ollama_model_id(self.config.local_llm_model)
@@ -60,31 +68,27 @@ class OllamaTextGenerator:
         *,
         system_prompt: str,
         user_prompt: str,
-        max_new_tokens: int = 800,
+        chat_messages: list[dict[str, str]] | None = None,
+        max_new_tokens: int = 4096,
         temperature: float = 0.1,
         response_format: dict[str, Any] | None = None,
     ) -> str:
-        if not self._model_ready:
-            ensure_model_available(
-                self.config.app_home,
-                self.config.local_llm_endpoint,
-                self.model_name,
-                progress=self.progress_sink,
-                timeout_seconds=float(max(self.config.local_llm_timeout_seconds, 1800)),
-                context_window=self.config.local_llm_context_window,
-                flash_attention=self.config.local_llm_flash_attention,
-                kv_cache_type=self.config.local_llm_kv_cache_type,
-                num_parallel=self.config.local_llm_num_parallel,
-                max_loaded_models=self.config.local_llm_max_loaded_models,
-            )
-            self._model_ready = True
         client = self._ensure_client()
         endpoint = self.config.local_llm_endpoint.rstrip("/") + "/api/chat"
-        messages = _build_ollama_messages(self.model_name, system_prompt=system_prompt, user_prompt=user_prompt)
+        want_thinking_stream = self.thinking_sink is not None and response_format is None and _supports_thinking(self.model_name)
+        disable_thinking = not want_thinking_stream and _supports_no_think(self.model_name)
+        messages = _build_ollama_messages(
+            self.model_name,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            disable_thinking=disable_thinking,
+            chat_messages=chat_messages,
+        )
+        use_stream = (self.stream_sink is not None or want_thinking_stream) and response_format is None
         payload = {
             "model": self.model_name,
             "messages": messages,
-            "stream": False,
+            "stream": use_stream,
             "keep_alive": self.config.local_llm_keep_alive,
             "options": {
                 "temperature": max(temperature, 0.0),
@@ -92,18 +96,56 @@ class OllamaTextGenerator:
                 "num_ctx": self.config.local_llm_context_window,
             },
         }
+        stream_content = ""
+        stream_error_detail: str | None = None
+        self.last_thinking = ""
+        self.last_usage = None
+        self.last_failure_detail = None
         if response_format is not None:
             payload["format"] = response_format
-        if _supports_no_think(self.model_name):
+        if want_thinking_stream:
+            payload["think"] = True
+        elif _supports_no_think(self.model_name):
             payload["think"] = False
-        last_http_error: httpx.HTTPError | None = None
-        last_details = ""
         for attempt in range(2):
             try:
-                response = client.post(endpoint, json=payload)
-                response.raise_for_status()
-                break
+                self._ensure_model_ready()
+                if use_stream:
+                    with client.stream("POST", endpoint, json=payload) as response:
+                        response.raise_for_status()
+                        stream_content, stream_error_detail = self._collect_streamed_content(response)
+                    content = stream_content
+                else:
+                    response = client.post(endpoint, json=payload)
+                    response.raise_for_status()
+                    try:
+                        response_payload = response.json()
+                    except ValueError as exc:
+                        detail = "Ollama returned a non-JSON response"
+                        if attempt == 0 and self._prepare_runtime_retry(detail):
+                            time.sleep(0.5)
+                            continue
+                        raise RuntimeError(detail) from exc
+                    content = response_payload.get("message", {}).get("content")
+                if not isinstance(content, str) or not content.strip():
+                    detail = stream_error_detail or "stream completed without answer text"
+                    if self.last_thinking.strip():
+                        detail += " after producing thinking tokens"
+                    if attempt == 0 and self._prepare_runtime_retry(detail):
+                        time.sleep(0.5)
+                        continue
+                    self._model_ready = False
+                    self.last_failure_detail = detail
+                    raise RuntimeError(f"Ollama finished without answer text for model {self.model_name}: {detail}")
+                self._report_gpu_state_once()
+                return _strip_think_blocks(content).strip()
             except httpx.ConnectError as exc:
+                detail = str(exc)
+                if attempt == 0 and self._prepare_runtime_retry(detail):
+                    time.sleep(0.5)
+                    continue
+                self._model_ready = False
+                self.last_failure_detail = detail
                 raise RuntimeError(
                     f"failed to reach the local model runtime at {self.config.local_llm_endpoint}. "
                     "Re-run setup if the managed runtime was not provisioned correctly."
@@ -113,28 +155,44 @@ class OllamaTextGenerator:
                 if attempt == 0 and self._recover_from_memory_pressure(details):
                     time.sleep(0.5)
                     continue
-                last_http_error = exc
-                last_details = details
-                break
-        else:  # pragma: no cover - loop always breaks or continues into second iteration
-            response = None
-        if last_http_error is not None:
-            raise RuntimeError(f"local model runtime request failed for model {self.model_name}: {last_details}") from last_http_error
+                if attempt == 0 and _is_retryable_runtime_http_error(exc, details) and self._prepare_runtime_retry(details):
+                    time.sleep(0.5)
+                    continue
+                self._model_ready = False
+                self.last_failure_detail = details
+                raise RuntimeError(f"local model runtime request failed for model {self.model_name}: {details}") from exc
 
-        try:
-            payload = response.json()
-        except ValueError as exc:
-            raise RuntimeError("Ollama returned a non-JSON response") from exc
-        self._report_gpu_state_once()
-        content = payload.get("message", {}).get("content")
-        if not isinstance(content, str) or not content.strip():
-            raise RuntimeError(f"Ollama returned an empty response for model {self.model_name}")
-        return _strip_think_blocks(content).strip()
+        raise RuntimeError(f"local model runtime request failed for model {self.model_name}: unknown runtime error")
 
     def _ensure_client(self) -> httpx.Client:
         if self._client is None:
             self._client = httpx.Client(timeout=self.config.local_llm_timeout_seconds)
         return self._client
+
+    def _ensure_model_ready(self) -> None:
+        if self._model_ready:
+            return
+        ensure_model_available(
+            self.config.app_home,
+            self.config.local_llm_endpoint,
+            self.model_name,
+            progress=self.progress_sink,
+            timeout_seconds=float(max(self.config.local_llm_timeout_seconds, 1800)),
+            context_window=self.config.local_llm_context_window,
+            flash_attention=self.config.local_llm_flash_attention,
+            kv_cache_type=self.config.local_llm_kv_cache_type,
+            num_parallel=self.config.local_llm_num_parallel,
+            max_loaded_models=self.config.local_llm_max_loaded_models,
+        )
+        self._model_ready = True
+
+    def _prepare_runtime_retry(self, detail: str) -> bool:
+        self._model_ready = False
+        self.last_failure_detail = detail
+        self._emit_progress(
+            f"Local model '{self.model_name}' stopped mid-generation; re-checking the Ollama runtime and retrying once..."
+        )
+        return True
 
     def _recover_from_memory_pressure(self, details: str) -> bool:
         if not _is_ollama_memory_pressure(details):
@@ -176,11 +234,56 @@ class OllamaTextGenerator:
         if message:
             self._emit_progress(message)
 
+    def _collect_streamed_content(self, response: httpx.Response) -> tuple[str, str | None]:
+        parts: list[str] = []
+        thinking_parts: list[str] = []
+        usage: dict[str, Any] | None = None
+        error_detail: str | None = None
+        for raw_line in response.iter_lines():
+            if not raw_line:
+                continue
+            try:
+                payload = httpx.Response(200, content=raw_line).json()
+            except ValueError:
+                continue
+            message = payload.get("message", {})
+            thinking = message.get("thinking")
+            if isinstance(thinking, str) and thinking:
+                thinking_parts.append(thinking)
+                if self.thinking_sink is not None:
+                    self.thinking_sink(thinking)
+            content = payload.get("message", {}).get("content")
+            if isinstance(content, str) and content:
+                parts.append(content)
+                if self.stream_sink is not None:
+                    self.stream_sink(content)
+            error = payload.get("error")
+            if isinstance(error, str) and error.strip():
+                error_detail = error.strip()
+            if payload.get("done"):
+                usage = {
+                    key: payload.get(key)
+                    for key in (
+                        "total_duration",
+                        "load_duration",
+                        "prompt_eval_count",
+                        "prompt_eval_duration",
+                        "eval_count",
+                        "eval_duration",
+                    )
+                    if payload.get(key) is not None
+                }
+        self.last_thinking = "".join(thinking_parts)
+        self.last_usage = usage
+        return "".join(parts), error_detail
+
 
 @dataclass(slots=True)
 class TransformersTextGenerator:
     config: AppConfig
     progress_sink: Callable[[str], None] | None = None
+    stream_sink: Callable[[str], None] | None = None
+    thinking_sink: Callable[[str], None] | None = None
     model_name: str = field(init=False)
     backend_name: str = field(init=False)
     _tokenizer: object | None = None
@@ -195,12 +298,18 @@ class TransformersTextGenerator:
         *,
         system_prompt: str,
         user_prompt: str,
-        max_new_tokens: int = 800,
+        chat_messages: list[dict[str, str]] | None = None,
+        max_new_tokens: int = 4096,
         temperature: float = 0.1,
         response_format: dict[str, Any] | None = None,
     ) -> str:
         tokenizer, model = self._ensure_loaded()
-        prompt = self._build_prompt(tokenizer, system_prompt=system_prompt, user_prompt=user_prompt)
+        prompt = self._build_prompt(
+            tokenizer,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            chat_messages=chat_messages,
+        )
         model_inputs, prompt_length = self._prepare_inputs(tokenizer, model, prompt)
         generation_kwargs = {
             "max_new_tokens": max_new_tokens,
@@ -274,11 +383,11 @@ class TransformersTextGenerator:
         return tokenizer, model
 
     @staticmethod
-    def _build_prompt(tokenizer, *, system_prompt: str, user_prompt: str):
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ]
+    def _build_prompt(tokenizer, *, system_prompt: str, user_prompt: str, chat_messages: list[dict[str, str]] | None = None):
+        messages = [{"role": "system", "content": system_prompt}]
+        if chat_messages:
+            messages.extend(chat_messages)
+        messages.append({"role": "user", "content": user_prompt})
         if hasattr(tokenizer, "apply_chat_template"):
             return tokenizer.apply_chat_template(
                 messages,
@@ -369,19 +478,37 @@ def _model_device(model):
         return "cpu"
 
 
-def _build_ollama_messages(model_name: str, *, system_prompt: str, user_prompt: str) -> list[dict[str, str]]:
+def _build_ollama_messages(
+    model_name: str,
+    *,
+    system_prompt: str,
+    user_prompt: str,
+    disable_thinking: bool,
+    chat_messages: list[dict[str, str]] | None = None,
+) -> list[dict[str, str]]:
     system_content = system_prompt.strip()
-    if _supports_no_think(model_name):
+    if disable_thinking and _supports_no_think(model_name):
         system_content = "/no_think\n" + system_content
-    return [
-        {"role": "system", "content": system_content},
-        {"role": "user", "content": user_prompt},
-    ]
+    messages = [{"role": "system", "content": system_content}]
+    if chat_messages:
+        for message in chat_messages:
+            role = str(message.get("role", "")).strip().lower()
+            content = str(message.get("content", "")).strip()
+            if role not in {"user", "assistant", "system"} or not content:
+                continue
+            messages.append({"role": role, "content": content})
+    messages.append({"role": "user", "content": user_prompt})
+    return messages
 
 
 def _supports_no_think(model_name: str) -> bool:
     normalized = model_name.lower()
     return normalized.startswith("qwen3")
+
+
+def _supports_thinking(model_name: str) -> bool:
+    normalized = model_name.lower()
+    return normalized.startswith(("qwen3", "deepseek-r1", "deepseek-v3.1", "gpt-oss"))
 
 
 def _strip_think_blocks(text: str) -> str:
@@ -402,4 +529,19 @@ def _is_ollama_memory_pressure(details: str) -> bool:
         or "out of memory" in normalized
         or "insufficient memory" in normalized
         or "cuda out of memory" in normalized
+    )
+
+
+def _is_retryable_runtime_http_error(exc: httpx.HTTPError, details: str) -> bool:
+    response = getattr(exc, "response", None)
+    status_code = getattr(response, "status_code", None)
+    if status_code is not None and int(status_code) >= 500:
+        return True
+    normalized = details.lower()
+    return (
+        "connection reset" in normalized
+        or "connection refused" in normalized
+        or "broken pipe" in normalized
+        or "unexpected eof" in normalized
+        or "eof" in normalized
     )

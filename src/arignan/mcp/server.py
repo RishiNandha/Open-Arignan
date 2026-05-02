@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
-from arignan.application import ArignanApp, format_citation
-from arignan.retrieval import HeuristicReranker, RetrievalPipeline
-
+if TYPE_CHECKING:
+    from arignan.application import ArignanApp
 
 @dataclass(slots=True)
 class MCPTool:
@@ -21,9 +22,19 @@ class MCPResource:
 
 
 class ArignanMCPServer:
-    def __init__(self, app: ArignanApp) -> None:
-        self.app = app
-        self.reranker = HeuristicReranker()
+    def __init__(self, app: ArignanApp | None = None, *, app_factory: Callable[[], ArignanApp] | None = None) -> None:
+        if app is None and app_factory is None:
+            raise ValueError("ArignanMCPServer requires either an app instance or an app_factory.")
+        self._app = app
+        self._app_factory = app_factory
+
+    @property
+    def app(self) -> ArignanApp:
+        if self._app is None:
+            if self._app_factory is None:  # pragma: no cover - constructor guards this
+                raise RuntimeError("Arignan MCP app factory is not configured.")
+            self._app = self._app_factory()
+        return self._app
 
     def list_tools(self) -> list[MCPTool]:
         return [
@@ -35,6 +46,8 @@ class ArignanMCPServer:
                     "properties": {
                         "query": {"type": "string"},
                         "hat": {"type": "string", "default": "auto"},
+                        "rerank_top_k": {"type": "integer"},
+                        "answer_context_top_k": {"type": "integer"},
                     },
                     "required": ["query"],
                 },
@@ -42,35 +55,29 @@ class ArignanMCPServer:
         ]
 
     def call_tool(self, name: str, arguments: dict) -> dict:
+        from arignan.application import format_citation
+
         if name != "retrieve_context":
             raise ValueError(f"unknown MCP tool: {name}")
         query = arguments["query"]
         hat = arguments.get("hat", "auto")
-        bundle = RetrievalPipeline(
-            self.app.layout,
-            embedder=self.app.embedder,
-            dense_limit=self.app.config.retrieval.dense_top_k,
-            lexical_limit=self.app.config.retrieval.lexical_top_k,
-            map_limit=self.app.config.retrieval.map_top_k,
-            fused_limit=self.app.config.retrieval.fused_top_k,
-        ).retrieve(query, hat=hat)
-        reranked = self.reranker.rerank(
-            bundle.expanded_query,
-            bundle.fused_hits,
-            limit=self.app.config.retrieval.rerank_top_k,
-            min_score=0.05,
+        result = self.app.retrieve_context(
+            query,
+            hat=hat,
+            rerank_top_k=arguments.get("rerank_top_k"),
+            answer_context_top_k=arguments.get("answer_context_top_k"),
         )
         return {
             "query": query,
-            "selected_hat": bundle.selected_hat,
-            "expanded_query": bundle.expanded_query,
+            "selected_hat": result.selected_hat,
+            "expanded_query": result.expanded_query,
             "contexts": [
                 {
                     "text": hit.text,
                     "source": hit.source.value,
                     "citation": format_citation(hit),
                 }
-                for hit in reranked
+                for hit in result.answer_hits
             ],
         }
 

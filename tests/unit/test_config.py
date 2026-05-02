@@ -11,6 +11,7 @@ def test_load_config_uses_defaults_when_settings_missing(app_home: Path) -> None
 
     assert isinstance(config, AppConfig)
     assert config.app_home == app_home.resolve()
+    assert config.ask_route_backend == "llm"
     assert config.local_llm_backend == "ollama"
     assert config.local_llm_model == "qwen3:4b-q4_K_M"
     assert config.local_llm_light_model == "qwen3:0.6b"
@@ -34,6 +35,21 @@ def test_load_config_uses_defaults_when_settings_missing(app_home: Path) -> None
     assert config.session.soft_token_limit == 18000
     assert config.session.keep_recent_turns == 10
     assert config.markdown.max_md_length == 5000
+    assert (app_home / "settings.json").exists()
+
+
+def test_load_config_recreates_missing_settings_file(app_home: Path) -> None:
+    settings_path = app_home / "settings.json"
+    if settings_path.exists():
+        settings_path.unlink()
+
+    config = load_config(app_home=app_home, environ={})
+
+    assert config.app_home == app_home.resolve()
+    assert settings_path.exists()
+    payload = json.loads(settings_path.read_text(encoding="utf-8"))
+    assert payload["ask_route_backend"] == "llm"
+    assert payload["local_llm_model"] == "qwen3:4b-q4_K_M"
 
 
 def test_load_config_merges_nested_overrides(app_home: Path) -> None:
@@ -42,6 +58,7 @@ def test_load_config_merges_nested_overrides(app_home: Path) -> None:
     settings_path.write_text(
         json.dumps(
             {
+                "ask_route_backend": "embedding",
                 "local_llm_backend": "transformers",
                 "local_llm_model": "custom-llm",
                 "embedding_model": "BAAI/bge-small-en-v1.5",
@@ -55,6 +72,7 @@ def test_load_config_merges_nested_overrides(app_home: Path) -> None:
 
     config = load_config(app_home=app_home)
 
+    assert config.ask_route_backend == "embedding"
     assert config.local_llm_backend == "transformers"
     assert config.local_llm_model == "custom-llm"
     assert config.local_llm_light_model == "qwen3:0.6b"
@@ -89,6 +107,7 @@ def test_write_default_settings_creates_file(app_home: Path) -> None:
     assert settings_path.exists()
     payload = json.loads(settings_path.read_text(encoding="utf-8"))
     assert payload["app_home"] == str(app_home.resolve())
+    assert payload["ask_route_backend"] == "llm"
     assert payload["local_llm_backend"] == "ollama"
     assert payload["local_llm_model"] == "qwen3:4b-q4_K_M"
     assert payload["local_llm_light_model"] == "qwen3:0.6b"

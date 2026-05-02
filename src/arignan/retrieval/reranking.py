@@ -4,7 +4,12 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
 
-from arignan.compute import format_torch_cuda_memory, preferred_torch_device, release_torch_cuda_memory
+from arignan.compute import (
+    _report_best_effort_exception,
+    format_torch_cuda_memory,
+    preferred_torch_device,
+    release_torch_cuda_memory,
+)
 from arignan.indexing import tokenize
 from arignan.model_registry import DEFAULT_RERANKER_MODEL_REPO_ID, resolve_model_storage_dir
 from arignan.models import RetrievalHit
@@ -86,8 +91,8 @@ class CrossEncoderReranker:
         if self.device == "cuda" and hasattr(model, "model") and hasattr(model.model, "cpu"):
             try:
                 model.model.cpu()
-            except Exception:  # pragma: no cover - depends on local runtime
-                pass
+            except Exception as exc:  # pragma: no cover - depends on local runtime
+                _report_best_effort_exception("reranker model GPU offload", exc)
         del model
         release_torch_cuda_memory()
         return True

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import gc
+import sys
+import traceback
 from typing import Any
 
 
@@ -27,7 +29,8 @@ def release_torch_cuda_memory() -> bool:
             try:
                 action()
                 released = True
-            except Exception:  # pragma: no cover - depends on local torch runtime
+            except Exception as exc:  # pragma: no cover - depends on local torch runtime
+                _report_best_effort_exception(f"torch.cuda.{action_name}()", exc)
                 continue
     return released
 
@@ -57,4 +60,9 @@ def format_torch_cuda_memory(label: str) -> str | None:
         f"{label}: torch cuda allocated={snapshot['allocated_gib']:.2f} GiB, "
         f"reserved={snapshot['reserved_gib']:.2f} GiB, total={snapshot['total_gib']:.2f} GiB"
     )
+
+
+def _report_best_effort_exception(task: str, exc: BaseException) -> None:
+    print(f"[arignan] Non-fatal cleanup error during {task}:", file=sys.stderr)
+    traceback.print_exception(type(exc), exc, exc.__traceback__, file=sys.stderr)
 

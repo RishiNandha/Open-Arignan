@@ -54,6 +54,7 @@ class MarkdownConfig:
 
 @dataclass(slots=True)
 class AppConfig:
+    ask_route_backend: str = "llm"
     local_llm_backend: str = "ollama"
     local_llm_model: str = DEFAULT_LOCAL_LLM_REPO_ID
     local_llm_light_model: str = DEFAULT_LIGHT_LOCAL_LLM_REPO_ID
@@ -109,6 +110,8 @@ def load_config(
     env = environ or os.environ
     resolved_home = resolve_app_home(app_home=app_home, environ=env)
     resolved_settings = resolve_settings_path(settings_path=settings_path, app_home=resolved_home)
+    if not resolved_settings.exists():
+        write_default_settings(settings_path=resolved_settings, app_home=resolved_home, overwrite=False)
 
     config = AppConfig(app_home=resolved_home)
     raw = _load_json(resolved_settings)

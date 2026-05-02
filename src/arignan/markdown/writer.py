@@ -25,6 +25,7 @@ from arignan.markdown.rendering import (
     collect_semantic_headings,
 )
 from arignan.models import ParsedDocument
+from arignan.prompts import DEFAULT_PROMPT_SET, PromptSet, render_prompt_template
 from arignan.session.exception_log import SessionExceptionLogger
 from arignan.tracing import ModelTraceCollector
 
@@ -132,17 +133,18 @@ class HeuristicArtifactWriter:
 class LLMArtifactWriter:
     generator: LocalTextGenerator
     fallback: ArtifactWriter
+    prompts: PromptSet = DEFAULT_PROMPT_SET
     trace_sink: ModelTraceCollector | None = None
     progress_sink: Callable[[str], None] | None = None
     exception_logger: SessionExceptionLogger | None = None
 
     def render_topic(self, documents: list[ParsedDocument], plan: GroupingPlan) -> TopicRender:
         fallback = self.fallback.render_topic(documents, plan)
-        prompt = _build_topic_prompt(documents, plan, fallback)
+        prompt = _build_topic_prompt(documents, plan, fallback, template=self.prompts.topic_user_template)
         try:
             self._emit_progress(f"Calling local LLM for topic summary markdown ({self.generator.model_name})...")
             raw = self.generator.generate(
-                system_prompt=TOPIC_SYSTEM_PROMPT,
+                system_prompt=self.prompts.topic_system_prompt,
                 user_prompt=prompt,
                 max_new_tokens=900,
                 temperature=0.1,
@@ -203,8 +205,8 @@ class LLMArtifactWriter:
         try:
             self._emit_progress(f"Calling local LLM for hat map markdown ({self.generator.model_name})...")
             generated = self.generator.generate(
-                system_prompt=HAT_MAP_SYSTEM_PROMPT,
-                user_prompt=_build_hat_map_prompt(hat, entries),
+                system_prompt=self.prompts.hat_map_system_prompt,
+                user_prompt=_build_hat_map_prompt(hat, entries, template=self.prompts.hat_map_user_template),
                 max_new_tokens=360,
                 temperature=0.1,
             )
@@ -252,8 +254,8 @@ class LLMArtifactWriter:
         try:
             self._emit_progress(f"Calling local LLM for global map markdown ({self.generator.model_name})...")
             generated = self.generator.generate(
-                system_prompt=GLOBAL_MAP_SYSTEM_PROMPT,
-                user_prompt=_build_global_map_prompt(entries),
+                system_prompt=self.prompts.global_map_system_prompt,
+                user_prompt=_build_global_map_prompt(entries, template=self.prompts.global_map_user_template),
                 max_new_tokens=360,
                 temperature=0.1,
             )
@@ -323,133 +325,37 @@ class LLMArtifactWriter:
         return f"{message} Log: {log_path.resolve()}"
 
 
-TOPIC_SYSTEM_PROMPT = """You write compact knowledge-base markdown for a local private wiki.
-Return strict JSON only, with no code fences and no commentary.
-The markdown must be neatly rewritten for human auditability.
-Never mention chunks, extraction, parsing, prompt instructions, or the existence of an LLM.
-Preserve technical acronyms and paper names exactly when possible.
-Use a neutral, reference-style voice like a concise internal wiki page.
-Prefer definition-first lead sentences, compact explanatory paragraphs, and crisp bullets.
-Write each page as a durable lookup surface for later LLM retrieval, not as a compressed abstract.
-Make conceptual relationships, adjacent ideas, and source-to-source connections easy to scan.
-Treat summary.md as the main article page in a compiled wiki, not as an ingestion report.
-When sources are grouped, rewrite them into one coherent article rather than a pile of per-source mini-summaries."""
-
-HAT_MAP_SYSTEM_PROMPT = """You write concise lookup-table markdown for a knowledge-base hat map.
-Return markdown only.
-Keep it compact and scannable.
-Do not add prose paragraphs before or after the table."""
-
-GLOBAL_MAP_SYSTEM_PROMPT = """You write concise lookup-table markdown for a global knowledge-base map.
-Return markdown only.
-Keep it compact and scannable.
-Do not add prose paragraphs before or after the table."""
-
-
-def _build_topic_prompt(documents: list[ParsedDocument], plan: GroupingPlan, fallback: TopicRender) -> str:
+def _build_topic_prompt(
+    documents: list[ParsedDocument],
+    plan: GroupingPlan,
+    fallback: TopicRender,
+    *,
+    template: str = DEFAULT_PROMPT_SET.topic_user_template,
+) -> str:
     related_threads = topic_related_threads(documents, limit=4)
-    lines = [
-        "Task: write summary.md for a compiled local research wiki.",
-        "summary.md is the main article page for this topic, not a dump of extracted notes.",
-        "The directory will also contain a lighter topic index file, so summary.md should focus on being the actual article a person or LLM would read first.",
-        "The page should act like a rich lookup article for future retrieval, not just a short summary.",
-        "When multiple sources are grouped, draw clear lines between adjacent ideas, complementary angles, and recurring themes.",
-        "Write it as one coherent topic page that helps a future reader or LLM quickly orient, retrieve, and connect ideas.",
-        "",
-        "Topic metadata:",
-        f"- Topic folder: {plan.topic_folder}",
-        f"- Suggested title: {fallback.title}",
-        f"- Grouping decision: {plan.decision.value}",
-        f"- Source count: {len(documents)}",
-        "",
-        "Return JSON with exactly these keys:",
-        '- "title": short topic title',
-        '- "description": one concise sentence describing what the topic covers',
-        '- "locator": a short "what to find here" phrase for map.md',
-        '- "keywords": 4 to 8 specific technical keywords or phrases',
-        '- "summary_markdown": wiki-style markdown only',
-        "",
-        "Writing rules for summary_markdown:",
-        "- Start with '# <title>'",
-        "- Then one short lead paragraph that defines the topic immediately and reads like an internal wiki article",
-        "- Then '## Summary' with one short paragraph that explains scope, significance, and why grouped sources belong together",
-        "- Then '## Key Ideas' with 3 to 6 bullets that rewrite the ideas cleanly instead of copying source sentences",
-        "- Then '## Related Threads' with 3 to 6 bullets that connect adjacent ideas, subthemes, contrasts, dependencies, extensions, or useful lookup paths inside this topic",
-        "- Then '## Sources' with this exact table header:",
-        "  | Source | What To Find | Key Sections | File |",
-        "- Then '## Keywords' with a comma-separated line",
-        "- Keep it concise, readable, and neutral",
-        "- Make the markdown useful as a future lookup page for an LLM that will retrieve this topic later",
-        "- If several sources are grouped, explain how they fit together instead of summarizing each source in isolation",
-        "- Make each section feel like a stable reference entry, not reading notes or extracted chunks",
-        "- Prefer crisp noun phrases and conceptual framing that make later retrieval easier",
-        "- Make the article feel like one node in a larger wiki of related topics",
-        "- Prefer declarative sentences over promotional or first-person phrasing",
-        "- Do not paste raw chunks or long quotations",
-        "- Do not mention page numbers unless they are semantically important",
-        "- Keywords must not include generic junk like page, section, paper, notes, method, work, or standalone digits",
-        "",
-        "Bad patterns to avoid:",
-        "- Do not say 'this document discusses' or 'these notes contain' unless unavoidable",
-        "- Do not sound like an extraction pipeline or a paper abstract pasted verbatim",
-        "- Do not write one bullet per source file when the topic is clearly unified",
-        "- Do not produce fragmented bullets where a paragraph would be clearer",
-        "- Do not make summary.md look like a directory listing; that belongs in the topic index file",
-        "",
-        "Example of a good summary_markdown shape:",
-        "# Temporal Sparse Attention",
-        "",
-        "Temporal Sparse Attention is an attention strategy that focuses computation on selected time-local interactions.",
-        "",
-        "## Summary",
-        "This page covers the main idea behind temporal sparsity, the practical tradeoff it makes, and the kinds of sequence-modeling tasks where it is useful.",
-        "",
-        "## Key Ideas",
-        "- Restricts attention computation to selected temporal neighborhoods instead of every pairwise interaction.",
-        "- Trades full-context coverage for lower compute and clearer locality bias.",
-        "- Commonly appears in discussions of efficient long-sequence modeling and event streams.",
-        "",
-        "## Related Threads",
-        "- Closely tied to sparse attention patterns, event-based sequence modeling, and efficient temporal context handling.",
-        "- Often contrasted with dense attention because it prioritizes selective connectivity over uniform global coverage.",
-        "- Useful for connecting architecture choices, compute tradeoffs, and downstream sequence behavior within one page.",
-        "- Serves as a bridge page when questions move between model efficiency, temporal structure, and representation quality.",
-        "",
-        "## Sources",
-        "| Source | What To Find | Key Sections | File |",
-        "| --- | --- | --- | --- |",
-        "| Sparse Attention Notes | Core idea and tradeoffs | Overview, Tradeoffs | `notes.md` |",
-        "",
-        "## Keywords",
-        "temporal sparse attention, efficient sequence modeling, event stream, locality bias",
-        "",
-        "Helpful related-thread cues for this topic:",
-    ]
-    for item in related_threads:
-        lines.append(f"- {item}")
-    lines.extend(
-        [
-            "",
-        "Topic context:",
-        ]
-    )
+    related_threads_block = "\n".join(f"- {item}" for item in related_threads) or "- No strong related-thread cues detected."
+    document_context_lines: list[str] = []
     for index, document in enumerate(documents, start=1):
-        lines.extend(_document_digest_lines(document, index=index))
-    return "\n".join(lines)
+        document_context_lines.extend(_document_digest_lines(document, index=index))
+    return render_prompt_template(
+        "topic_user_template",
+        template,
+        topic_folder=plan.topic_folder,
+        suggested_title=fallback.title,
+        grouping_decision=plan.decision.value,
+        source_count=str(len(documents)),
+        related_threads_block=related_threads_block,
+        document_context_block="\n".join(document_context_lines),
+    )
 
 
-def _build_hat_map_prompt(hat: str, entries: list[TopicMapEntry]) -> str:
-    lines = [
-        f"Write map.md for the hat '{hat}'.",
-        "Return markdown only.",
-        "Use exactly this compact table layout:",
-        "# Map for Hat: <hat>",
-        "",
-        "| Topic | Directory | What To Find | Source Files | Keywords |",
-        "| --- | --- | --- | --- | --- |",
-        "",
-        "Topic entries:",
-    ]
+def _build_hat_map_prompt(
+    hat: str,
+    entries: list[TopicMapEntry],
+    *,
+    template: str = DEFAULT_PROMPT_SET.hat_map_user_template,
+) -> str:
+    lines: list[str] = []
     for entry in entries:
         lines.extend(
             [
@@ -460,21 +366,20 @@ def _build_hat_map_prompt(hat: str, entries: list[TopicMapEntry]) -> str:
                 f"  Keywords: {', '.join(entry.keywords) or '-'}",
             ]
         )
-    return "\n".join(lines)
+    return render_prompt_template(
+        "hat_map_user_template",
+        template,
+        hat=hat,
+        topic_entries_block="\n".join(lines),
+    )
 
 
-def _build_global_map_prompt(entries: list[HatMapEntry]) -> str:
-    lines = [
-        "Write global_map.md for the knowledge base.",
-        "Return markdown only.",
-        "Use exactly this compact table layout:",
-        "# Global Map",
-        "",
-        "| Hat | Map Path | What To Find | High-Level Keywords |",
-        "| --- | --- | --- | --- |",
-        "",
-        "Hat entries:",
-    ]
+def _build_global_map_prompt(
+    entries: list[HatMapEntry],
+    *,
+    template: str = DEFAULT_PROMPT_SET.global_map_user_template,
+) -> str:
+    lines: list[str] = []
     for entry in entries:
         lines.extend(
             [
@@ -484,7 +389,11 @@ def _build_global_map_prompt(entries: list[HatMapEntry]) -> str:
                 f"  High-level keywords: {', '.join(entry.keywords) or '-'}",
             ]
         )
-    return "\n".join(lines)
+    return render_prompt_template(
+        "global_map_user_template",
+        template,
+        hat_entries_block="\n".join(lines),
+    )
 
 
 def _document_digest_lines(document: ParsedDocument, index: int) -> list[str]:

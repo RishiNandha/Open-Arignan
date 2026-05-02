@@ -9,6 +9,7 @@ import pytest
 
 from arignan.config import write_default_settings
 from arignan.paths import read_persisted_app_home
+from arignan.prompts import prompts_path
 from arignan.setup_flow import (
     SetupResult,
     _emit,
@@ -136,6 +137,7 @@ def test_initialize_local_state_can_override_local_llm_model(tmp_path: Path, mon
     assert payload["local_llm_kv_cache_type"] == "q8_0"
     assert payload["embedding_model"] == "BAAI/bge-base-en-v1.5"
     assert payload["reranker_model"] == "mixedbread-ai/mxbai-rerank-base-v1"
+    assert prompts_path(app_home).exists()
     assert read_persisted_app_home() == (tmp_path / ".arignan").resolve()
 
 
@@ -206,6 +208,28 @@ def test_initialize_local_state_migrates_legacy_modernbert_defaults_when_not_ref
     assert migrated["reranker_model"] == "mixedbread-ai/mxbai-rerank-base-v1"
 
 
+def test_initialize_local_state_migrates_legacy_gemma_default_when_not_refreshing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    app_home = tmp_path / ".arignan"
+    settings_path = write_default_settings(app_home=app_home)
+    payload = json.loads(settings_path.read_text(encoding="utf-8"))
+    payload["local_llm_backend"] = "ollama"
+    payload["local_llm_model"] = "gemma4:e2b"
+    settings_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+    _, migrated_settings_path = initialize_local_state(
+        app_home=app_home,
+        refresh_existing=False,
+    )
+
+    migrated = json.loads(migrated_settings_path.read_text(encoding="utf-8"))
+    assert migrated["local_llm_backend"] == "ollama"
+    assert migrated["local_llm_model"] == "qwen3:4b-q4_K_M"
+
+
 def test_initialize_local_state_can_keep_existing_settings_when_not_refreshing(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
@@ -254,6 +278,27 @@ def test_initialize_local_state_keeps_existing_user_settings_payload_when_not_re
     assert preserved["default_hat"] == "SNNs"
     assert preserved["retrieval"]["dense_top_k"] == 99
     assert preserved["session"]["soft_token_limit"] == 12345
+
+
+def test_initialize_local_state_recreates_missing_settings_and_prompts_when_not_refreshing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    app_home = tmp_path / ".arignan"
+    app_home.mkdir(parents=True, exist_ok=True)
+    (app_home / "models").mkdir(exist_ok=True)
+    (app_home / "runtime").mkdir(exist_ok=True)
+
+    _, settings_path = initialize_local_state(
+        app_home=app_home,
+        refresh_existing=False,
+    )
+
+    assert settings_path.exists()
+    assert prompts_path(app_home).exists()
+    payload = json.loads(settings_path.read_text(encoding="utf-8"))
+    assert payload["local_llm_model"] == "qwen3:4b-q4_K_M"
 
 
 def test_inspect_app_home_detects_existing_arignan_layout(tmp_path: Path) -> None:

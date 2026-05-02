@@ -25,12 +25,43 @@ def test_gui_options_and_root_render(tmp_path: Path) -> None:
     assert "react-root" in root.text
     assert "/gui-static/app.jsx" in root.text
     assert "Add More Files To Knowledge Base" not in root.text
+    assert "Open Settings" not in root.text
     assert options.status_code == 200
     payload = options.json()
     assert "auto" in payload["hats"]
     assert "default" in payload["hats"]
     assert "SNNs" in payload["hats"]
     assert payload["answer_modes"] == ["default", "light", "none", "raw"]
+    assert payload["default_rerank_top_k"] == 8
+    assert payload["default_answer_context_top_k"] == 8
+    assert payload["default_show_thinking"] is True
+
+
+def test_gui_can_open_logs_settings_and_prompts_targets(tmp_path: Path, monkeypatch) -> None:
+    app_home = tmp_path / ".arignan"
+    app = ArignanApp(load_config(app_home=app_home))
+    client = TestClient(create_gui_app(app))
+    opened: list[Path] = []
+
+    def fake_open_local_path(path: Path) -> None:
+        opened.append(path)
+
+    monkeypatch.setattr("arignan.gui.react_server._open_local_path", fake_open_local_path)
+
+    settings_response = client.post("/api/open-file/settings")
+    prompts_response = client.post("/api/open-file/prompts")
+    logs_response = client.post("/api/open-file/logs")
+
+    assert settings_response.status_code == 200
+    assert prompts_response.status_code == 200
+    assert logs_response.status_code == 200
+    assert len(opened) == 3
+    assert opened[0].name == "settings.json"
+    assert opened[0].exists()
+    assert opened[1].name == "prompts.json"
+    assert opened[1].exists()
+    assert opened[2].name == "exceptions.log"
+    assert opened[2].exists()
 
 
 def test_gui_task_endpoints_use_existing_app_flows(tmp_path: Path, monkeypatch) -> None:
@@ -67,10 +98,19 @@ def test_gui_task_endpoints_use_existing_app_flows(tmp_path: Path, monkeypatch) 
             model_calls=[],
         )
 
-    def fake_ask(question: str, hat: str = "auto", terminal_pid: int | None = None, answer_mode: str = "default") -> AskResult:
+    def fake_ask(
+        question: str,
+        hat: str = "auto",
+        terminal_pid: int | None = None,
+        answer_mode: str = "default",
+        rerank_top_k: int | None = None,
+        answer_context_top_k: int | None = None,
+    ) -> AskResult:
         captured["question"] = question
         captured["ask_hat"] = hat
         captured["answer_mode"] = answer_mode
+        captured["rerank_top_k"] = rerank_top_k
+        captured["answer_context_top_k"] = answer_context_top_k
         return AskResult(
             question=question,
             selected_hat=hat,
@@ -137,7 +177,13 @@ def test_gui_task_endpoints_use_existing_app_flows(tmp_path: Path, monkeypatch) 
 
     ask_start = client.post(
         "/api/ask/start",
-        json={"question": "What is JEPA?", "hat": "SNNs", "answer_mode": "light"},
+        json={
+            "question": "What is JEPA?",
+            "hat": "SNNs",
+            "answer_mode": "light",
+            "rerank_top_k": 11,
+            "answer_context_top_k": 5,
+        },
     )
     assert ask_start.status_code == 200
     ask_payload = _wait_for_task(client, ask_start.json()["task_id"])
@@ -147,6 +193,8 @@ def test_gui_task_endpoints_use_existing_app_flows(tmp_path: Path, monkeypatch) 
     assert captured["question"] == "What is JEPA?"
     assert captured["ask_hat"] == "SNNs"
     assert captured["answer_mode"] == "light"
+    assert captured["rerank_top_k"] == 11
+    assert captured["answer_context_top_k"] == 5
 
     delete_start = client.post("/api/delete/start", json={"load_ids": ["load-gui"]})
     assert delete_start.status_code == 200
@@ -218,6 +266,192 @@ def test_gui_task_failure_returns_session_log_hint(tmp_path: Path, monkeypatch) 
     assert "exceptions.log" in payload["error"]
 
 
+def test_gui_ask_task_exposes_progress_log_and_partial_answer(tmp_path: Path, monkeypatch) -> None:
+    app_home = tmp_path / ".arignan"
+    app = ArignanApp(load_config(app_home=app_home))
+
+    def fake_ask(
+        question: str,
+        hat: str = "auto",
+        terminal_pid: int | None = None,
+        answer_mode: str = "default",
+        rerank_top_k: int | None = None,
+        answer_context_top_k: int | None = None,
+    ) -> AskResult:
+        app.progress_sink("Running retrieval pipeline...")
+        app.progress_sink("Reranking")
+        stream_sink = getattr(app.local_text_generator, "stream_sink", None)
+        if callable(stream_sink):
+            stream_sink("Draft answer ")
+            time.sleep(0.05)
+            stream_sink("in progress.")
+        time.sleep(0.05)
+        return AskResult(
+            question=question,
+            selected_hat=hat,
+            answer_mode=answer_mode,
+            answer="Draft answer in progress.",
+            citations=[],
+            debug=AskDebug(
+                answer_mode=answer_mode,
+                expanded_query=question.lower(),
+                selected_hat=hat,
+                dense_hits=[],
+                lexical_hits=[],
+                map_hits=[],
+                fused_hits=[],
+                reranked_hits=[],
+                model_calls=[],
+            ),
+        )
+
+    monkeypatch.setattr(app, "ask", fake_ask)
+    client = TestClient(create_gui_app(app))
+
+    ask_start = client.post(
+        "/api/ask/start",
+        json={"question": "What is JEPA?", "hat": "default", "answer_mode": "default"},
+    )
+    assert ask_start.status_code == 200
+    task_id = ask_start.json()["task_id"]
+
+    running_snapshot = _wait_for_running_task(client, task_id)
+
+    assert running_snapshot["status"] == "running"
+    assert "Reranking" in running_snapshot["progress_log"]
+    assert running_snapshot["partial_answer"].startswith("Draft answer")
+
+    done_snapshot = _wait_for_task(client, task_id)
+    assert done_snapshot["status"] == "done"
+    assert done_snapshot["result"]["answer"] == "Draft answer in progress."
+
+
+def test_gui_ask_task_exposes_thinking_trace_and_toggle(tmp_path: Path, monkeypatch) -> None:
+    app_home = tmp_path / ".arignan"
+    app = ArignanApp(load_config(app_home=app_home))
+
+    def fake_ask(
+        question: str,
+        hat: str = "auto",
+        terminal_pid: int | None = None,
+        answer_mode: str = "default",
+        rerank_top_k: int | None = None,
+        answer_context_top_k: int | None = None,
+    ) -> AskResult:
+        thinking_sink = getattr(app.local_text_generator, "thinking_sink", None)
+        stream_sink = getattr(app.local_text_generator, "stream_sink", None)
+        if callable(thinking_sink):
+            thinking_sink("First thought. ")
+            time.sleep(0.02)
+            thinking_sink("Second thought.")
+        if callable(stream_sink):
+            stream_sink("Final answer.")
+        app.local_text_generator.last_usage = {"total_duration": 1500000000}
+        time.sleep(0.02)
+        return AskResult(
+            question=question,
+            selected_hat=hat,
+            answer_mode=answer_mode,
+            answer="Final answer.",
+            citations=[],
+            debug=AskDebug(
+                answer_mode=answer_mode,
+                expanded_query=question.lower(),
+                selected_hat=hat,
+                dense_hits=[],
+                lexical_hits=[],
+                map_hits=[],
+                fused_hits=[],
+                reranked_hits=[],
+                model_calls=[],
+            ),
+        )
+
+    monkeypatch.setattr(app, "ask", fake_ask)
+    client = TestClient(create_gui_app(app))
+
+    ask_start = client.post(
+        "/api/ask/start",
+        json={"question": "Explain further", "hat": "default", "answer_mode": "default", "show_thinking": True},
+    )
+    assert ask_start.status_code == 200
+    task_id = ask_start.json()["task_id"]
+
+    running_snapshot = _wait_for_running_thinking_task(client, task_id)
+    assert running_snapshot["status"] == "running"
+    assert "First thought." in running_snapshot["partial_thinking"]
+
+    done_snapshot = _wait_for_task(client, task_id)
+    assert done_snapshot["status"] == "done"
+    assert "Second thought." in done_snapshot["partial_thinking"]
+    assert done_snapshot["thought_usage"] == {"total_duration": 1500000000}
+
+    ask_without_thinking = client.post(
+        "/api/ask/start",
+        json={"question": "Explain further", "hat": "default", "answer_mode": "default", "show_thinking": False},
+    )
+    assert ask_without_thinking.status_code == 200
+    done_without_thinking = _wait_for_task(client, ask_without_thinking.json()["task_id"])
+    assert done_without_thinking["status"] == "done"
+    assert done_without_thinking["partial_thinking"] == ""
+
+
+def test_gui_ask_task_can_be_cancelled(tmp_path: Path, monkeypatch) -> None:
+    app_home = tmp_path / ".arignan"
+    app = ArignanApp(load_config(app_home=app_home))
+
+    def fake_ask(
+        question: str,
+        hat: str = "auto",
+        terminal_pid: int | None = None,
+        answer_mode: str = "default",
+        rerank_top_k: int | None = None,
+        answer_context_top_k: int | None = None,
+    ) -> AskResult:
+        for _ in range(50):
+            app.progress_sink("Hitting local LLM...")
+            time.sleep(0.02)
+        return AskResult(
+            question=question,
+            selected_hat=hat,
+            answer_mode=answer_mode,
+            answer="Should not complete.",
+            citations=[],
+            debug=AskDebug(
+                answer_mode=answer_mode,
+                expanded_query=question.lower(),
+                selected_hat=hat,
+                dense_hits=[],
+                lexical_hits=[],
+                map_hits=[],
+                fused_hits=[],
+                reranked_hits=[],
+                model_calls=[],
+            ),
+        )
+
+    monkeypatch.setattr(app, "ask", fake_ask)
+    client = TestClient(create_gui_app(app))
+
+    ask_start = client.post(
+        "/api/ask/start",
+        json={"question": "Please keep going", "hat": "default", "answer_mode": "default"},
+    )
+    assert ask_start.status_code == 200
+    task_id = ask_start.json()["task_id"]
+
+    running_snapshot = _wait_for_running_message(client, task_id, "Hitting LLM")
+    assert running_snapshot["status"] == "running"
+
+    cancel_response = client.post(f"/api/tasks/{task_id}/cancel")
+    assert cancel_response.status_code == 200
+
+    canceled_snapshot = _wait_for_task(client, task_id)
+    assert canceled_snapshot["status"] == "canceled"
+    assert canceled_snapshot["message"] == "Stopped."
+    assert canceled_snapshot["cancel_requested"] is True
+
+
 def _wait_for_task(client: TestClient, task_id: str) -> dict[str, object]:
     for _ in range(50):
         response = client.get(f"/api/tasks/{task_id}")
@@ -226,3 +460,33 @@ def _wait_for_task(client: TestClient, task_id: str) -> dict[str, object]:
             return payload
         time.sleep(0.02)
     raise AssertionError(f"Task {task_id} did not finish in time.")
+
+
+def _wait_for_running_task(client: TestClient, task_id: str) -> dict[str, object]:
+    for _ in range(50):
+        response = client.get(f"/api/tasks/{task_id}")
+        payload = response.json()
+        if payload["status"] == "running" and payload.get("partial_answer"):
+            return payload
+        time.sleep(0.02)
+    raise AssertionError(f"Task {task_id} did not expose partial answer in time.")
+
+
+def _wait_for_running_thinking_task(client: TestClient, task_id: str) -> dict[str, object]:
+    for _ in range(50):
+        response = client.get(f"/api/tasks/{task_id}")
+        payload = response.json()
+        if payload["status"] == "running" and payload.get("partial_thinking"):
+            return payload
+        time.sleep(0.02)
+    raise AssertionError(f"Task {task_id} did not expose partial thinking in time.")
+
+
+def _wait_for_running_message(client: TestClient, task_id: str, fragment: str) -> dict[str, object]:
+    for _ in range(50):
+        response = client.get(f"/api/tasks/{task_id}")
+        payload = response.json()
+        if payload["status"] == "running" and fragment in (payload.get("message") or ""):
+            return payload
+        time.sleep(0.02)
+    raise AssertionError(f"Task {task_id} did not expose message containing '{fragment}' in time.")

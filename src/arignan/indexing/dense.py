@@ -181,7 +181,7 @@ class LocalDenseIndex:
         try:
             vectors = info.config.params.vectors
             return int(vectors.size)
-        except Exception:
+        except (AttributeError, TypeError, ValueError):
             return None
 
     def _recreate_qdrant_collection(self, vector_size: int) -> None:

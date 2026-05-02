@@ -1,4 +1,4 @@
-const { useEffect, useMemo, useRef, useState } = React;
+const { useEffect, useLayoutEffect, useMemo, useRef, useState } = React;
 
 const ANSWER_MODES = ["default", "light", "none", "raw"];
 
@@ -7,6 +7,9 @@ function App() {
     hats: ["auto"],
     default_hat: "default",
     answer_modes: ANSWER_MODES,
+    default_rerank_top_k: 8,
+    default_answer_context_top_k: 8,
+    default_show_thinking: true,
   });
   const [library, setLibrary] = useState({
     hats: [],
@@ -14,6 +17,9 @@ function App() {
   });
   const [hat, setHat] = useState("auto");
   const [answerMode, setAnswerMode] = useState("default");
+  const [rerankTopK, setRerankTopK] = useState(8);
+  const [answerContextTopK, setAnswerContextTopK] = useState(8);
+  const [showThinking, setShowThinking] = useState(true);
   const [question, setQuestion] = useState("");
   const [messages, setMessages] = useState([
     createMessage({
@@ -29,9 +35,12 @@ function App() {
   const [loadMode, setLoadMode] = useState("files");
   const [selectedUploads, setSelectedUploads] = useState([]);
   const [isAsking, setIsAsking] = useState(false);
+  const [activeAskTaskId, setActiveAskTaskId] = useState(null);
+  const [toolbarOpen, setToolbarOpen] = useState(false);
   const [isLoadingTask, setIsLoadingTask] = useState(false);
   const [isDeletingTask, setIsDeletingTask] = useState(false);
   const messagesRef = useRef(null);
+  const shouldFollowMessagesRef = useRef(true);
   const fileInputRef = useRef(null);
   const folderInputRef = useRef(null);
 
@@ -39,8 +48,9 @@ function App() {
     bootstrap();
   }, []);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!messagesRef.current) return;
+    if (!shouldFollowMessagesRef.current) return;
     messagesRef.current.scrollTop = messagesRef.current.scrollHeight;
   }, [messages]);
 
@@ -52,12 +62,23 @@ function App() {
     setHat(payload.hats?.includes("auto") ? "auto" : payload.default_hat || "default");
     setLoadHat(payload.default_hat || "default");
     setAnswerMode("default");
+    setRerankTopK(payload.default_rerank_top_k || 8);
+    setAnswerContextTopK(payload.default_answer_context_top_k || 8);
+    setShowThinking(payload.default_show_thinking !== false);
     await refreshLibrary();
   }
 
   async function refreshLibrary() {
     const payload = await fetchJson("/api/library");
     setLibrary(payload);
+  }
+
+  async function openFileTarget(target) {
+    try {
+      await fetchJson(`/api/open-file/${target}`, { method: "POST" });
+    } catch (error) {
+      window.alert(normalizeError(error));
+    }
   }
 
   function openLoadDialog() {
@@ -86,7 +107,7 @@ function App() {
     setManageDialogOpen(false);
   }
 
-  function appendMessage(message) {
+function appendMessage(message) {
     setMessages((current) => [...current, message]);
   }
 
@@ -280,16 +301,32 @@ function App() {
       const payload = await fetchJson("/api/ask/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question: trimmed, hat, answer_mode: answerMode }),
+        body: JSON.stringify({
+          question: trimmed,
+          hat,
+          answer_mode: answerMode,
+          rerank_top_k: normalizeRerankTopK(rerankTopK, options.default_rerank_top_k || 8),
+          answer_context_top_k: normalizeRerankTopK(
+            answerContextTopK,
+            options.default_answer_context_top_k || 8
+          ),
+          show_thinking: showThinking,
+        }),
       });
+      setActiveAskTaskId(payload.task_id);
       await followTask({
         taskId: payload.task_id,
         pendingId,
-        onComplete: (result) => {
+        onComplete: (snapshot) => {
+          const result = snapshot.result || {};
           patchMessage(pendingId, {
             pending: false,
             body: result.answer,
             citations: result.citations || [],
+            partialThinking: snapshot.partial_thinking || "",
+            thoughtStartedAt: snapshot.thought_started_at || null,
+            thoughtFinishedAt: snapshot.thought_finished_at || null,
+            thoughtUsage: snapshot.thought_usage || null,
           });
         },
       });
@@ -300,7 +337,17 @@ function App() {
         citations: [],
       });
     } finally {
+      setActiveAskTaskId(null);
       setIsAsking(false);
+    }
+  }
+
+  async function stopAsk() {
+    if (!activeAskTaskId) return;
+    try {
+      await fetchJson(`/api/tasks/${activeAskTaskId}/cancel`, { method: "POST" });
+    } catch (error) {
+      window.alert(normalizeError(error));
     }
   }
 
@@ -308,11 +355,34 @@ function App() {
     let keepPolling = true;
     while (keepPolling) {
       const snapshot = await fetchJson(`/api/tasks/${taskId}`);
-      if (snapshot.message) {
-        patchMessage(pendingId, { body: snapshot.message, pending: snapshot.status === "running" });
+      if (snapshot.message || snapshot.partial_answer || snapshot.partial_thinking || snapshot.progress_log) {
+        patchMessage(pendingId, {
+          body: snapshot.message || "Working...",
+          pending: snapshot.status === "running",
+          progressLog: snapshot.progress_log || [],
+          partialAnswer: snapshot.partial_answer || "",
+          partialThinking: snapshot.partial_thinking || "",
+          thoughtStartedAt: snapshot.thought_started_at || null,
+          thoughtFinishedAt: snapshot.thought_finished_at || null,
+          thoughtUsage: snapshot.thought_usage || null,
+        });
       }
       if (snapshot.status === "done") {
-        onComplete(snapshot.result || {});
+        onComplete(snapshot);
+        keepPolling = false;
+        return;
+      }
+      if (snapshot.status === "canceled") {
+        patchMessage(pendingId, {
+          pending: false,
+          body: snapshot.message || "Stopped.",
+          citations: [],
+          partialAnswer: snapshot.partial_answer || "",
+          partialThinking: snapshot.partial_thinking || "",
+          thoughtStartedAt: snapshot.thought_started_at || null,
+          thoughtFinishedAt: snapshot.thought_finished_at || null,
+          thoughtUsage: snapshot.thought_usage || null,
+        });
         keepPolling = false;
         return;
       }
@@ -332,9 +402,27 @@ function App() {
   return (
     <div className="app-shell">
       <header className="app-header">
-        <div>
+        <div className="brand-block">
           <h1 className="brand-title">Open Arignan</h1>
-          <p className="brand-subtitle">Local knowledge base loading and questioning with a chat-style UI.</p>
+          <div className="brand-tools">
+            <button type="button" className="ghost-button header-tool-button" onClick={() => openFileTarget("logs")}>
+              Open Logs
+            </button>
+            <button
+              type="button"
+              className="ghost-button header-tool-button"
+              onClick={() => openFileTarget("settings")}
+            >
+              Open Settings
+            </button>
+            <button
+              type="button"
+              className="ghost-button header-tool-button"
+              onClick={() => openFileTarget("prompts")}
+            >
+              Open Prompts
+            </button>
+          </div>
         </div>
         <div className="header-actions">
           <button type="button" className="ghost-button" onClick={openManageDialog}>
@@ -342,13 +430,13 @@ function App() {
           </button>
           <button type="button" className="add-button" onClick={openLoadDialog}>
             <span className="plus">+</span>
-            <span>Add More Files To Knowledge Base</span>
+            <span className="add-label">Add Files</span>
           </button>
         </div>
       </header>
 
       <section className="chat-panel">
-        <div className="messages" ref={messagesRef}>
+        <div className="messages" ref={messagesRef} onScroll={handleMessagesScroll}>
           {messages.map((message) => (
             <MessageBubble key={message.id} message={message} />
           ))}
@@ -357,30 +445,74 @@ function App() {
 
       <section className="composer-panel">
         <div className="composer-toolbar">
-          <label className="control-label">
-            Hat
-            <select className="select-control" value={hat} onChange={(event) => setHat(event.target.value)}>
-              {sortedHats.map((value) => (
-                <option key={value} value={value}>
-                  {value}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="control-label">
-            Answer Mode
-            <select
-              className="select-control"
-              value={answerMode}
-              onChange={(event) => setAnswerMode(event.target.value)}
+          <button
+            type="button"
+            className={`toolbar-toggle${toolbarOpen ? " is-open" : ""}`}
+            onClick={() => setToolbarOpen((v) => !v)}
+            aria-expanded={toolbarOpen}
+          >
+            <span>Query Options</span>
+            <em className="toolbar-toggle-chevron" aria-hidden="true">▾</em>
+          </button>
+          <div className={`composer-toolbar-controls${toolbarOpen ? " is-open" : ""}`}>
+            <label className="control-label">
+              Hat
+              <select className="select-control" value={hat} onChange={(event) => setHat(event.target.value)}>
+                {sortedHats.map((value) => (
+                  <option key={value} value={value}>
+                    {value}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="control-label">
+              Answer Mode
+              <select
+                className="select-control"
+                value={answerMode}
+                onChange={(event) => setAnswerMode(event.target.value)}
+              >
+                {(options.answer_modes || ANSWER_MODES).map((value) => (
+                  <option key={value} value={value}>
+                    {value}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="control-label compact-control">
+              Rerank Candidates
+              <input
+                className="text-control"
+                type="number"
+                min="1"
+                step="1"
+                value={rerankTopK}
+                onChange={(event) => setRerankTopK(event.target.value)}
+              />
+            </label>
+            <label className="control-label compact-control">
+              Final Context
+              <input
+                className="text-control"
+                type="number"
+                min="1"
+                step="1"
+                value={answerContextTopK}
+                onChange={(event) => setAnswerContextTopK(event.target.value)}
+              />
+            </label>
+            <button
+              type="button"
+              className={`toggle-control${showThinking ? " is-active" : ""}`}
+              aria-pressed={showThinking}
+              onClick={() => setShowThinking((value) => !value)}
             >
-              {(options.answer_modes || ANSWER_MODES).map((value) => (
-                <option key={value} value={value}>
-                  {value}
-                </option>
-              ))}
-            </select>
-          </label>
+              <span className="toggle-pill" aria-hidden="true">
+                <span className="toggle-thumb" />
+              </span>
+              <span>Show Thinking</span>
+            </button>
+          </div>
         </div>
         <div className="question-row">
           <textarea
@@ -395,8 +527,12 @@ function App() {
               }
             }}
           />
-          <button type="button" className="send-button" onClick={askQuestion} disabled={isAsking}>
-            Ask
+          <button
+            type="button"
+            className={`send-button${isAsking ? " is-stop" : ""}`}
+            onClick={isAsking ? stopAsk : askQuestion}
+          >
+            {isAsking ? "Stop" : "Ask"}
           </button>
         </div>
       </section>
@@ -434,9 +570,18 @@ function App() {
       )}
     </div>
   );
+
+  function handleMessagesScroll() {
+    const container = messagesRef.current;
+    if (!container) return;
+    shouldFollowMessagesRef.current = isNearBottom(container);
+  }
 }
 
 function MessageBubble({ message }) {
+  const [thinkingOpen, setThinkingOpen] = useState(false);
+  const thinkingSummary = summarizeThinking(message);
+
   return (
     <div className={`message-row ${message.role}`}>
       <article className="message-bubble">
@@ -446,12 +591,40 @@ function MessageBubble({ message }) {
         </div>
         <div className={`message-body ${message.pending ? "pending" : ""}`}>
           {message.pending ? (
-            <span className="pending-line">
-              <span className="spinner" />
-              <span>{message.body}</span>
-            </span>
+            <div className="pending-stack">
+              <span className="pending-line">
+                <span className="spinner" />
+                <span>{message.body}</span>
+              </span>
+              {Boolean(message.progressLog?.length) && (
+                <div className="pending-progress">
+                  {message.progressLog.slice(-5).map((line, index) => (
+                    <div key={`${line}-${index}`} className="pending-progress-line">
+                      {line}
+                    </div>
+                  ))}
+                </div>
+              )}
+              {message.partialThinking ? (
+                <div className="thinking-stream">
+                  <div className="thinking-label">Thinking…</div>
+                  <div className="thinking-content">{message.partialThinking}</div>
+                </div>
+              ) : null}
+              {message.partialAnswer ? <div className="streaming-answer">{message.partialAnswer}</div> : null}
+            </div>
           ) : (
-            message.body
+            <>
+              {message.body}
+              {message.partialThinking ? (
+                <div className="thinking-panel">
+                  <button type="button" className="thinking-toggle" onClick={() => setThinkingOpen((open) => !open)}>
+                    {thinkingOpen ? "Hide" : "Show"} {thinkingSummary}
+                  </button>
+                  {thinkingOpen ? <div className="thinking-content">{message.partialThinking}</div> : null}
+                </div>
+              ) : null}
+            </>
           )}
         </div>
         {!message.pending && Boolean(message.citations?.length) && (
@@ -669,8 +842,37 @@ function createMessage({ role, title, body, citations = [], pending = false }) {
     body,
     citations,
     pending,
+    progressLog: pending ? [body] : [],
+    partialAnswer: "",
+    partialThinking: "",
+    thoughtStartedAt: null,
+    thoughtFinishedAt: null,
+    thoughtUsage: null,
     timeLabel: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
   };
+}
+
+function summarizeThinking(message) {
+  const seconds = thinkingDurationSeconds(message);
+  if (seconds !== null) {
+    return `thought for ${seconds.toFixed(seconds >= 10 ? 0 : 1)}s`;
+  }
+  return "thinking trace";
+}
+
+function thinkingDurationSeconds(message) {
+  if (message.thoughtStartedAt && message.thoughtFinishedAt) {
+    const started = Date.parse(message.thoughtStartedAt);
+    const finished = Date.parse(message.thoughtFinishedAt);
+    if (Number.isFinite(started) && Number.isFinite(finished) && finished >= started) {
+      return (finished - started) / 1000;
+    }
+  }
+  const totalDuration = message.thoughtUsage?.total_duration;
+  if (typeof totalDuration === "number" && totalDuration > 0) {
+    return totalDuration / 1_000_000_000;
+  }
+  return null;
 }
 
 async function fetchJson(url, init = {}) {
@@ -713,6 +915,17 @@ function normalizeError(error) {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isNearBottom(container) {
+  const remaining = container.scrollHeight - container.scrollTop - container.clientHeight;
+  return remaining <= 48;
+}
+
+function normalizeRerankTopK(value, fallback) {
+  const parsed = Number.parseInt(String(value), 10);
+  if (Number.isNaN(parsed) || parsed < 1) return fallback;
+  return parsed;
 }
 
 ReactDOM.createRoot(document.getElementById("react-root")).render(<App />);

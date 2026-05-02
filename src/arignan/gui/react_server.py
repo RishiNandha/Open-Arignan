@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import os
 import shutil
 import socket
+import subprocess
+import sys
 import tempfile
 import threading
 import time
+import traceback
 import uuid
 import webbrowser
 from contextlib import contextmanager
@@ -18,8 +22,9 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from arignan.application import ArignanApp
-from arignan.config import load_config
+from arignan.config import load_config, write_default_settings
 from arignan.models import LoadOperation
+from arignan.prompts import write_default_prompts
 
 SUPPORTED_GUI_UPLOAD_SUFFIXES = {".pdf", ".md", ".markdown"}
 
@@ -28,6 +33,9 @@ class AskPayload(BaseModel):
     question: str
     hat: str = "auto"
     answer_mode: str = "default"
+    rerank_top_k: int | None = None
+    answer_context_top_k: int | None = None
+    show_thinking: bool = True
 
 
 class DeletePayload(BaseModel):
@@ -43,6 +51,13 @@ class GuiTaskState:
     message: str = "Starting..."
     result: dict[str, object] | None = None
     error: str | None = None
+    progress_log: list[str] = field(default_factory=list)
+    partial_answer: str = ""
+    partial_thinking: str = ""
+    thought_started_at: str | None = None
+    thought_finished_at: str | None = None
+    thought_usage: dict[str, object] | None = None
+    cancel_requested: bool = False
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     updated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
@@ -54,34 +69,83 @@ class GuiTaskState:
             "message": self.message,
             "result": self.result,
             "error": self.error,
+            "progress_log": list(self.progress_log),
+            "partial_answer": self.partial_answer,
+            "partial_thinking": self.partial_thinking,
+            "thought_started_at": self.thought_started_at,
+            "thought_finished_at": self.thought_finished_at,
+            "thought_usage": self.thought_usage,
+            "cancel_requested": self.cancel_requested,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
+
+
+class GuiTaskCancelled(RuntimeError):
+    """Raised when a GUI task is cancelled cooperatively."""
 
 
 class GuiTaskStore:
     def __init__(self) -> None:
         self._tasks: dict[str, GuiTaskState] = {}
         self._lock = threading.Lock()
+        self._cancel_flags: dict[str, threading.Event] = {}
 
     def create(self, kind: str, message: str) -> GuiTaskState:
         task = GuiTaskState(task_id=uuid.uuid4().hex, kind=kind, message=message)
+        task.progress_log.append(message)
         with self._lock:
             self._tasks[task.task_id] = task
+            self._cancel_flags[task.task_id] = threading.Event()
         return task
 
     def update(self, task_id: str, message: str) -> None:
         with self._lock:
             task = self._tasks[task_id]
             task.message = message
+            if not task.progress_log or task.progress_log[-1] != message:
+                task.progress_log.append(message)
+                if len(task.progress_log) > 12:
+                    task.progress_log = task.progress_log[-12:]
             task.updated_at = datetime.now(timezone.utc).isoformat()
 
-    def finish(self, task_id: str, result: dict[str, object]) -> None:
+    def append_partial_answer(self, task_id: str, text: str) -> None:
+        if not text:
+            return
+        with self._lock:
+            task = self._tasks[task_id]
+            if task.partial_thinking and task.thought_finished_at is None:
+                task.thought_finished_at = datetime.now(timezone.utc).isoformat()
+            task.partial_answer += text
+            if task.message != "Streaming answer":
+                task.message = "Streaming answer"
+                if not task.progress_log or task.progress_log[-1] != "Streaming answer":
+                    task.progress_log.append("Streaming answer")
+            task.updated_at = datetime.now(timezone.utc).isoformat()
+
+    def append_partial_thinking(self, task_id: str, text: str) -> None:
+        if not text:
+            return
+        with self._lock:
+            task = self._tasks[task_id]
+            if task.thought_started_at is None:
+                task.thought_started_at = datetime.now(timezone.utc).isoformat()
+            task.partial_thinking += text
+            if task.message == "Preparing question...":
+                task.message = "Thinking"
+                if not task.progress_log or task.progress_log[-1] != "Thinking":
+                    task.progress_log.append("Thinking")
+            task.updated_at = datetime.now(timezone.utc).isoformat()
+
+    def finish(self, task_id: str, result: dict[str, object], *, thought_usage: dict[str, object] | None = None) -> None:
         with self._lock:
             task = self._tasks[task_id]
             task.status = "done"
             task.result = result
             task.message = "Done"
+            if task.partial_thinking and task.thought_finished_at is None:
+                task.thought_finished_at = datetime.now(timezone.utc).isoformat()
+            task.thought_usage = thought_usage
             task.updated_at = datetime.now(timezone.utc).isoformat()
 
     def fail(self, task_id: str, error: str) -> None:
@@ -91,6 +155,31 @@ class GuiTaskStore:
             task.error = error
             task.message = error
             task.updated_at = datetime.now(timezone.utc).isoformat()
+
+    def cancel(self, task_id: str, message: str = "Stopped.") -> None:
+        with self._lock:
+            task = self._tasks[task_id]
+            task.status = "canceled"
+            task.message = message
+            task.error = message
+            task.cancel_requested = True
+            task.updated_at = datetime.now(timezone.utc).isoformat()
+            self._cancel_flags[task_id].set()
+
+    def request_cancel(self, task_id: str) -> None:
+        with self._lock:
+            task = self._tasks[task_id]
+            task.cancel_requested = True
+            task.message = "Stopping..."
+            if not task.progress_log or task.progress_log[-1] != "Stopping...":
+                task.progress_log.append("Stopping...")
+            task.updated_at = datetime.now(timezone.utc).isoformat()
+            self._cancel_flags[task_id].set()
+
+    def is_cancel_requested(self, task_id: str) -> bool:
+        with self._lock:
+            event = self._cancel_flags.get(task_id)
+            return event.is_set() if event is not None else False
 
     def get(self, task_id: str) -> GuiTaskState | None:
         with self._lock:
@@ -119,6 +208,9 @@ def create_gui_app(app: ArignanApp) -> FastAPI:
             "default_hat": app.config.default_hat,
             "hats": list(dict.fromkeys(hats)),
             "answer_modes": ["default", "light", "none", "raw"],
+            "default_rerank_top_k": app.config.retrieval.rerank_top_k,
+            "default_answer_context_top_k": app.config.retrieval.answer_context_top_k_default,
+            "default_show_thinking": True,
         }
 
     @gui_app.get("/api/library")
@@ -137,12 +229,29 @@ def create_gui_app(app: ArignanApp) -> FastAPI:
             "loads": loads,
         }
 
+    @gui_app.post("/api/open-file/{target}")
+    async def open_file_target(target: str) -> dict[str, object]:
+        path = _resolve_gui_open_target(app, target)
+        _open_local_path(path)
+        return {"path": str(path)}
+
     @gui_app.get("/api/tasks/{task_id}")
     async def task_status(task_id: str) -> dict[str, object]:
         task = task_store.get(task_id)
         if task is None:
             raise HTTPException(status_code=404, detail="Task not found.")
         return task.to_dict()
+
+    @gui_app.post("/api/tasks/{task_id}/cancel")
+    async def cancel_task(task_id: str) -> dict[str, object]:
+        task = task_store.get(task_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail="Task not found.")
+        if task.status != "running":
+            return task.to_dict()
+        task_store.request_cancel(task_id)
+        updated = task_store.get(task_id)
+        return updated.to_dict() if updated is not None else {"task_id": task_id, "status": "canceled"}
 
     @gui_app.post("/api/load")
     async def load_files(
@@ -196,7 +305,13 @@ def create_gui_app(app: ArignanApp) -> FastAPI:
         question = payload.question.strip()
         if not question:
             raise HTTPException(status_code=400, detail="Question cannot be empty.")
-        result = app.ask(question, hat=payload.hat, answer_mode=payload.answer_mode)
+        result = app.ask(
+            question,
+            hat=payload.hat,
+            answer_mode=payload.answer_mode,
+            rerank_top_k=payload.rerank_top_k,
+            answer_context_top_k=payload.answer_context_top_k,
+        )
         return _serialize_ask_result(result)
 
     @gui_app.post("/api/ask/start")
@@ -208,11 +323,45 @@ def create_gui_app(app: ArignanApp) -> FastAPI:
         task = task_store.create("ask", "Preparing question...")
 
         def _runner() -> None:
-            progress_sink = lambda message: task_store.update(task.task_id, _compact_gui_progress("ask", message))
+            def _ensure_not_cancelled() -> None:
+                if task_store.is_cancel_requested(task.task_id):
+                    raise GuiTaskCancelled("Stopped.")
+
+            def progress_sink(message: str) -> None:
+                _ensure_not_cancelled()
+                task_store.update(task.task_id, _compact_gui_progress("ask", message))
+
+            def stream_sink(text: str) -> None:
+                _ensure_not_cancelled()
+                task_store.append_partial_answer(task.task_id, text)
+
+            def thinking_sink(text: str) -> None:
+                _ensure_not_cancelled()
+                task_store.append_partial_thinking(task.task_id, text)
+
+            active_thinking_sink = thinking_sink if payload.show_thinking else None
             try:
-                with _gui_task_context(app, task_lock, progress_sink):
-                    result = app.ask(question, hat=payload.hat, answer_mode=payload.answer_mode)
-                    task_store.finish(task.task_id, _serialize_ask_result(result))
+                with _gui_task_context(
+                    app,
+                    task_lock,
+                    progress_sink,
+                    stream_sink=stream_sink,
+                    thinking_sink=active_thinking_sink,
+                ):
+                    result = app.ask(
+                        question,
+                        hat=payload.hat,
+                        answer_mode=payload.answer_mode,
+                        rerank_top_k=payload.rerank_top_k,
+                        answer_context_top_k=payload.answer_context_top_k,
+                    )
+                    task_store.finish(
+                        task.task_id,
+                        _serialize_ask_result(result),
+                        thought_usage=_serialize_thought_usage(app.local_text_generator),
+                    )
+            except GuiTaskCancelled as exc:
+                task_store.cancel(task.task_id, str(exc))
             except Exception as exc:
                 task_store.fail(
                     task.task_id,
@@ -221,7 +370,13 @@ def create_gui_app(app: ArignanApp) -> FastAPI:
                         component="gui",
                         task="ask task",
                         exc=exc,
-                        context={"hat": payload.hat, "answer_mode": payload.answer_mode},
+                        context={
+                            "hat": payload.hat,
+                            "answer_mode": payload.answer_mode,
+                            "rerank_top_k": payload.rerank_top_k,
+                            "answer_context_top_k": payload.answer_context_top_k,
+                            "show_thinking": payload.show_thinking,
+                        },
                         user_message="Something went wrong while answering the question.",
                     ),
                 )
@@ -357,9 +512,14 @@ async def _write_uploaded_files(batch_dir: Path, files: list[UploadFile]) -> lis
 
 
 @contextmanager
-def _gui_task_context(app: ArignanApp, task_lock: threading.Lock, progress_sink):
+def _gui_task_context(app: ArignanApp, task_lock: threading.Lock, progress_sink, stream_sink=None, thinking_sink=None):
     with task_lock:
-        restore = _bind_progress_sink(app, _tee_progress(app.progress_sink, progress_sink))
+        restore = _bind_task_sinks(
+            app,
+            progress_sink=_tee_progress(app.progress_sink, progress_sink),
+            stream_sink=stream_sink,
+            thinking_sink=thinking_sink,
+        )
         try:
             yield app
         finally:
@@ -382,10 +542,14 @@ def _tee_progress(*sinks):
     return _emit
 
 
-def _bind_progress_sink(app: ArignanApp, progress_sink):
+def _bind_task_sinks(app: ArignanApp, *, progress_sink, stream_sink=None, thinking_sink=None):
     original_app_sink = app.progress_sink
     original_local_sink = getattr(app.local_text_generator, "progress_sink", None)
     original_light_sink = getattr(app.light_text_generator, "progress_sink", None)
+    original_local_stream = getattr(app.local_text_generator, "stream_sink", None)
+    original_light_stream = getattr(app.light_text_generator, "stream_sink", None)
+    original_local_thinking = getattr(app.local_text_generator, "thinking_sink", None)
+    original_light_thinking = getattr(app.light_text_generator, "thinking_sink", None)
     artifact_writer = getattr(app.markdown_repository, "artifact_writer", None)
     original_writer_sink = getattr(artifact_writer, "progress_sink", None) if artifact_writer is not None else None
 
@@ -394,6 +558,14 @@ def _bind_progress_sink(app: ArignanApp, progress_sink):
         app.local_text_generator.progress_sink = progress_sink
     if hasattr(app.light_text_generator, "progress_sink"):
         app.light_text_generator.progress_sink = progress_sink
+    if hasattr(app.local_text_generator, "stream_sink"):
+        app.local_text_generator.stream_sink = stream_sink
+    if hasattr(app.light_text_generator, "stream_sink"):
+        app.light_text_generator.stream_sink = stream_sink
+    if hasattr(app.local_text_generator, "thinking_sink"):
+        app.local_text_generator.thinking_sink = thinking_sink
+    if hasattr(app.light_text_generator, "thinking_sink"):
+        app.light_text_generator.thinking_sink = thinking_sink
     if artifact_writer is not None and hasattr(artifact_writer, "progress_sink"):
         artifact_writer.progress_sink = progress_sink
 
@@ -403,6 +575,14 @@ def _bind_progress_sink(app: ArignanApp, progress_sink):
             app.local_text_generator.progress_sink = original_local_sink
         if hasattr(app.light_text_generator, "progress_sink"):
             app.light_text_generator.progress_sink = original_light_sink
+        if hasattr(app.local_text_generator, "stream_sink"):
+            app.local_text_generator.stream_sink = original_local_stream
+        if hasattr(app.light_text_generator, "stream_sink"):
+            app.light_text_generator.stream_sink = original_light_stream
+        if hasattr(app.local_text_generator, "thinking_sink"):
+            app.local_text_generator.thinking_sink = original_local_thinking
+        if hasattr(app.light_text_generator, "thinking_sink"):
+            app.light_text_generator.thinking_sink = original_light_thinking
         if artifact_writer is not None and hasattr(artifact_writer, "progress_sink"):
             artifact_writer.progress_sink = original_writer_sink
 
@@ -430,6 +610,13 @@ def _serialize_ask_result(result) -> dict[str, object]:
         "selected_hat": result.selected_hat,
         "answer_mode": result.answer_mode,
     }
+
+
+def _serialize_thought_usage(generator) -> dict[str, object] | None:
+    usage = getattr(generator, "last_usage", None)
+    if not isinstance(usage, dict):
+        return None
+    return dict(usage)
 
 
 def _serialize_delete_result(result) -> dict[str, object]:
@@ -552,12 +739,40 @@ def _frontend_dir() -> Path:
     return Path(__file__).resolve().parent / "frontend"
 
 
+def _resolve_gui_open_target(app: ArignanApp, target: str) -> Path:
+    normalized = target.strip().lower()
+    if normalized == "settings":
+        return write_default_settings(settings_path=app.config.app_home / "settings.json", app_home=app.config.app_home, overwrite=False)
+    if normalized == "prompts":
+        return write_default_prompts(app.config.app_home, overwrite=False)
+    if normalized == "logs":
+        terminal_pid = getattr(app, "terminal_pid", None)
+        if terminal_pid is not None:
+            path = app.session_manager.store.active_exception_log_path(terminal_pid)
+        else:
+            path = app.config.app_home / "sessions" / "active" / "gui" / "exceptions.log"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch(exist_ok=True)
+        return path
+    raise HTTPException(status_code=404, detail=f"Unknown file target '{target}'.")
+
+
+def _open_local_path(path: Path) -> None:
+    if os.name == "nt":
+        os.startfile(str(path))
+        return
+    opener = ["open", str(path)] if sys.platform == "darwin" else ["xdg-open", str(path)]
+    subprocess.run(opener, check=True)
+
+
 def _open_browser_later(url: str) -> None:
     def _worker() -> None:
         time.sleep(0.8)
         try:
             webbrowser.open(url)
-        except Exception:
+        except Exception as exc:
+            print(f"[arignan] Failed to open the browser automatically for {url}:", flush=True)
+            traceback.print_exception(type(exc), exc, exc.__traceback__)
             return
 
     thread = threading.Thread(target=_worker, daemon=True)

@@ -6,7 +6,12 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
 
-from arignan.compute import format_torch_cuda_memory, preferred_torch_device, release_torch_cuda_memory
+from arignan.compute import (
+    _report_best_effort_exception,
+    format_torch_cuda_memory,
+    preferred_torch_device,
+    release_torch_cuda_memory,
+)
 from arignan.model_registry import DEFAULT_EMBEDDING_MODEL_REPO_ID, resolve_model_storage_dir
 
 if False:  # pragma: no cover
@@ -102,8 +107,8 @@ class SentenceTransformerEmbedder:
         if self.device == "cuda" and hasattr(model, "cpu"):
             try:
                 model.cpu()
-            except Exception:  # pragma: no cover - depends on local runtime
-                pass
+            except Exception as exc:  # pragma: no cover - depends on local runtime
+                _report_best_effort_exception("embedding model GPU offload", exc)
         del model
         release_torch_cuda_memory()
         return True

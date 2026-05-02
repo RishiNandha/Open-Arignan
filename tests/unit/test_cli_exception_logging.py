@@ -13,7 +13,7 @@ def test_cli_logs_unhandled_exception_to_active_session_log(tmp_path: Path, caps
     def boom(self, question: str, hat: str = "auto", terminal_pid: int | None = None, answer_mode: str = "default"):
         raise RuntimeError("cli boom")
 
-    monkeypatch.setattr("arignan.cli.ArignanApp.ask", boom)
+    monkeypatch.setattr("arignan.application.ArignanApp.ask", boom)
 
     with pytest.raises(RuntimeError, match="cli boom"):
         main(["--app-home", str(app_home), "--pid", "4444", "ask", "What is JEPA?"])
