@@ -35,6 +35,7 @@ function App() {
   const [loadMode, setLoadMode] = useState("files");
   const [selectedUploads, setSelectedUploads] = useState([]);
   const [isAsking, setIsAsking] = useState(false);
+  const [toolbarOpen, setToolbarOpen] = useState(false);
   const [isLoadingTask, setIsLoadingTask] = useState(false);
   const [isDeletingTask, setIsDeletingTask] = useState(false);
   const messagesRef = useRef(null);
@@ -403,7 +404,7 @@ function appendMessage(message) {
           </button>
           <button type="button" className="add-button" onClick={openLoadDialog}>
             <span className="plus">+</span>
-            <span>Add More Files To Knowledge Base</span>
+            <span className="add-label">Add Files</span>
           </button>
         </div>
       </header>
@@ -418,63 +419,74 @@ function appendMessage(message) {
 
       <section className="composer-panel">
         <div className="composer-toolbar">
-          <label className="control-label">
-            Hat
-            <select className="select-control" value={hat} onChange={(event) => setHat(event.target.value)}>
-              {sortedHats.map((value) => (
-                <option key={value} value={value}>
-                  {value}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="control-label">
-            Answer Mode
-            <select
-              className="select-control"
-              value={answerMode}
-              onChange={(event) => setAnswerMode(event.target.value)}
-            >
-              {(options.answer_modes || ANSWER_MODES).map((value) => (
-                <option key={value} value={value}>
-                  {value}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="control-label compact-control">
-            Rerank Candidates
-            <input
-              className="text-control"
-              type="number"
-              min="1"
-              step="1"
-              value={rerankTopK}
-              onChange={(event) => setRerankTopK(event.target.value)}
-            />
-          </label>
-          <label className="control-label compact-control">
-            Final Context
-            <input
-              className="text-control"
-              type="number"
-              min="1"
-              step="1"
-              value={answerContextTopK}
-              onChange={(event) => setAnswerContextTopK(event.target.value)}
-            />
-          </label>
           <button
             type="button"
-            className={`toggle-control${showThinking ? " is-active" : ""}`}
-            aria-pressed={showThinking}
-            onClick={() => setShowThinking((value) => !value)}
+            className={`toolbar-toggle${toolbarOpen ? " is-open" : ""}`}
+            onClick={() => setToolbarOpen((v) => !v)}
+            aria-expanded={toolbarOpen}
           >
-            <span className="toggle-pill" aria-hidden="true">
-              <span className="toggle-thumb" />
-            </span>
-            <span>Show Thinking</span>
+            <span>Query Options</span>
+            <em className="toolbar-toggle-chevron" aria-hidden="true">▾</em>
           </button>
+          <div className={`composer-toolbar-controls${toolbarOpen ? " is-open" : ""}`}>
+            <label className="control-label">
+              Hat
+              <select className="select-control" value={hat} onChange={(event) => setHat(event.target.value)}>
+                {sortedHats.map((value) => (
+                  <option key={value} value={value}>
+                    {value}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="control-label">
+              Answer Mode
+              <select
+                className="select-control"
+                value={answerMode}
+                onChange={(event) => setAnswerMode(event.target.value)}
+              >
+                {(options.answer_modes || ANSWER_MODES).map((value) => (
+                  <option key={value} value={value}>
+                    {value}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="control-label compact-control">
+              Rerank Candidates
+              <input
+                className="text-control"
+                type="number"
+                min="1"
+                step="1"
+                value={rerankTopK}
+                onChange={(event) => setRerankTopK(event.target.value)}
+              />
+            </label>
+            <label className="control-label compact-control">
+              Final Context
+              <input
+                className="text-control"
+                type="number"
+                min="1"
+                step="1"
+                value={answerContextTopK}
+                onChange={(event) => setAnswerContextTopK(event.target.value)}
+              />
+            </label>
+            <button
+              type="button"
+              className={`toggle-control${showThinking ? " is-active" : ""}`}
+              aria-pressed={showThinking}
+              onClick={() => setShowThinking((value) => !value)}
+            >
+              <span className="toggle-pill" aria-hidden="true">
+                <span className="toggle-thumb" />
+              </span>
+              <span>Show Thinking</span>
+            </button>
+          </div>
         </div>
         <div className="question-row">
           <textarea

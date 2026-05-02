@@ -677,6 +677,16 @@ textarea {
   cursor: not-allowed;
 }
 
+/* ── Toolbar-as-dropdown (mobile only) ────────────────────────── */
+.toolbar-toggle {
+  display: none; /* hidden on desktop */
+}
+
+/* On desktop the wrapper is invisible to layout — children join the flex row normally */
+.composer-toolbar-controls {
+  display: contents;
+}
+
 @media (max-width: 900px) {
   .app-shell {
     padding: 12px;
@@ -684,24 +694,56 @@ textarea {
   }
 
   .app-header {
-    padding: 16px;
+    padding: 12px 14px;
     align-items: flex-start;
     flex-direction: column;
+    gap: 10px;
+  }
+
+  /* Hide Open Logs / Open Settings / Open Prompts buttons */
+  .brand-tools {
+    display: none;
   }
 
   .header-actions {
     width: 100%;
-    justify-content: stretch;
+    display: flex;
+    gap: 8px;
+    flex-wrap: nowrap;
   }
 
-  .brand-tools {
-    width: 100%;
+  /* Compact "Manage KB" ghost button */
+  .header-actions .ghost-button {
+    flex: 1 1 0;
+    min-height: 38px;
+    padding: 0 10px;
+    font-size: 0.8rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
-  .ghost-button,
-  .add-button {
-    width: 100%;
-    justify-content: center;
+  /* Compact "Add Files" add button */
+  .header-actions .add-button {
+    flex: 1 1 0;
+    min-height: 38px;
+    padding: 0 10px;
+    font-size: 0.8rem;
+    gap: 6px;
+  }
+
+  .header-actions .add-button .plus {
+    width: 22px;
+    height: 22px;
+    font-size: 1rem;
+    flex: 0 0 auto;
+  }
+
+  /* Shorten button labels via data trick — handled by CSS content override below */
+  .header-actions .add-button .add-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .message-bubble {
@@ -727,6 +769,58 @@ textarea {
   .manage-item {
     grid-template-columns: 1fr;
   }
+
+  /* Show the toolbar-toggle chevron button */
+  .toolbar-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    min-height: 38px;
+    padding: 0 14px;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius-md);
+    background: var(--panel-strong);
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 0.86rem;
+    font-weight: 600;
+    gap: 10px;
+  }
+
+  .toolbar-toggle-chevron {
+    transition: transform 200ms ease;
+    flex: 0 0 auto;
+    font-style: normal;
+  }
+
+  .toolbar-toggle.is-open {
+    color: var(--text);
+    border-color: rgba(124, 156, 255, 0.4);
+  }
+
+  .toolbar-toggle.is-open .toolbar-toggle-chevron {
+    transform: rotate(180deg);
+  }
+
+  /* Hide actual toolbar controls until toggled open */
+  .composer-toolbar-controls {
+    display: none;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+  }
+
+  .composer-toolbar-controls.is-open {
+    display: grid;
+  }
+
+  .composer-toolbar-controls .control-label {
+    min-width: 0;
+  }
+
+  .composer-toolbar-controls .toggle-control {
+    grid-column: 1 / -1; /* thinking toggle spans full width */
+  }
 }
 
 @media (max-width: 640px) {
@@ -742,12 +836,7 @@ textarea {
     padding: 12px;
   }
 
-  .composer-toolbar {
-    display: grid;
+  .composer-toolbar-controls {
     grid-template-columns: 1fr;
-  }
-
-  .control-label {
-    min-width: 0;
   }
 }
