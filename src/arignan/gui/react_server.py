@@ -5,6 +5,7 @@ import socket
 import tempfile
 import threading
 import time
+import traceback
 import uuid
 import webbrowser
 from contextlib import contextmanager
@@ -28,6 +29,7 @@ class AskPayload(BaseModel):
     question: str
     hat: str = "auto"
     answer_mode: str = "default"
+    rerank_top_k: int | None = None
 
 
 class DeletePayload(BaseModel):
@@ -43,6 +45,8 @@ class GuiTaskState:
     message: str = "Starting..."
     result: dict[str, object] | None = None
     error: str | None = None
+    progress_log: list[str] = field(default_factory=list)
+    partial_answer: str = ""
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     updated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
@@ -54,6 +58,8 @@ class GuiTaskState:
             "message": self.message,
             "result": self.result,
             "error": self.error,
+            "progress_log": list(self.progress_log),
+            "partial_answer": self.partial_answer,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -66,6 +72,7 @@ class GuiTaskStore:
 
     def create(self, kind: str, message: str) -> GuiTaskState:
         task = GuiTaskState(task_id=uuid.uuid4().hex, kind=kind, message=message)
+        task.progress_log.append(message)
         with self._lock:
             self._tasks[task.task_id] = task
         return task
@@ -74,6 +81,22 @@ class GuiTaskStore:
         with self._lock:
             task = self._tasks[task_id]
             task.message = message
+            if not task.progress_log or task.progress_log[-1] != message:
+                task.progress_log.append(message)
+                if len(task.progress_log) > 12:
+                    task.progress_log = task.progress_log[-12:]
+            task.updated_at = datetime.now(timezone.utc).isoformat()
+
+    def append_partial_answer(self, task_id: str, text: str) -> None:
+        if not text:
+            return
+        with self._lock:
+            task = self._tasks[task_id]
+            task.partial_answer += text
+            if task.message != "Streaming answer":
+                task.message = "Streaming answer"
+                if not task.progress_log or task.progress_log[-1] != "Streaming answer":
+                    task.progress_log.append("Streaming answer")
             task.updated_at = datetime.now(timezone.utc).isoformat()
 
     def finish(self, task_id: str, result: dict[str, object]) -> None:
@@ -119,6 +142,7 @@ def create_gui_app(app: ArignanApp) -> FastAPI:
             "default_hat": app.config.default_hat,
             "hats": list(dict.fromkeys(hats)),
             "answer_modes": ["default", "light", "none", "raw"],
+            "default_rerank_top_k": app.config.retrieval.rerank_top_k,
         }
 
     @gui_app.get("/api/library")
@@ -196,7 +220,12 @@ def create_gui_app(app: ArignanApp) -> FastAPI:
         question = payload.question.strip()
         if not question:
             raise HTTPException(status_code=400, detail="Question cannot be empty.")
-        result = app.ask(question, hat=payload.hat, answer_mode=payload.answer_mode)
+        result = app.ask(
+            question,
+            hat=payload.hat,
+            answer_mode=payload.answer_mode,
+            rerank_top_k=payload.rerank_top_k,
+        )
         return _serialize_ask_result(result)
 
     @gui_app.post("/api/ask/start")
@@ -209,9 +238,15 @@ def create_gui_app(app: ArignanApp) -> FastAPI:
 
         def _runner() -> None:
             progress_sink = lambda message: task_store.update(task.task_id, _compact_gui_progress("ask", message))
+            stream_sink = lambda text: task_store.append_partial_answer(task.task_id, text)
             try:
-                with _gui_task_context(app, task_lock, progress_sink):
-                    result = app.ask(question, hat=payload.hat, answer_mode=payload.answer_mode)
+                with _gui_task_context(app, task_lock, progress_sink, stream_sink=stream_sink):
+                    result = app.ask(
+                        question,
+                        hat=payload.hat,
+                        answer_mode=payload.answer_mode,
+                        rerank_top_k=payload.rerank_top_k,
+                    )
                     task_store.finish(task.task_id, _serialize_ask_result(result))
             except Exception as exc:
                 task_store.fail(
@@ -221,7 +256,11 @@ def create_gui_app(app: ArignanApp) -> FastAPI:
                         component="gui",
                         task="ask task",
                         exc=exc,
-                        context={"hat": payload.hat, "answer_mode": payload.answer_mode},
+                        context={
+                            "hat": payload.hat,
+                            "answer_mode": payload.answer_mode,
+                            "rerank_top_k": payload.rerank_top_k,
+                        },
                         user_message="Something went wrong while answering the question.",
                     ),
                 )
@@ -357,9 +396,13 @@ async def _write_uploaded_files(batch_dir: Path, files: list[UploadFile]) -> lis
 
 
 @contextmanager
-def _gui_task_context(app: ArignanApp, task_lock: threading.Lock, progress_sink):
+def _gui_task_context(app: ArignanApp, task_lock: threading.Lock, progress_sink, stream_sink=None):
     with task_lock:
-        restore = _bind_progress_sink(app, _tee_progress(app.progress_sink, progress_sink))
+        restore = _bind_task_sinks(
+            app,
+            progress_sink=_tee_progress(app.progress_sink, progress_sink),
+            stream_sink=stream_sink,
+        )
         try:
             yield app
         finally:
@@ -382,10 +425,12 @@ def _tee_progress(*sinks):
     return _emit
 
 
-def _bind_progress_sink(app: ArignanApp, progress_sink):
+def _bind_task_sinks(app: ArignanApp, *, progress_sink, stream_sink=None):
     original_app_sink = app.progress_sink
     original_local_sink = getattr(app.local_text_generator, "progress_sink", None)
     original_light_sink = getattr(app.light_text_generator, "progress_sink", None)
+    original_local_stream = getattr(app.local_text_generator, "stream_sink", None)
+    original_light_stream = getattr(app.light_text_generator, "stream_sink", None)
     artifact_writer = getattr(app.markdown_repository, "artifact_writer", None)
     original_writer_sink = getattr(artifact_writer, "progress_sink", None) if artifact_writer is not None else None
 
@@ -394,6 +439,10 @@ def _bind_progress_sink(app: ArignanApp, progress_sink):
         app.local_text_generator.progress_sink = progress_sink
     if hasattr(app.light_text_generator, "progress_sink"):
         app.light_text_generator.progress_sink = progress_sink
+    if hasattr(app.local_text_generator, "stream_sink"):
+        app.local_text_generator.stream_sink = stream_sink
+    if hasattr(app.light_text_generator, "stream_sink"):
+        app.light_text_generator.stream_sink = stream_sink
     if artifact_writer is not None and hasattr(artifact_writer, "progress_sink"):
         artifact_writer.progress_sink = progress_sink
 
@@ -403,6 +452,10 @@ def _bind_progress_sink(app: ArignanApp, progress_sink):
             app.local_text_generator.progress_sink = original_local_sink
         if hasattr(app.light_text_generator, "progress_sink"):
             app.light_text_generator.progress_sink = original_light_sink
+        if hasattr(app.local_text_generator, "stream_sink"):
+            app.local_text_generator.stream_sink = original_local_stream
+        if hasattr(app.light_text_generator, "stream_sink"):
+            app.light_text_generator.stream_sink = original_light_stream
         if artifact_writer is not None and hasattr(artifact_writer, "progress_sink"):
             artifact_writer.progress_sink = original_writer_sink
 
@@ -557,7 +610,9 @@ def _open_browser_later(url: str) -> None:
         time.sleep(0.8)
         try:
             webbrowser.open(url)
-        except Exception:
+        except Exception as exc:
+            print(f"[arignan] Failed to open the browser automatically for {url}:", flush=True)
+            traceback.print_exception(type(exc), exc, exc.__traceback__)
             return
 
     thread = threading.Thread(target=_worker, daemon=True)

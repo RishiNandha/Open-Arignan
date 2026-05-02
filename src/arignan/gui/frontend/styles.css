@@ -217,6 +217,34 @@ textarea {
   overflow-wrap: anywhere;
 }
 
+.pending-stack {
+  display: grid;
+  gap: 10px;
+}
+
+.pending-progress {
+  display: grid;
+  gap: 6px;
+  padding-left: 22px;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.pending-progress-line {
+  overflow-wrap: anywhere;
+}
+
+.streaming-answer {
+  padding: 12px 14px;
+  border-radius: 16px;
+  background: rgba(124, 156, 255, 0.08);
+  border: 1px solid rgba(124, 156, 255, 0.12);
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.55;
+}
+
 .spinner {
   width: 12px;
   height: 12px;
@@ -264,6 +292,11 @@ textarea {
   color: var(--muted);
   font-size: 0.82rem;
   min-width: 148px;
+}
+
+.compact-control {
+  min-width: 164px;
+  max-width: 188px;
 }
 
 .select-control,

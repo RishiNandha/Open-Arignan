@@ -34,6 +34,20 @@ def test_load_config_uses_defaults_when_settings_missing(app_home: Path) -> None
     assert config.session.soft_token_limit == 18000
     assert config.session.keep_recent_turns == 10
     assert config.markdown.max_md_length == 5000
+    assert (app_home / "settings.json").exists()
+
+
+def test_load_config_recreates_missing_settings_file(app_home: Path) -> None:
+    settings_path = app_home / "settings.json"
+    if settings_path.exists():
+        settings_path.unlink()
+
+    config = load_config(app_home=app_home, environ={})
+
+    assert config.app_home == app_home.resolve()
+    assert settings_path.exists()
+    payload = json.loads(settings_path.read_text(encoding="utf-8"))
+    assert payload["local_llm_model"] == "qwen3:4b-q4_K_M"
 
 
 def test_load_config_merges_nested_overrides(app_home: Path) -> None:

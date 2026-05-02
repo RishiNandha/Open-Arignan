@@ -1,4 +1,4 @@
-const { useEffect, useMemo, useRef, useState } = React;
+const { useEffect, useLayoutEffect, useMemo, useRef, useState } = React;
 
 const ANSWER_MODES = ["default", "light", "none", "raw"];
 
@@ -7,6 +7,7 @@ function App() {
     hats: ["auto"],
     default_hat: "default",
     answer_modes: ANSWER_MODES,
+    default_rerank_top_k: 8,
   });
   const [library, setLibrary] = useState({
     hats: [],
@@ -14,6 +15,7 @@ function App() {
   });
   const [hat, setHat] = useState("auto");
   const [answerMode, setAnswerMode] = useState("default");
+  const [rerankTopK, setRerankTopK] = useState(8);
   const [question, setQuestion] = useState("");
   const [messages, setMessages] = useState([
     createMessage({
@@ -32,6 +34,7 @@ function App() {
   const [isLoadingTask, setIsLoadingTask] = useState(false);
   const [isDeletingTask, setIsDeletingTask] = useState(false);
   const messagesRef = useRef(null);
+  const shouldFollowMessagesRef = useRef(true);
   const fileInputRef = useRef(null);
   const folderInputRef = useRef(null);
 
@@ -39,8 +42,9 @@ function App() {
     bootstrap();
   }, []);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!messagesRef.current) return;
+    if (!shouldFollowMessagesRef.current) return;
     messagesRef.current.scrollTop = messagesRef.current.scrollHeight;
   }, [messages]);
 
@@ -52,6 +56,7 @@ function App() {
     setHat(payload.hats?.includes("auto") ? "auto" : payload.default_hat || "default");
     setLoadHat(payload.default_hat || "default");
     setAnswerMode("default");
+    setRerankTopK(payload.default_rerank_top_k || 8);
     await refreshLibrary();
   }
 
@@ -86,7 +91,7 @@ function App() {
     setManageDialogOpen(false);
   }
 
-  function appendMessage(message) {
+function appendMessage(message) {
     setMessages((current) => [...current, message]);
   }
 
@@ -280,7 +285,12 @@ function App() {
       const payload = await fetchJson("/api/ask/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question: trimmed, hat, answer_mode: answerMode }),
+        body: JSON.stringify({
+          question: trimmed,
+          hat,
+          answer_mode: answerMode,
+          rerank_top_k: normalizeRerankTopK(rerankTopK, options.default_rerank_top_k || 8),
+        }),
       });
       await followTask({
         taskId: payload.task_id,
@@ -308,8 +318,13 @@ function App() {
     let keepPolling = true;
     while (keepPolling) {
       const snapshot = await fetchJson(`/api/tasks/${taskId}`);
-      if (snapshot.message) {
-        patchMessage(pendingId, { body: snapshot.message, pending: snapshot.status === "running" });
+      if (snapshot.message || snapshot.partial_answer || snapshot.progress_log) {
+        patchMessage(pendingId, {
+          body: snapshot.message || "Working...",
+          pending: snapshot.status === "running",
+          progressLog: snapshot.progress_log || [],
+          partialAnswer: snapshot.partial_answer || "",
+        });
       }
       if (snapshot.status === "done") {
         onComplete(snapshot.result || {});
@@ -348,7 +363,7 @@ function App() {
       </header>
 
       <section className="chat-panel">
-        <div className="messages" ref={messagesRef}>
+        <div className="messages" ref={messagesRef} onScroll={handleMessagesScroll}>
           {messages.map((message) => (
             <MessageBubble key={message.id} message={message} />
           ))}
@@ -380,6 +395,17 @@ function App() {
                 </option>
               ))}
             </select>
+          </label>
+          <label className="control-label compact-control">
+            Rerank Candidates
+            <input
+              className="text-control"
+              type="number"
+              min="1"
+              step="1"
+              value={rerankTopK}
+              onChange={(event) => setRerankTopK(event.target.value)}
+            />
           </label>
         </div>
         <div className="question-row">
@@ -434,6 +460,12 @@ function App() {
       )}
     </div>
   );
+
+  function handleMessagesScroll() {
+    const container = messagesRef.current;
+    if (!container) return;
+    shouldFollowMessagesRef.current = isNearBottom(container);
+  }
 }
 
 function MessageBubble({ message }) {
@@ -446,10 +478,22 @@ function MessageBubble({ message }) {
         </div>
         <div className={`message-body ${message.pending ? "pending" : ""}`}>
           {message.pending ? (
-            <span className="pending-line">
-              <span className="spinner" />
-              <span>{message.body}</span>
-            </span>
+            <div className="pending-stack">
+              <span className="pending-line">
+                <span className="spinner" />
+                <span>{message.body}</span>
+              </span>
+              {Boolean(message.progressLog?.length) && (
+                <div className="pending-progress">
+                  {message.progressLog.slice(-5).map((line, index) => (
+                    <div key={`${line}-${index}`} className="pending-progress-line">
+                      {line}
+                    </div>
+                  ))}
+                </div>
+              )}
+              {message.partialAnswer ? <div className="streaming-answer">{message.partialAnswer}</div> : null}
+            </div>
           ) : (
             message.body
           )}
@@ -669,6 +713,8 @@ function createMessage({ role, title, body, citations = [], pending = false }) {
     body,
     citations,
     pending,
+    progressLog: pending ? [body] : [],
+    partialAnswer: "",
     timeLabel: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
   };
 }
@@ -713,6 +759,17 @@ function normalizeError(error) {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isNearBottom(container) {
+  const remaining = container.scrollHeight - container.scrollTop - container.clientHeight;
+  return remaining <= 48;
+}
+
+function normalizeRerankTopK(value, fallback) {
+  const parsed = Number.parseInt(String(value), 10);
+  if (Number.isNaN(parsed) || parsed < 1) return fallback;
+  return parsed;
 }
 
 ReactDOM.createRoot(document.getElementById("react-root")).render(<App />);

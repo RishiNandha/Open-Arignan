@@ -200,6 +200,7 @@ def initialize_local_state(
 ) -> tuple[Path, Path]:
     from arignan.config import write_default_settings
     from arignan.paths import write_persisted_app_home
+    from arignan.prompts import write_default_prompts
     from arignan.storage import StorageLayout
 
     existing_settings_path = (Path(app_home).expanduser().resolve() / "settings.json") if app_home is not None else None
@@ -238,6 +239,7 @@ def initialize_local_state(
             reranker_model=None,
         )
     layout = StorageLayout.from_home(app_home).ensure()
+    write_default_prompts(resolved_home, overwrite=refresh_existing)
     return layout.root, settings_path
 
 

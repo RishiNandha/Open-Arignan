@@ -17,6 +17,7 @@ from arignan.application import (
 from arignan.config import load_config
 from arignan.grouping import GroupingDecision, GroupingPlan
 from arignan.models import (
+    ChatTurn,
     ChunkMetadata,
     DocumentSection,
     LoadEvent,
@@ -419,6 +420,126 @@ def test_application_uses_per_mode_answer_context_limits(app_home: Path, monkeyp
     assert app._answer_context_limit("light") == 6
     assert app._answer_context_limit("none") == 8
     assert app._answer_context_limit("raw") == 8
+    assert app._answer_context_limit("light", rerank_top_k=9) == 9
+    assert app._effective_fused_top_k(11) == 22
+
+
+def test_application_ask_respects_rerank_override(app_home: Path, monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    hit = _hit("Joint embedding predictive architecture predicts latent targets from context.")
+
+    class StubRetrievalPipeline:
+        def __init__(self, *args, **kwargs) -> None:
+            captured["fused_limit"] = kwargs["fused_limit"]
+
+        def retrieve(self, query: str, hat: str = "auto") -> RetrievalBundle:
+            return RetrievalBundle(
+                query=query,
+                expanded_query=query.lower(),
+                selected_hat="default",
+                dense_hits=[hit],
+                lexical_hits=[],
+                map_hits=[],
+                fused_hits=[hit],
+            )
+
+    class CapturingReranker:
+        model_name = "mixedbread-ai/mxbai-rerank-base-v1"
+        backend_name = "cross-encoder"
+
+        def rerank(self, query: str, hits: list[RetrievalHit], limit: int, min_score: float = 0.0) -> list[RetrievalHit]:
+            captured["rerank_limit"] = limit
+            return hits[:1]
+
+    monkeypatch.setattr(
+        "arignan.application.create_local_text_generator",
+        lambda config, progress_sink=None, **kwargs: ArtifactGenerator(kwargs.get("model_name") or config.local_llm_model),
+    )
+    monkeypatch.setattr("arignan.application.RetrievalPipeline", StubRetrievalPipeline)
+
+    app = ArignanApp(load_config(app_home=app_home))
+    app.reranker = CapturingReranker()
+
+    result = app.ask("What is JEPA?", answer_mode="none", rerank_top_k=11)
+
+    assert captured["fused_limit"] == 22
+    assert captured["rerank_limit"] == 11
+    assert result.citations == ["default/jepa-notes/notes.md: Overview"]
+
+
+def test_application_skips_retrieval_for_conversational_followup(app_home: Path, monkeypatch) -> None:
+    generator = FakeGenerator("You're right. Let me answer it directly instead of echoing the prompt.")
+
+    def fail_retrieval_pipeline(*args, **kwargs):
+        raise AssertionError("Retrieval should not run for conversational follow-up")
+
+    monkeypatch.setattr(
+        "arignan.application.create_local_text_generator",
+        lambda config, progress_sink=None, **kwargs: generator,
+    )
+    monkeypatch.setattr("arignan.application.RetrievalPipeline", fail_retrieval_pipeline)
+
+    app = ArignanApp(load_config(app_home=app_home))
+    app.session_manager.append_turn(app.terminal_pid, role="user", content="What is JEPA?")
+    app.session_manager.append_turn(
+        app.terminal_pid,
+        role="assistant",
+        content="JEPA stands for Joint Embedding Predictive Architecture.",
+    )
+
+    result = app.ask("No but answer properly, don't just repeat my prompt", answer_mode="default")
+
+    assert result.answer == "You're right. Let me answer it directly instead of echoing the prompt."
+    assert result.citations == []
+    assert result.debug.fused_hits == []
+    assert "conversational follow-up" in generator.calls[0][0].lower()
+
+
+def test_application_no_context_still_uses_llm_with_warning(app_home: Path, monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    generator = FakeGenerator(
+        "No local context was found for this turn, so I’m answering from our earlier chat and general knowledge. "
+        "JEPA is a predictive learning approach built around joint embeddings."
+    )
+
+    class EmptyRetrievalPipeline:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def retrieve(self, query: str, hat: str = "auto") -> RetrievalBundle:
+            return RetrievalBundle(
+                query=query,
+                expanded_query=query.lower(),
+                selected_hat="default",
+                dense_hits=[],
+                lexical_hits=[],
+                map_hits=[],
+                fused_hits=[],
+            )
+
+    class EmptyReranker:
+        model_name = "mixedbread-ai/mxbai-rerank-base-v1"
+        backend_name = "cross-encoder"
+
+        def rerank(self, query: str, hits: list[RetrievalHit], limit: int, min_score: float = 0.0) -> list[RetrievalHit]:
+            captured["rerank_called"] = True
+            return []
+
+    monkeypatch.setattr(
+        "arignan.application.create_local_text_generator",
+        lambda config, progress_sink=None, **kwargs: generator,
+    )
+    monkeypatch.setattr("arignan.application.RetrievalPipeline", EmptyRetrievalPipeline)
+
+    app = ArignanApp(load_config(app_home=app_home))
+    app.reranker = EmptyReranker()
+
+    result = app.ask("What is JEPA?", answer_mode="default")
+
+    assert result.answer.startswith("No local context was found for this turn")
+    assert result.citations == []
+    assert result.debug.fused_hits == []
+    assert "no useful retrieved local context was found" in generator.calls[0][0].lower()
 
 
 def test_application_ask_falls_back_to_fused_hits_when_reranker_returns_none(app_home: Path, monkeypatch) -> None:

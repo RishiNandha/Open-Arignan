@@ -25,6 +25,7 @@ from arignan.llm import LocalTextGenerator, create_local_text_generator
 from arignan.markdown import MarkdownRepository, derive_keywords
 from arignan.markdown.writer import HeuristicArtifactWriter, LLMArtifactWriter
 from arignan.models import ChunkRecord, LoadEvent, LoadOperation, ParsedDocument, RetrievalHit, SessionState, SourceDocument
+from arignan.prompts import DEFAULT_PROMPT_SET, PromptSet, load_prompt_set, render_prompt_template
 from arignan.retrieval import RetrievalPipeline, create_reranker, describe_question
 from arignan.session import SessionExceptionLogger, SessionManager, SessionModelCallLogger, SessionStore
 from arignan.storage import StorageLayout
@@ -134,6 +135,7 @@ class ArignanApp:
         self.exception_logger = SessionExceptionLogger(self.session_manager.store, self.terminal_pid)
         self.model_call_logger = SessionModelCallLogger(self.session_manager.store, self.terminal_pid)
         self.trace_collector = ModelTraceCollector(on_record=self.model_call_logger.log_call)
+        self.prompts = load_prompt_set(config.app_home)
         self.embedder = create_embedder(
             config,
             progress_sink=self.progress_sink,
@@ -163,6 +165,7 @@ class ArignanApp:
         artifact_writer = LLMArtifactWriter(
             generator=self.local_text_generator,
             fallback=self.heuristic_artifact_writer,
+            prompts=self.prompts,
             trace_sink=self.trace_collector,
             progress_sink=self.progress_sink,
             exception_logger=self.exception_logger,
@@ -287,10 +290,52 @@ class ArignanApp:
         hat: str = "auto",
         terminal_pid: int | None = None,
         answer_mode: Literal["default", "light", "none", "raw"] = "default",
+        rerank_top_k: int | None = None,
     ) -> AskResult:
         self.trace_collector.clear()
         pid = terminal_pid or self.terminal_pid
+        prior_session = self.session_manager.get_or_create(pid, hat=hat)
         session = self.session_manager.append_turn(pid, role="user", content=question)
+        effective_rerank_top_k = self._effective_rerank_top_k(rerank_top_k)
+        if answer_mode in {"default", "light"} and _is_conversational_followup(question, prior_session):
+            self._emit_progress("Detected conversational follow-up; skipping retrieval and using chat context...")
+            answer, citations = compose_answer(
+                question,
+                [],
+                answer_mode=answer_mode,
+                context_limit=self._answer_context_limit(answer_mode, rerank_top_k=effective_rerank_top_k),
+                expanded_query=question,
+                selected_hat=self._fallback_selected_hat(hat, prior_session),
+                default_generator=self.local_text_generator,
+                light_generator=self.light_text_generator,
+                trace_sink=self.trace_collector,
+                exception_logger=self.exception_logger,
+                progress_sink=self.progress_sink,
+                session=session,
+                prompts=self.prompts,
+                allow_llm_without_context=True,
+                no_context_warning=False,
+            )
+            self.session_manager.append_turn(pid, role="assistant", content=answer)
+            debug = AskDebug(
+                answer_mode=answer_mode,
+                expanded_query=question,
+                selected_hat=self._fallback_selected_hat(hat, prior_session),
+                dense_hits=[],
+                lexical_hits=[],
+                map_hits=[],
+                fused_hits=[],
+                reranked_hits=[],
+                model_calls=self.trace_collector.snapshot(),
+            )
+            return AskResult(
+                question=question,
+                selected_hat=debug.selected_hat,
+                answer_mode=answer_mode,
+                answer=answer,
+                citations=citations,
+                debug=debug,
+            )
         self._emit_progress("Running retrieval pipeline...")
         bundle = RetrievalPipeline(
             self.layout,
@@ -298,7 +343,7 @@ class ArignanApp:
             dense_limit=self.config.retrieval.dense_top_k,
             lexical_limit=self.config.retrieval.lexical_top_k,
             map_limit=self.config.retrieval.map_top_k,
-            fused_limit=self.config.retrieval.fused_top_k,
+            fused_limit=self._effective_fused_top_k(effective_rerank_top_k),
             trace_sink=self.trace_collector,
             progress_sink=self.progress_sink,
         ).retrieve(question, hat=hat)
@@ -309,13 +354,13 @@ class ArignanApp:
             model_name=self.reranker.model_name,
             backend=getattr(self.reranker, "backend_name", type(self.reranker).__name__),
             item_count=len(bundle.fused_hits),
-            detail=f"top_k={self.config.retrieval.rerank_top_k}",
+            detail=f"top_k={effective_rerank_top_k}",
         )
         rerank_min_score = 0.05 if getattr(self.reranker, "backend_name", "") == "heuristic-reranker" else float("-inf")
         reranked = self.reranker.rerank(
             bundle.expanded_query,
             bundle.fused_hits,
-            limit=self.config.retrieval.rerank_top_k,
+            limit=effective_rerank_top_k,
             min_score=rerank_min_score,
         )
         answer_hits = _content_hits(reranked)
@@ -324,11 +369,13 @@ class ArignanApp:
             if fallback_hits:
                 self._emit_progress("Reranker found no strong hits; using top retrieved context instead...")
                 answer_hits = fallback_hits
+        if answer_mode in {"default", "light"} and not answer_hits:
+            self._emit_progress("No useful local context found; answering from chat context and general knowledge...")
         answer, citations = compose_answer(
             question,
             answer_hits,
             answer_mode=answer_mode,
-            context_limit=self._answer_context_limit(answer_mode),
+            context_limit=self._answer_context_limit(answer_mode, rerank_top_k=effective_rerank_top_k),
             expanded_query=bundle.expanded_query,
             selected_hat=bundle.selected_hat,
             default_generator=self.local_text_generator,
@@ -337,6 +384,9 @@ class ArignanApp:
             exception_logger=self.exception_logger,
             progress_sink=self.progress_sink,
             session=session,
+            prompts=self.prompts,
+            allow_llm_without_context=answer_mode in {"default", "light"},
+            no_context_warning=answer_mode in {"default", "light"},
         )
         self.session_manager.append_turn(pid, role="assistant", content=answer)
         debug = AskDebug(
@@ -589,10 +639,14 @@ class ArignanApp:
         self._emit_progress(
             f"Reviewing {len(topics)} topic summaries in hat '{hat}' with the local LLM for possible groups..."
         )
-        prompt = _build_grouping_review_prompt(hat, topics)
+        prompt = _build_grouping_review_prompt(
+            hat,
+            topics,
+            template=self.prompts.grouping_review_user_template,
+        )
         try:
             raw = self.local_text_generator.generate(
-                system_prompt=GROUPING_REVIEW_SYSTEM_PROMPT,
+                system_prompt=self.prompts.grouping_review_system_prompt,
                 user_prompt=prompt,
                 max_new_tokens=320,
                 temperature=0.0,
@@ -850,15 +904,39 @@ class ArignanApp:
         if self.progress_sink is not None:
             self.progress_sink(message)
 
-    def _answer_context_limit(self, answer_mode: Literal["default", "light", "none", "raw"]) -> int:
+    def _effective_rerank_top_k(self, rerank_top_k: int | None) -> int:
+        if rerank_top_k is None:
+            return self.config.retrieval.rerank_top_k
+        return max(1, int(rerank_top_k))
+
+    def _effective_fused_top_k(self, rerank_top_k: int) -> int:
+        return max(self.config.retrieval.fused_top_k, rerank_top_k * 2)
+
+    def _fallback_selected_hat(self, hat: str, session: SessionState | None) -> str:
+        if hat != "auto":
+            return hat
+        if session is not None and session.hat != "auto":
+            return session.hat
+        return self.config.default_hat
+
+    def _answer_context_limit(
+        self,
+        answer_mode: Literal["default", "light", "none", "raw"],
+        *,
+        rerank_top_k: int | None = None,
+    ) -> int:
         retrieval = self.config.retrieval
         if answer_mode == "light":
-            return retrieval.answer_context_top_k_light
-        if answer_mode == "none":
-            return retrieval.answer_context_top_k_none
-        if answer_mode == "raw":
-            return retrieval.answer_context_top_k_raw
-        return retrieval.answer_context_top_k_default
+            limit = retrieval.answer_context_top_k_light
+        elif answer_mode == "none":
+            limit = retrieval.answer_context_top_k_none
+        elif answer_mode == "raw":
+            limit = retrieval.answer_context_top_k_raw
+        else:
+            limit = retrieval.answer_context_top_k_default
+        if rerank_top_k is None:
+            return limit
+        return max(limit, rerank_top_k)
 
     def _handle_load_parse_error(
         self,
@@ -941,6 +1019,9 @@ def compose_answer(
     exception_logger: SessionExceptionLogger | None = None,
     progress_sink: Callable[[str], None] | None = None,
     session: SessionState | None = None,
+    prompts: PromptSet = DEFAULT_PROMPT_SET,
+    allow_llm_without_context: bool = False,
+    no_context_warning: bool = False,
 ) -> tuple[str, list[str]]:
     if answer_mode == "raw":
         if progress_sink is not None:
@@ -964,21 +1045,11 @@ def compose_answer(
         exception_logger=exception_logger,
         progress_sink=progress_sink,
         session=session,
+        prompts=prompts,
+        allow_llm_without_context=allow_llm_without_context,
+        no_context_warning=no_context_warning,
     )
     return answer, _unique_citations(hits, limit=3)
-
-
-ANSWER_SYSTEM_PROMPT = """You answer questions for a private local knowledge base.
-Use only the provided retrieved context and prior session context.
-If the retrieved context is insufficient, say that the local knowledge base does not contain enough information.
-Write a direct, technically accurate answer in concise natural language.
-Do not mention retrieval, chunks, prompts, or hidden system behavior.
-Do not add a citations, sources, or references section; citations are handled separately outside your answer.
-Follow this answering discipline:
-- Answer the question in the first sentence whenever possible.
-- Prefer a short explanatory paragraph, optionally followed by a second short paragraph for nuance.
-- If the context supports a definition or expansion, state it directly before elaborating.
-- If multiple retrieved passages disagree, briefly describe the uncertainty instead of guessing."""
 
 
 def generate_answer(
@@ -994,8 +1065,64 @@ def generate_answer(
     exception_logger: SessionExceptionLogger | None = None,
     progress_sink: Callable[[str], None] | None = None,
     session: SessionState | None = None,
+    prompts: PromptSet = DEFAULT_PROMPT_SET,
+    allow_llm_without_context: bool = False,
+    no_context_warning: bool = False,
 ) -> str:
     if not hits:
+        if allow_llm_without_context:
+            if progress_sink is not None:
+                progress_sink(f"Hitting local LLM for {'no-context' if no_context_warning else 'conversational'} answer generation ({generator.model_name})...")
+            prompt = _build_no_context_answer_prompt(
+                question,
+                selected_hat=selected_hat,
+                expanded_query=expanded_query,
+                session=session,
+                template=(
+                    prompts.no_context_answer_user_template
+                    if no_context_warning
+                    else prompts.conversational_answer_user_template
+                ),
+            )
+            system_prompt = (
+                prompts.no_context_answer_system_prompt
+                if no_context_warning
+                else prompts.conversational_answer_system_prompt
+            )
+            try:
+                raw = generator.generate(
+                    system_prompt=system_prompt,
+                    user_prompt=prompt,
+                    max_new_tokens=max_new_tokens,
+                    temperature=0.1,
+                )
+                answer = _normalize_generated_answer(raw)
+            except Exception as exc:
+                log_path = _log_answer_exception(
+                    exception_logger,
+                    exc=exc,
+                    selected_hat=selected_hat,
+                    hit_count=0,
+                )
+                if progress_sink is not None:
+                    progress_sink(_answer_fallback_message(log_path))
+                _record_answer_trace(
+                    trace_sink,
+                    generator=generator,
+                    status="fallback",
+                    item_count=0,
+                    detail=f"{selected_hat} (no context exception)",
+                )
+                return "No relevant local knowledge was found for that question."
+            if answer:
+                _record_answer_trace(
+                    trace_sink,
+                    generator=generator,
+                    status="ok",
+                    item_count=0,
+                    detail=f"{selected_hat} (no local context)",
+                )
+                return answer
         _record_answer_trace(
             trace_sink,
             generator=generator,
@@ -1014,10 +1141,11 @@ def generate_answer(
         expanded_query=expanded_query,
         selected_hat=selected_hat,
         session=session,
+        template=prompts.answer_user_template,
     )
     try:
         raw = generator.generate(
-            system_prompt=ANSWER_SYSTEM_PROMPT,
+            system_prompt=prompts.answer_system_prompt,
             user_prompt=prompt,
             max_new_tokens=max_new_tokens,
             temperature=0.1,
@@ -1164,87 +1292,81 @@ def _build_answer_prompt(
     expanded_query: str,
     selected_hat: str,
     session: SessionState | None,
+    template: str = DEFAULT_PROMPT_SET.answer_user_template,
 ) -> str:
     question_intent, focus_topic, answer_brief = describe_question(question)
-    lines = [
-        "<task>",
-        "Answer the user's question using only the retrieved context.",
-        "Produce a concise, well-structured final answer for an end user.",
-        "</task>",
-        "",
-        "<answer_requirements>",
-        "- First sentence should answer the question directly when possible.",
-        "- Organize the answer into 1 to 2 short paragraphs.",
-        "- Prefer synthesis over quotation.",
-        "- Use the strongest evidence first.",
-        "- If the answer is incomplete from the context, say so plainly.",
-        "- Do not mention sources, citations, retrieval, passages, or the prompt.",
-        "</answer_requirements>",
-        "",
-        "<query>",
-        f"Hat: {selected_hat}",
-        f"Question: {question}",
-        f"Expanded query: {expanded_query}",
-        "</query>",
-        "",
-        "<question_brief>",
-        f"Intent: {question_intent}",
-        f"Focus topic: {focus_topic}",
-        f"Preferred answer shape: {answer_brief}",
-        "</question_brief>",
-        "",
-        "<example>",
-        "Question: What does TTFS stand for?",
-        "Retrieved context: TTFS is short for Time To First Spike and is used in spiking neural network discussions.",
-        "Good answer: TTFS stands for Time To First Spike. In this context it refers to a spiking-neural-network timing scheme that represents information through the latency of the first spike.",
-        "</example>",
-    ]
-
     summary = (session.summary or "").strip() if session is not None else ""
+    session_summary_block = ""
     if summary:
-        lines.extend(
-            [
-                "",
-                "<session_summary>",
-                summary,
-                "</session_summary>",
-            ]
-        )
+        session_summary_block = "\n\n<session_summary>\n" + summary + "\n</session_summary>"
 
     recent_turns = _recent_turns_for_prompt(session, question=question)
+    recent_dialogue_block = ""
     if recent_turns:
-        lines.append("")
-        lines.append("<recent_dialogue>")
+        lines = ["<recent_dialogue>"]
         for turn in recent_turns:
             role = "User" if turn.role.lower() == "user" else "Assistant"
             lines.append(f"{role}: {turn.content.strip()}")
         lines.append("</recent_dialogue>")
+        recent_dialogue_block = "\n\n" + "\n".join(lines)
 
-    lines.extend(
-        [
-            "",
-            "<retrieved_passages>",
-        ]
-    )
+    retrieved_passages: list[str] = []
     for index, hit in enumerate(hits[:context_limit], start=1):
         score = hit.extras.get("rerank_score", hit.extras.get("rrf_score", hit.score))
-        lines.extend(
+        retrieved_passages.extend(
             [
                 f"<passage rank=\"{index}\" score=\"{float(score):.3f}\" citation=\"{format_citation(hit)}\">",
                 _truncate_text(hit.text, 1200),
                 "</passage>",
             ]
         )
-    lines.extend(
-        [
-            "</retrieved_passages>",
-            "",
-            "<final_instruction>",
-            "Write only the final answer for the user.",
-            "</final_instruction>",
-        ]
+    return render_prompt_template(
+        "answer_user_template",
+        template,
+        selected_hat=selected_hat,
+        question=question,
+        expanded_query=expanded_query,
+        question_intent=question_intent,
+        focus_topic=focus_topic,
+        answer_brief=answer_brief,
+        session_summary_block=session_summary_block,
+        recent_dialogue_block=recent_dialogue_block,
+        retrieved_passages_block="\n".join(retrieved_passages),
     )
-    return "\n".join(lines).rstrip()
+
+
+def _build_no_context_answer_prompt(
+    question: str,
+    *,
+    selected_hat: str,
+    expanded_query: str,
+    session: SessionState | None,
+    template: str,
+) -> str:
+    summary = (session.summary or "").strip() if session is not None else ""
+    session_summary_block = ""
+    if summary:
+        session_summary_block = "\n\n<session_summary>\n" + summary + "\n</session_summary>"
+
+    recent_turns = _recent_turns_for_prompt(session, question=question)
+    recent_dialogue_block = ""
+    if recent_turns:
+        lines = ["<recent_dialogue>"]
+        for turn in recent_turns:
+            role = "User" if turn.role.lower() == "user" else "Assistant"
+            lines.append(f"{role}: {turn.content.strip()}")
+        lines.append("</recent_dialogue>")
+        recent_dialogue_block = "\n\n" + "\n".join(lines)
+
+    return render_prompt_template(
+        "no_context_answer_user_template",
+        template,
+        selected_hat=selected_hat,
+        question=question,
+        expanded_query=expanded_query,
+        session_summary_block=session_summary_block,
+        recent_dialogue_block=recent_dialogue_block,
+    )
 
 
 def _recent_turns_for_prompt(session: SessionState | None, *, question: str) -> list:
@@ -1323,30 +1445,6 @@ def _answer_fallback_message(log_path: Path | None) -> str:
 GROUPING_REVIEW_MIN_CONFIDENCE = 0.68
 
 
-GROUPING_REVIEW_SYSTEM_PROMPT = """You review topic pages inside one local research-wiki hat.
-Each topic already has a compiled wiki-style summary.
-Your task is to suggest topic groups only when the topics clearly belong in one shared wiki page.
-Focus on topics marked as part of the current load, but you may merge them into older topics in the same hat.
-Be selective, but not timid:
-- Do not merge just because topics are from the same broad field.
-- Prefer merge when topics are different notes, papers, or subtopics around the same named method family, embedding family, algorithm, training objective, or conceptual cluster.
-- Prefer merge when the topics share concrete terms such as the same model name, method name, objective, or technical vocabulary.
-- Prefer merge when one topic is clearly a subtopic, implementation note, training note, or explanatory note for another topic.
-- Skip merges that would make the target page unfocused.
-Return strict JSON only with this shape:
-{
-  "recommendations": [
-    {
-      "members": ["topic-a", "topic-b"],
-      "target_topic_folder": "topic-b",
-      "confidence": 0.0,
-      "rationale": "short reason"
-    }
-  ]
-}
-If no merge is warranted, return {"recommendations": []}."""
-
-
 GROUPING_REVIEW_RESPONSE_FORMAT = {
     "type": "object",
     "properties": {
@@ -1372,16 +1470,15 @@ GROUPING_REVIEW_RESPONSE_FORMAT = {
 }
 
 
-def _build_grouping_review_prompt(hat: str, topics: list[TopicGroupingRecord]) -> str:
-    lines = [
-        f"Review the topic list for hat '{hat}'.",
-        "Suggest groups only when multiple topics should become one shared wiki page.",
-        "Return high-signal merge recommendations with confidence scores.",
-        "",
-        "<topic_list>",
-    ]
+def _build_grouping_review_prompt(
+    hat: str,
+    topics: list[TopicGroupingRecord],
+    *,
+    template: str = DEFAULT_PROMPT_SET.grouping_review_user_template,
+) -> str:
+    topic_lines: list[str] = []
     for index, topic in enumerate(topics, start=1):
-        lines.extend(
+        topic_lines.extend(
             [
                 f"<topic rank=\"{index}\" topic_folder=\"{topic.topic_folder}\">",
                 f"Current load: {'yes' if topic.current_load else 'no'}",
@@ -1395,26 +1492,15 @@ def _build_grouping_review_prompt(hat: str, topics: list[TopicGroupingRecord]) -
                 "</topic>",
             ]
         )
-    lines.extend(
-        [
-            "</topic_list>",
-            "",
-            "<pair_hints>",
-        ]
-    )
     pair_hints = _candidate_group_hints(topics)
-    if pair_hints:
-        lines.extend(pair_hints)
-    else:
-        lines.append("No strong overlap hints detected from titles and keywords.")
-    lines.extend(
-        [
-            "</pair_hints>",
-            "",
-            "Only recommend merges that would improve the wiki as a cleaner, richer lookup surface.",
-        ]
+    pair_hints_block = "\n".join(pair_hints) if pair_hints else "No strong overlap hints detected from titles and keywords."
+    return render_prompt_template(
+        "grouping_review_user_template",
+        template,
+        hat=hat,
+        topic_list_block="\n".join(topic_lines),
+        pair_hints_block=pair_hints_block,
     )
-    return "\n".join(lines)
 
 
 def _parse_grouping_review(raw: str, topics: list[TopicGroupingRecord]) -> list[GroupingRecommendation]:
@@ -1623,3 +1709,36 @@ def _citation_location(metadata, filename: str) -> str:
     if locations:
         return ", ".join(locations)
     return Path(filename).stem or filename
+
+
+CONVERSATIONAL_FOLLOWUP_PATTERNS = (
+    r"^(yes|yeah|yep|no|nope|nah)\b",
+    r"^(okay|ok|alright|right|wait)\b",
+    r"^(but|and|so)\b",
+    r"\bi meant\b",
+    r"\byou mean\b",
+    r"\bdon't just\b",
+    r"\banswer properly\b",
+    r"\bthat's not what i asked\b",
+    r"\bwhat do you mean\b",
+    r"\bcan you rephrase\b",
+    r"\btry again\b",
+)
+
+
+def _is_conversational_followup(question: str, session: SessionState | None) -> bool:
+    if session is None:
+        return False
+    if not any(turn.role.lower() == "assistant" for turn in session.turns):
+        return False
+    normalized = " ".join(question.split()).strip()
+    if not normalized:
+        return False
+    lowered = normalized.lower()
+    if any(re.search(pattern, lowered) for pattern in CONVERSATIONAL_FOLLOWUP_PATTERNS):
+        return True
+    if len(normalized) <= 80 and not normalized.endswith(("?", ".")) and any(
+        marker in lowered for marker in ("that", "this", "it", "you", "your answer")
+    ):
+        return True
+    return False

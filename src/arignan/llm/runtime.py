@@ -27,6 +27,7 @@ configure_text_runtime_environment()
 class LocalTextGenerator(Protocol):
     model_name: str
     backend_name: str
+    stream_sink: Callable[[str], None] | None
 
     def generate(
         self,
@@ -44,6 +45,7 @@ class LocalTextGenerator(Protocol):
 class OllamaTextGenerator:
     config: AppConfig
     progress_sink: Callable[[str], None] | None = None
+    stream_sink: Callable[[str], None] | None = None
     memory_recovery: Callable[[str], bool] | None = None
     model_name: str = field(init=False)
     backend_name: str = field(init=False)
@@ -81,10 +83,11 @@ class OllamaTextGenerator:
         client = self._ensure_client()
         endpoint = self.config.local_llm_endpoint.rstrip("/") + "/api/chat"
         messages = _build_ollama_messages(self.model_name, system_prompt=system_prompt, user_prompt=user_prompt)
+        use_stream = self.stream_sink is not None and response_format is None
         payload = {
             "model": self.model_name,
             "messages": messages,
-            "stream": False,
+            "stream": use_stream,
             "keep_alive": self.config.local_llm_keep_alive,
             "options": {
                 "temperature": max(temperature, 0.0),
@@ -92,6 +95,7 @@ class OllamaTextGenerator:
                 "num_ctx": self.config.local_llm_context_window,
             },
         }
+        stream_content = ""
         if response_format is not None:
             payload["format"] = response_format
         if _supports_no_think(self.model_name):
@@ -100,8 +104,13 @@ class OllamaTextGenerator:
         last_details = ""
         for attempt in range(2):
             try:
-                response = client.post(endpoint, json=payload)
-                response.raise_for_status()
+                if use_stream:
+                    with client.stream("POST", endpoint, json=payload) as response:
+                        response.raise_for_status()
+                        stream_content = self._collect_streamed_content(response)
+                else:
+                    response = client.post(endpoint, json=payload)
+                    response.raise_for_status()
                 break
             except httpx.ConnectError as exc:
                 raise RuntimeError(
@@ -121,12 +130,15 @@ class OllamaTextGenerator:
         if last_http_error is not None:
             raise RuntimeError(f"local model runtime request failed for model {self.model_name}: {last_details}") from last_http_error
 
-        try:
-            payload = response.json()
-        except ValueError as exc:
-            raise RuntimeError("Ollama returned a non-JSON response") from exc
         self._report_gpu_state_once()
-        content = payload.get("message", {}).get("content")
+        if use_stream:
+            content = stream_content
+        else:
+            try:
+                payload = response.json()
+            except ValueError as exc:
+                raise RuntimeError("Ollama returned a non-JSON response") from exc
+            content = payload.get("message", {}).get("content")
         if not isinstance(content, str) or not content.strip():
             raise RuntimeError(f"Ollama returned an empty response for model {self.model_name}")
         return _strip_think_blocks(content).strip()
@@ -176,11 +188,28 @@ class OllamaTextGenerator:
         if message:
             self._emit_progress(message)
 
+    def _collect_streamed_content(self, response: httpx.Response) -> str:
+        parts: list[str] = []
+        for raw_line in response.iter_lines():
+            if not raw_line:
+                continue
+            try:
+                payload = httpx.Response(200, content=raw_line).json()
+            except ValueError:
+                continue
+            content = payload.get("message", {}).get("content")
+            if isinstance(content, str) and content:
+                parts.append(content)
+                if self.stream_sink is not None:
+                    self.stream_sink(content)
+        return "".join(parts)
+
 
 @dataclass(slots=True)
 class TransformersTextGenerator:
     config: AppConfig
     progress_sink: Callable[[str], None] | None = None
+    stream_sink: Callable[[str], None] | None = None
     model_name: str = field(init=False)
     backend_name: str = field(init=False)
     _tokenizer: object | None = None

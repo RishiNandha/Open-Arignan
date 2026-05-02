@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+"""Legacy GUI server module.
+
+The active exported GUI entrypoint comes from `arignan.gui.react_server`.
+This module is kept only as a historical fallback/reference and should not
+drift silently.
+"""
+
 import shutil
 import socket
 import tempfile
 import threading
 import time
+import traceback
 import webbrowser
 from pathlib import Path
 
@@ -135,7 +143,9 @@ def _open_browser_later(url: str) -> None:
         time.sleep(0.8)
         try:
             webbrowser.open(url)
-        except Exception:
+        except Exception as exc:
+            print(f"[arignan] Failed to open the browser automatically for {url}:", flush=True)
+            traceback.print_exception(type(exc), exc, exc.__traceback__)
             return
 
     thread = threading.Thread(target=_worker, daemon=True)

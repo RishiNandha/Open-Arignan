@@ -109,6 +109,8 @@ def load_config(
     env = environ or os.environ
     resolved_home = resolve_app_home(app_home=app_home, environ=env)
     resolved_settings = resolve_settings_path(settings_path=settings_path, app_home=resolved_home)
+    if not resolved_settings.exists():
+        write_default_settings(settings_path=resolved_settings, app_home=resolved_home, overwrite=False)
 
     config = AppConfig(app_home=resolved_home)
     raw = _load_json(resolved_settings)

@@ -18,13 +18,14 @@ Important current reality:
 - setup provisions a managed local text-model runtime and runtime uses it for markdown artifacts and final `ask` answers
 - the default local text model is `qwen3:4b-q4_K_M`
 - the lightweight local answer model is `qwen3:0.6b`
-- the default retrieval models are `Alibaba-NLP/gte-modernbert-base` and `Alibaba-NLP/gte-reranker-modernbert-base`
+- the default retrieval models are `BAAI/bge-base-en-v1.5` and `mixedbread-ai/mxbai-rerank-base-v1`
 - `--lightweight` setup switches retrieval to `BAAI/bge-small-en-v1.5` and `mixedbread-ai/mxbai-rerank-xsmall-v1`
 - on Windows, setup bundles the local model runtime inside the app-home so users do not need a separate install/serve step
 - dense retrieval prefers local Qdrant storage when available and falls back to JSON storage otherwise
 - normal `ask` runs now use a compact in-place status line on `stderr`
 - `ask --debug` still prints detailed retrieval/model trace output
 - swallowed LLM failures now write full tracebacks to a session-local `exceptions.log`
+- markdown-generation and RAG-answer prompts now live in `<app_home>/prompts.json` and can be edited without reinstalling
 
 ## Top-Level Layout
 
@@ -44,6 +45,7 @@ Important current reality:
 Read these first:
 
 - `README.md`: source-of-truth architecture intent
+  - now includes a short `prompts.json` editing note covering retrieval placeholders vs. chat-history placeholders
 - `src/arignan/application.py`: main orchestration layer
 - `src/arignan/cli.py`: CLI surface and user-visible flow
 - `src/arignan/config.py`: defaults and settings behavior
@@ -126,6 +128,7 @@ Implemented MCP surface:
 - `src/arignan/config.py`
   - owns `AppConfig`
   - writes and loads `settings.json`
+  - now recreates a missing `settings.json` automatically from defaults at runtime so accidental deletion does not leave the app-home unusable
   - defaults the local markdown-generation backend to the managed local runtime
   - stores both the default local answer model and the lightweight local answer model
   - infers `local_llm_backend` for older settings files that only stored a model string
@@ -140,6 +143,10 @@ Implemented MCP surface:
   - model-id sanitization
   - model storage directory derivation
   - this is the shared source used by setup and runtime loading
+- `src/arignan/prompts.py`
+  - owns prompt defaults, `prompts.json` creation/loading, and placeholder rendering for user-edited prompt templates
+  - now includes dedicated prompt slots for retrieval-grounded answers, conversational follow-up answers, and no-context warning answers
+  - now recreates a missing `prompts.json` automatically from defaults at runtime so prompt editing remains recoverable after accidental deletion
 
 ### Storage and Schemas
 
@@ -171,11 +178,13 @@ Implemented MCP surface:
 - `src/arignan/indexing/embedding.py`
   - `HashingEmbedder` for deterministic fallback behavior
   - sentence-transformer embedder is now used by the live app when cached retrieval models are available
+  - best-effort GPU offload now reports full tracebacks to `stderr` instead of failing silently
 - `src/arignan/indexing/dense.py`
   - `DenseIndexer`
   - `LocalDenseIndex`
   - prefers Qdrant local mode if available
   - falls back to JSON-backed dense storage if Qdrant import is unavailable
+  - Qdrant collection-shape introspection now catches only the expected compatibility exceptions instead of a blanket `Exception`
 - `src/arignan/indexing/lexical.py`
   - BM25-style lexical index
 
@@ -205,6 +214,7 @@ Implemented MCP surface:
   - artifact rendering boundary
   - heuristic fallback rendering
   - local-LLM-backed artifact generation
+  - topic, hat-map, and global-map prompt text now comes from the loaded prompt set under app-home instead of hard-coded module constants
   - topic-summary prompting now treats `summary.md` as the main article page of a compiled wiki, with grouped-topic coherence and `## Related Threads` for retrieval-oriented lookup
   - progress reporting for LLM calls
   - session-local traceback logging for swallowed LLM failures
@@ -253,6 +263,7 @@ Hat-level graph invariant:
 - `src/arignan/retrieval/reranking.py`
   - heuristic reranker
   - cross-encoder boundary for future runtime integration
+  - best-effort GPU offload now reports full tracebacks to `stderr` instead of failing silently
 
 ### Sessions and Exception Logs
 
@@ -292,6 +303,10 @@ Active session log invariant:
   - grouping now compares the incoming document’s provisional topic summary against every existing topic summary in the hat before deciding merge vs standalone
   - `ask()` supports four answer modes: default LLM, light LLM, deterministic synthesis, and raw reranked context
   - `ask()` calls the shared local text generator for default answers and a separate lightweight generator for `--answer-mode light`
+  - `ask()` now supports a per-question reranker breadth override and automatically widens the fused shortlist enough for that override to matter
+  - `ask()` now short-circuits conversational follow-ups away from RAG and answers from recent session context instead
+  - normal `default` and `light` asks can now continue through the LLM even when retrieval finds no useful local context, with an explicit warning instead of a dead-end response
+  - answer-generation and grouping-review prompt text now comes from the loaded prompt set under app-home
   - final answer prompting now uses a wider reranked-context budget than earlier revisions
   - raw mode returns filtered reranked context directly instead of generating a prose answer
 
@@ -301,11 +316,18 @@ Active session log invariant:
   - serves the browser GUI
   - handles direct and task-based GUI API routes for `load` and `ask`
   - tracks compact in-memory task progress for the browser spinner/status bubbles
+  - ask tasks now also carry a short progress history plus partial streamed answer text for live pending-bubble updates
+  - automatic browser-open failures are now printed with full tracebacks instead of being swallowed silently
   - auto-opens the browser for the `arignan -gui` flow
+- `src/arignan/gui/server.py`
+  - legacy pre-React GUI server module kept only as a historical fallback/reference
+  - not the exported GUI entrypoint; `arignan.gui` re-exports from `react_server.py`
 - `src/arignan/gui/frontend/index.html`
   - React host page for the browser client
 - `src/arignan/gui/frontend/app.jsx`
-  - chat-style React client with modal load flow, task polling, and spinner-bubble updates
+  - chat-style React client with modal load flow, task polling, spinner-bubble updates, and bottom-follow behavior that only auto-scrolls when the user is already near the latest message
+  - includes a per-question reranker-candidate field so harder asks can widen evidence selection without editing `settings.json`
+  - pending ask bubbles now show recent progress stages and partial streamed answer text while the final answer is still being generated
 - `src/arignan/gui/frontend/styles.css`
   - dark responsive frontend styling for desktop, half-window, and mobile layouts
 - `src/arignan/cli.py`

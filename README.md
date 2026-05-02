@@ -255,6 +255,14 @@ When the chat history is becoming too long:
 15. Save context: `arignan save-session <path/session_name.json>`
 16. Reload context: `arignan load-session <path/session_name.json>`
 
+#### Prompt Editing
+
+- Prompt text lives in `<app_home>/prompts.json`.
+- Keep `{retrieved_passages_block}` only in retrieval-grounded answer prompts, because that is where the local RAG context is injected.
+- Keep `{question}` for the user’s current ask, and use the surrounding template text to frame it however you want, for example: `Alex said: "{question}"`.
+- For conversational or no-context prompts, prefer session placeholders like `{recent_dialogue_block}` and `{session_summary_block}` instead of retrieval placeholders.
+- Do not invent placeholder names; only use the ones already present in the default template you are editing.
+
 ### For Developers
 
 1. Install dependencies: `python -m pip install -e .[dev]`
