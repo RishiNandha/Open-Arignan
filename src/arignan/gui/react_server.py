@@ -57,6 +57,7 @@ class GuiTaskState:
     thought_started_at: str | None = None
     thought_finished_at: str | None = None
     thought_usage: dict[str, object] | None = None
+    cancel_requested: bool = False
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     updated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
@@ -74,21 +75,28 @@ class GuiTaskState:
             "thought_started_at": self.thought_started_at,
             "thought_finished_at": self.thought_finished_at,
             "thought_usage": self.thought_usage,
+            "cancel_requested": self.cancel_requested,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
+
+
+class GuiTaskCancelled(RuntimeError):
+    """Raised when a GUI task is cancelled cooperatively."""
 
 
 class GuiTaskStore:
     def __init__(self) -> None:
         self._tasks: dict[str, GuiTaskState] = {}
         self._lock = threading.Lock()
+        self._cancel_flags: dict[str, threading.Event] = {}
 
     def create(self, kind: str, message: str) -> GuiTaskState:
         task = GuiTaskState(task_id=uuid.uuid4().hex, kind=kind, message=message)
         task.progress_log.append(message)
         with self._lock:
             self._tasks[task.task_id] = task
+            self._cancel_flags[task.task_id] = threading.Event()
         return task
 
     def update(self, task_id: str, message: str) -> None:
@@ -147,6 +155,31 @@ class GuiTaskStore:
             task.error = error
             task.message = error
             task.updated_at = datetime.now(timezone.utc).isoformat()
+
+    def cancel(self, task_id: str, message: str = "Stopped.") -> None:
+        with self._lock:
+            task = self._tasks[task_id]
+            task.status = "canceled"
+            task.message = message
+            task.error = message
+            task.cancel_requested = True
+            task.updated_at = datetime.now(timezone.utc).isoformat()
+            self._cancel_flags[task_id].set()
+
+    def request_cancel(self, task_id: str) -> None:
+        with self._lock:
+            task = self._tasks[task_id]
+            task.cancel_requested = True
+            task.message = "Stopping..."
+            if not task.progress_log or task.progress_log[-1] != "Stopping...":
+                task.progress_log.append("Stopping...")
+            task.updated_at = datetime.now(timezone.utc).isoformat()
+            self._cancel_flags[task_id].set()
+
+    def is_cancel_requested(self, task_id: str) -> bool:
+        with self._lock:
+            event = self._cancel_flags.get(task_id)
+            return event.is_set() if event is not None else False
 
     def get(self, task_id: str) -> GuiTaskState | None:
         with self._lock:
@@ -208,6 +241,17 @@ def create_gui_app(app: ArignanApp) -> FastAPI:
         if task is None:
             raise HTTPException(status_code=404, detail="Task not found.")
         return task.to_dict()
+
+    @gui_app.post("/api/tasks/{task_id}/cancel")
+    async def cancel_task(task_id: str) -> dict[str, object]:
+        task = task_store.get(task_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail="Task not found.")
+        if task.status != "running":
+            return task.to_dict()
+        task_store.request_cancel(task_id)
+        updated = task_store.get(task_id)
+        return updated.to_dict() if updated is not None else {"task_id": task_id, "status": "canceled"}
 
     @gui_app.post("/api/load")
     async def load_files(
@@ -279,11 +323,31 @@ def create_gui_app(app: ArignanApp) -> FastAPI:
         task = task_store.create("ask", "Preparing question...")
 
         def _runner() -> None:
-            progress_sink = lambda message: task_store.update(task.task_id, _compact_gui_progress("ask", message))
-            stream_sink = lambda text: task_store.append_partial_answer(task.task_id, text)
-            thinking_sink = (lambda text: task_store.append_partial_thinking(task.task_id, text)) if payload.show_thinking else None
+            def _ensure_not_cancelled() -> None:
+                if task_store.is_cancel_requested(task.task_id):
+                    raise GuiTaskCancelled("Stopped.")
+
+            def progress_sink(message: str) -> None:
+                _ensure_not_cancelled()
+                task_store.update(task.task_id, _compact_gui_progress("ask", message))
+
+            def stream_sink(text: str) -> None:
+                _ensure_not_cancelled()
+                task_store.append_partial_answer(task.task_id, text)
+
+            def thinking_sink(text: str) -> None:
+                _ensure_not_cancelled()
+                task_store.append_partial_thinking(task.task_id, text)
+
+            active_thinking_sink = thinking_sink if payload.show_thinking else None
             try:
-                with _gui_task_context(app, task_lock, progress_sink, stream_sink=stream_sink, thinking_sink=thinking_sink):
+                with _gui_task_context(
+                    app,
+                    task_lock,
+                    progress_sink,
+                    stream_sink=stream_sink,
+                    thinking_sink=active_thinking_sink,
+                ):
                     result = app.ask(
                         question,
                         hat=payload.hat,
@@ -296,6 +360,8 @@ def create_gui_app(app: ArignanApp) -> FastAPI:
                         _serialize_ask_result(result),
                         thought_usage=_serialize_thought_usage(app.local_text_generator),
                     )
+            except GuiTaskCancelled as exc:
+                task_store.cancel(task.task_id, str(exc))
             except Exception as exc:
                 task_store.fail(
                     task.task_id,

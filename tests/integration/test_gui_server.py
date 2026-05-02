@@ -396,6 +396,62 @@ def test_gui_ask_task_exposes_thinking_trace_and_toggle(tmp_path: Path, monkeypa
     assert done_without_thinking["partial_thinking"] == ""
 
 
+def test_gui_ask_task_can_be_cancelled(tmp_path: Path, monkeypatch) -> None:
+    app_home = tmp_path / ".arignan"
+    app = ArignanApp(load_config(app_home=app_home))
+
+    def fake_ask(
+        question: str,
+        hat: str = "auto",
+        terminal_pid: int | None = None,
+        answer_mode: str = "default",
+        rerank_top_k: int | None = None,
+        answer_context_top_k: int | None = None,
+    ) -> AskResult:
+        for _ in range(50):
+            app.progress_sink("Hitting local LLM...")
+            time.sleep(0.02)
+        return AskResult(
+            question=question,
+            selected_hat=hat,
+            answer_mode=answer_mode,
+            answer="Should not complete.",
+            citations=[],
+            debug=AskDebug(
+                answer_mode=answer_mode,
+                expanded_query=question.lower(),
+                selected_hat=hat,
+                dense_hits=[],
+                lexical_hits=[],
+                map_hits=[],
+                fused_hits=[],
+                reranked_hits=[],
+                model_calls=[],
+            ),
+        )
+
+    monkeypatch.setattr(app, "ask", fake_ask)
+    client = TestClient(create_gui_app(app))
+
+    ask_start = client.post(
+        "/api/ask/start",
+        json={"question": "Please keep going", "hat": "default", "answer_mode": "default"},
+    )
+    assert ask_start.status_code == 200
+    task_id = ask_start.json()["task_id"]
+
+    running_snapshot = _wait_for_running_message(client, task_id, "Hitting LLM")
+    assert running_snapshot["status"] == "running"
+
+    cancel_response = client.post(f"/api/tasks/{task_id}/cancel")
+    assert cancel_response.status_code == 200
+
+    canceled_snapshot = _wait_for_task(client, task_id)
+    assert canceled_snapshot["status"] == "canceled"
+    assert canceled_snapshot["message"] == "Stopped."
+    assert canceled_snapshot["cancel_requested"] is True
+
+
 def _wait_for_task(client: TestClient, task_id: str) -> dict[str, object]:
     for _ in range(50):
         response = client.get(f"/api/tasks/{task_id}")
@@ -424,3 +480,13 @@ def _wait_for_running_thinking_task(client: TestClient, task_id: str) -> dict[st
             return payload
         time.sleep(0.02)
     raise AssertionError(f"Task {task_id} did not expose partial thinking in time.")
+
+
+def _wait_for_running_message(client: TestClient, task_id: str, fragment: str) -> dict[str, object]:
+    for _ in range(50):
+        response = client.get(f"/api/tasks/{task_id}")
+        payload = response.json()
+        if payload["status"] == "running" and fragment in (payload.get("message") or ""):
+            return payload
+        time.sleep(0.02)
+    raise AssertionError(f"Task {task_id} did not expose message containing '{fragment}' in time.")

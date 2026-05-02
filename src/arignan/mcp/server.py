@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
-from arignan.application import ArignanApp, format_citation
+if TYPE_CHECKING:
+    from arignan.application import ArignanApp
 
 @dataclass(slots=True)
 class MCPTool:
@@ -19,8 +22,19 @@ class MCPResource:
 
 
 class ArignanMCPServer:
-    def __init__(self, app: ArignanApp) -> None:
-        self.app = app
+    def __init__(self, app: ArignanApp | None = None, *, app_factory: Callable[[], ArignanApp] | None = None) -> None:
+        if app is None and app_factory is None:
+            raise ValueError("ArignanMCPServer requires either an app instance or an app_factory.")
+        self._app = app
+        self._app_factory = app_factory
+
+    @property
+    def app(self) -> ArignanApp:
+        if self._app is None:
+            if self._app_factory is None:  # pragma: no cover - constructor guards this
+                raise RuntimeError("Arignan MCP app factory is not configured.")
+            self._app = self._app_factory()
+        return self._app
 
     def list_tools(self) -> list[MCPTool]:
         return [
@@ -41,6 +55,8 @@ class ArignanMCPServer:
         ]
 
     def call_tool(self, name: str, arguments: dict) -> dict:
+        from arignan.application import format_citation
+
         if name != "retrieve_context":
             raise ValueError(f"unknown MCP tool: {name}")
         query = arguments["query"]

@@ -35,6 +35,7 @@ function App() {
   const [loadMode, setLoadMode] = useState("files");
   const [selectedUploads, setSelectedUploads] = useState([]);
   const [isAsking, setIsAsking] = useState(false);
+  const [activeAskTaskId, setActiveAskTaskId] = useState(null);
   const [toolbarOpen, setToolbarOpen] = useState(false);
   const [isLoadingTask, setIsLoadingTask] = useState(false);
   const [isDeletingTask, setIsDeletingTask] = useState(false);
@@ -312,6 +313,7 @@ function appendMessage(message) {
           show_thinking: showThinking,
         }),
       });
+      setActiveAskTaskId(payload.task_id);
       await followTask({
         taskId: payload.task_id,
         pendingId,
@@ -335,7 +337,17 @@ function appendMessage(message) {
         citations: [],
       });
     } finally {
+      setActiveAskTaskId(null);
       setIsAsking(false);
+    }
+  }
+
+  async function stopAsk() {
+    if (!activeAskTaskId) return;
+    try {
+      await fetchJson(`/api/tasks/${activeAskTaskId}/cancel`, { method: "POST" });
+    } catch (error) {
+      window.alert(normalizeError(error));
     }
   }
 
@@ -357,6 +369,20 @@ function appendMessage(message) {
       }
       if (snapshot.status === "done") {
         onComplete(snapshot);
+        keepPolling = false;
+        return;
+      }
+      if (snapshot.status === "canceled") {
+        patchMessage(pendingId, {
+          pending: false,
+          body: snapshot.message || "Stopped.",
+          citations: [],
+          partialAnswer: snapshot.partial_answer || "",
+          partialThinking: snapshot.partial_thinking || "",
+          thoughtStartedAt: snapshot.thought_started_at || null,
+          thoughtFinishedAt: snapshot.thought_finished_at || null,
+          thoughtUsage: snapshot.thought_usage || null,
+        });
         keepPolling = false;
         return;
       }
@@ -501,8 +527,12 @@ function appendMessage(message) {
               }
             }}
           />
-          <button type="button" className="send-button" onClick={askQuestion} disabled={isAsking}>
-            Ask
+          <button
+            type="button"
+            className={`send-button${isAsking ? " is-stop" : ""}`}
+            onClick={isAsking ? stopAsk : askQuestion}
+          >
+            {isAsking ? "Stop" : "Ask"}
           </button>
         </div>
       </section>

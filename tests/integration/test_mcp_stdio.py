@@ -116,6 +116,87 @@ def test_mcp_stdio_entrypoint_initializes_and_serves_tools(tmp_path: Path) -> No
         process.communicate(timeout=10)
 
 
+def test_mcp_stdio_initialize_returns_before_app_construction(tmp_path: Path) -> None:
+    app_home = tmp_path / ".arignan"
+    script = textwrap.dedent(
+        """
+        import sys
+        from arignan.cli import main
+        import arignan.application as application
+
+        class ExplodingApp:
+            def __init__(self, *args, **kwargs):
+                raise RuntimeError("ArignanApp should not be constructed during initialize")
+
+        application.ArignanApp = ExplodingApp
+        sys.exit(main(["--mcp", "--app-home", sys.argv[1]]))
+        """
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-c", script, str(app_home)],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env={
+            **os.environ,
+            "PYTHONPATH": str(Path(__file__).resolve().parents[2] / "src"),
+        },
+    )
+    try:
+        initialize = _request(
+            process,
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "pytest"}},
+            },
+        )
+        assert initialize["result"]["serverInfo"]["name"] == "arignan"
+    finally:
+        process.terminate()
+        process.communicate(timeout=10)
+
+
+def test_mcp_stdio_logs_progress_to_stderr(tmp_path: Path) -> None:
+    app_home = tmp_path / ".arignan"
+    script = "from arignan.cli import main; raise SystemExit(main(['--mcp', '--app-home', r'%s']))" % str(app_home)
+    process = subprocess.Popen(
+        [sys.executable, "-c", script],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env={
+            **os.environ,
+            "PYTHONPATH": str(Path(__file__).resolve().parents[2] / "src"),
+        },
+    )
+    try:
+        initialize = _request(
+            process,
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "pytest"}},
+            },
+        )
+        assert initialize["result"]["serverInfo"]["name"] == "arignan"
+
+        tools = _request(process, {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
+        assert "tools" in tools["result"]
+    finally:
+        process.terminate()
+        _, stderr = process.communicate(timeout=10)
+
+    stderr_text = stderr.decode("utf-8", errors="replace")
+    assert "[arignan-mcp] Server started" in stderr_text
+    assert "[arignan-mcp] Received headers:" in stderr_text
+    assert '"method": "initialize"' in stderr_text
+    assert "[arignan-mcp] Initialize request received" in stderr_text
+    assert "[arignan-mcp] Listing tools" in stderr_text
+
+
 def _request(process: subprocess.Popen[bytes], payload: dict[str, object]) -> dict[str, object]:
     assert process.stdin is not None
     body = json.dumps(payload).encode("utf-8")

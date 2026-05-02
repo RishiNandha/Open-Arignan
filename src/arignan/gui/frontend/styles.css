@@ -461,6 +461,13 @@ textarea {
   cursor: pointer;
 }
 
+.send-button.is-stop {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  color: var(--text);
+  font-weight: 700;
+}
+
 .modal-scrim {
   position: fixed;
   inset: 0;
@@ -755,6 +762,10 @@ textarea {
   }
 
   .send-button {
+    width: 100%;
+  }
+
+  .stop-button {
     width: 100%;
   }
 

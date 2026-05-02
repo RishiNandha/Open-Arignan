@@ -4,10 +4,12 @@ import argparse
 import os
 import sys
 from pathlib import Path
-from typing import Sequence, TextIO
+from typing import TYPE_CHECKING, Sequence, TextIO
 
-from arignan.application import ArignanApp, AskResult, LoadResult, RetrievalResult, format_citation
 from arignan.config import load_config
+
+if TYPE_CHECKING:
+    from arignan.application import ArignanApp, AskResult, LoadResult, RetrievalResult
 
 
 class ArignanHelpFormatter(argparse.HelpFormatter):
@@ -205,6 +207,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return launch_gui(app_home=args.app_home, settings_path=args.settings, terminal_pid=resolved_pid)
     if args.command is None:
         parser.error("either a command or -gui is required")
+    from arignan.application import ArignanApp
+
     config = load_config(settings_path=args.settings, app_home=args.app_home)
     reporter = _build_progress_reporter(command=args.command, debug=getattr(args, "debug", False))
     app = ArignanApp(config, progress_sink=reporter.emit, terminal_pid=resolved_pid)
@@ -345,12 +349,22 @@ def launch_gui(*, app_home: Path | None, settings_path: Path | None, terminal_pi
 
 
 def launch_mcp(*, app_home: Path | None, settings_path: Path | None, terminal_pid: int) -> int:
+    from arignan.application import ArignanApp
     from arignan.mcp import ArignanMCPServer
     from arignan.mcp.stdio_server import run_stdio_server
 
-    config = load_config(settings_path=settings_path, app_home=app_home)
-    app = ArignanApp(config, progress_sink=None, terminal_pid=terminal_pid)
-    return run_stdio_server(ArignanMCPServer(app))
+    def _mcp_progress(message: str) -> None:
+        print(f"[arignan-mcp] {message}", file=sys.stderr, flush=True)
+
+    return run_stdio_server(
+        ArignanMCPServer(
+            app_factory=lambda: ArignanApp(
+                load_config(settings_path=settings_path, app_home=app_home),
+                progress_sink=_mcp_progress,
+                terminal_pid=terminal_pid,
+            )
+        )
+    )
 
 
 def _print_output_block(text: str) -> None:
@@ -475,6 +489,8 @@ def _format_model_calls(calls) -> list[str]:
 
 
 def _format_hit_group(title: str, hits) -> list[str]:
+    from arignan.application import format_citation
+
     lines = [f"{title} ({len(hits)}):"]
     if not hits:
         lines.append("  none")
@@ -493,6 +509,8 @@ def _format_hit_group(title: str, hits) -> list[str]:
 
 
 def render_retrieved_context(hits) -> str:
+    from arignan.application import format_citation
+
     if not hits:
         return "No relevant local knowledge was found for that question."
     lines = ["Top retrieved context:"]

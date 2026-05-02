@@ -480,6 +480,14 @@ Touch:
 - `load` and grouped delete/regeneration should avoid redundant map/global-map refreshes inside inner loops
 - the GUI header now exposes small utility buttons for opening the active exception log, `settings.json`, and `prompts.json`
 - the GUI backend owns a narrow `/api/open-file/{target}` route for those utility buttons and self-heals missing settings/prompts/log targets before opening them
+- the MCP stdio entrypoint now defers `ArignanApp` construction until the first real MCP tool/resource operation, so `initialize` can return without waiting for retrieval-model startup
+- `tests/unit/test_llm_runtime.py` explicitly isolates Ollama retry-path behavior from host-specific runtime provisioning, so CI no longer depends on a discoverable local Ollama install
+- `arignan.cli` now lazy-imports `ArignanApp` only inside command handlers and MCP launch, so import-time side effects do not block the stdio initialize handshake
+- `tests/integration/test_mcp_stdio.py` now explicitly guards the initialize-before-app-construction contract for the MCP entrypoint
+- the MCP stdio server logs lifecycle and tool/resource activity to `stderr` under an `[arignan-mcp]` prefix while reserving `stdout` exclusively for framed protocol traffic
+- the GUI ask flow now exposes a minimal cooperative cancel path through `/api/tasks/{task_id}/cancel`, and active ask tasks can settle into a `canceled` status without widening cancellation across load/delete flows
+- the MCP stdio reader now also logs incoming header maps and a truncated preview of each received JSON payload to `stderr` for handshake debugging
+- the GUI composer reuses the same primary action button for `Ask` and `Stop`; there is no separate cancel control in the composer row
 
 ## Test Map
 

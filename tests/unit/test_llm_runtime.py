@@ -166,7 +166,7 @@ def test_ollama_text_generator_retries_once_after_memory_pressure(app_home, monk
     assert any("retrying once" in message for message in progress)
 
 
-def test_ollama_text_generator_retries_once_after_connect_failure(app_home) -> None:
+def test_ollama_text_generator_retries_once_after_connect_failure(app_home, monkeypatch) -> None:
     progress: list[str] = []
 
     class FakeResponse:
@@ -190,11 +190,18 @@ def test_ollama_text_generator_retries_once_after_connect_failure(app_home) -> N
     generator = OllamaTextGenerator(AppConfig(app_home=app_home), progress_sink=progress.append)
     generator._model_ready = True
     generator._client = FakeClient()  # type: ignore[assignment]
+    ensure_calls: list[None] = []
+
+    def fake_ensure_model_ready(self) -> None:
+        ensure_calls.append(None)
+
+    monkeypatch.setattr(OllamaTextGenerator, "_ensure_model_ready", fake_ensure_model_ready)
 
     output = generator.generate(system_prompt="System prompt", user_prompt="User prompt")
 
     assert output == "Recovered answer."
     assert any("stopped mid-generation" in message for message in progress)
+    assert len(ensure_calls) == 2
 
 
 def test_ollama_text_generator_reports_gpu_state_once_after_success(app_home, monkeypatch) -> None:
@@ -280,7 +287,7 @@ def test_ollama_text_generator_streams_thinking_and_answer_separately(app_home) 
     assert generator.last_usage == {"total_duration": 2000000000, "eval_count": 12}
 
 
-def test_ollama_text_generator_reports_empty_stream_after_thinking_with_detail(app_home) -> None:
+def test_ollama_text_generator_reports_empty_stream_after_thinking_with_detail(app_home, monkeypatch) -> None:
     class FakeStreamResponse:
         def __enter__(self):
             return self
@@ -309,6 +316,12 @@ def test_ollama_text_generator_reports_empty_stream_after_thinking_with_detail(a
     generator._client = FakeClient()  # type: ignore[assignment]
     generator.thinking_sink = lambda text: None
     generator.stream_sink = lambda text: None
+    ensure_calls: list[None] = []
+
+    def fake_ensure_model_ready(self) -> None:
+        ensure_calls.append(None)
+
+    monkeypatch.setattr(OllamaTextGenerator, "_ensure_model_ready", fake_ensure_model_ready)
 
     try:
         generator.generate(system_prompt="System prompt", user_prompt="User prompt")
@@ -319,6 +332,7 @@ def test_ollama_text_generator_reports_empty_stream_after_thinking_with_detail(a
 
     assert "finished without answer text" in message
     assert "after producing thinking tokens" in message
+    assert len(ensure_calls) == 2
     assert generator.last_failure_detail is not None
     assert "after producing thinking tokens" in generator.last_failure_detail
     assert generator._model_ready is False
