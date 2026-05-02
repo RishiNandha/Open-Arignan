@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import os
 import shutil
 import socket
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -19,8 +22,9 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from arignan.application import ArignanApp
-from arignan.config import load_config
+from arignan.config import load_config, write_default_settings
 from arignan.models import LoadOperation
+from arignan.prompts import write_default_prompts
 
 SUPPORTED_GUI_UPLOAD_SUFFIXES = {".pdf", ".md", ".markdown"}
 
@@ -30,6 +34,7 @@ class AskPayload(BaseModel):
     hat: str = "auto"
     answer_mode: str = "default"
     rerank_top_k: int | None = None
+    answer_context_top_k: int | None = None
     show_thinking: bool = True
 
 
@@ -171,6 +176,7 @@ def create_gui_app(app: ArignanApp) -> FastAPI:
             "hats": list(dict.fromkeys(hats)),
             "answer_modes": ["default", "light", "none", "raw"],
             "default_rerank_top_k": app.config.retrieval.rerank_top_k,
+            "default_answer_context_top_k": app.config.retrieval.answer_context_top_k_default,
             "default_show_thinking": True,
         }
 
@@ -189,6 +195,12 @@ def create_gui_app(app: ArignanApp) -> FastAPI:
             "hats": hats,
             "loads": loads,
         }
+
+    @gui_app.post("/api/open-file/{target}")
+    async def open_file_target(target: str) -> dict[str, object]:
+        path = _resolve_gui_open_target(app, target)
+        _open_local_path(path)
+        return {"path": str(path)}
 
     @gui_app.get("/api/tasks/{task_id}")
     async def task_status(task_id: str) -> dict[str, object]:
@@ -254,6 +266,7 @@ def create_gui_app(app: ArignanApp) -> FastAPI:
             hat=payload.hat,
             answer_mode=payload.answer_mode,
             rerank_top_k=payload.rerank_top_k,
+            answer_context_top_k=payload.answer_context_top_k,
         )
         return _serialize_ask_result(result)
 
@@ -276,6 +289,7 @@ def create_gui_app(app: ArignanApp) -> FastAPI:
                         hat=payload.hat,
                         answer_mode=payload.answer_mode,
                         rerank_top_k=payload.rerank_top_k,
+                        answer_context_top_k=payload.answer_context_top_k,
                     )
                     task_store.finish(
                         task.task_id,
@@ -294,6 +308,7 @@ def create_gui_app(app: ArignanApp) -> FastAPI:
                             "hat": payload.hat,
                             "answer_mode": payload.answer_mode,
                             "rerank_top_k": payload.rerank_top_k,
+                            "answer_context_top_k": payload.answer_context_top_k,
                             "show_thinking": payload.show_thinking,
                         },
                         user_message="Something went wrong while answering the question.",
@@ -656,6 +671,32 @@ def _task_error_message(
 
 def _frontend_dir() -> Path:
     return Path(__file__).resolve().parent / "frontend"
+
+
+def _resolve_gui_open_target(app: ArignanApp, target: str) -> Path:
+    normalized = target.strip().lower()
+    if normalized == "settings":
+        return write_default_settings(settings_path=app.config.app_home / "settings.json", app_home=app.config.app_home, overwrite=False)
+    if normalized == "prompts":
+        return write_default_prompts(app.config.app_home, overwrite=False)
+    if normalized == "logs":
+        terminal_pid = getattr(app, "terminal_pid", None)
+        if terminal_pid is not None:
+            path = app.session_manager.store.active_exception_log_path(terminal_pid)
+        else:
+            path = app.config.app_home / "sessions" / "active" / "gui" / "exceptions.log"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch(exist_ok=True)
+        return path
+    raise HTTPException(status_code=404, detail=f"Unknown file target '{target}'.")
+
+
+def _open_local_path(path: Path) -> None:
+    if os.name == "nt":
+        os.startfile(str(path))
+        return
+    opener = ["open", str(path)] if sys.platform == "darwin" else ["xdg-open", str(path)]
+    subprocess.run(opener, check=True)
 
 
 def _open_browser_later(url: str) -> None:

@@ -104,6 +104,25 @@ def test_cli_load_ask_and_delete_smoke(tmp_path: Path, capsys, monkeypatch) -> N
     assert "Hitting LLM" in ask_progress
 
     assert main(
+        [
+            "--app-home",
+            str(app_home),
+            "retrieve",
+            "What is JEPA?",
+            "--hat",
+            "default",
+            "--rerank-top-k",
+            "6",
+            "--answer-context-top-k",
+            "4",
+        ]
+    ) == 0
+    retrieve_capture = capsys.readouterr()
+    assert "Top retrieved context:" in retrieve_capture.out
+    assert "default/jepa-notes/notes.md:" in retrieve_capture.out
+    assert "Hitting LLM" not in retrieve_capture.err
+
+    assert main(
         ["--app-home", str(app_home), "--pid", "1234", "ask", "What is JEPA?", "--hat", "default", "--answer-mode", "light"]
     ) == 0
     light_capture = capsys.readouterr()

@@ -17,6 +17,7 @@ Important current reality:
 
 - setup provisions a managed local text-model runtime and runtime uses it for markdown artifacts and final `ask` answers
 - the default local text model is `qwen3:4b-q4_K_M`
+- setup self-heal now also normalizes the earlier mistaken `gemma4:e2b` default back to `qwen3:4b-q4_K_M`
 - `ask` now reuses the main local text generator across default/light conversational flows so the app does not swap in a second full chat LLM at ask time
 - the default retrieval models are `BAAI/bge-base-en-v1.5` and `mixedbread-ai/mxbai-rerank-base-v1`
 - `--lightweight` setup switches retrieval to `BAAI/bge-small-en-v1.5` and `mixedbread-ai/mxbai-rerank-xsmall-v1`
@@ -25,8 +26,16 @@ Important current reality:
 - normal `ask` runs now use a compact in-place status line on `stderr`
 - `ask --debug` still prints detailed retrieval/model trace output
 - swallowed LLM failures now write full tracebacks to a session-local `exceptions.log`
+- Ollama streams that emit only thinking and no final answer text are now treated as explicit runtime failures, and the generator clears its ready-state so later turns can re-check runtime health
 - markdown-generation and RAG-answer prompts now live in `<app_home>/prompts.json` and can be edited without reinstalling
 - ask-route classification prompts also live in `<app_home>/prompts.json`, and default/light asks classify `retrieve` vs `chat_context` before running RAG
+- ask-route classification now supports `ask_route_backend = "llm" | "embedding"` in `settings.json`
+- the GUI ask composer now exposes both rerank-candidate count and final answer-context count as independent per-question overrides
+- the GUI `Show Thinking` control is now an accessible toggle-style button instead of a plain checkbox
+- conversational/default answer flows now pass recent turns to Ollama as chat `messages` instead of embedding the transcript verbatim into the prompt body
+- conversational follow-up and route-classification prompts now keep prior turns in Ollama `messages` and send the current user turn as the real final chat message, instead of re-stuffing chat history into the prompt body
+- `arignan --mcp` now launches a framed stdio MCP server, and an integration test handshakes with that real entrypoint in a subprocess
+- normal answer generation now asks the local LLM for up to `4096` new tokens instead of the earlier small caps, and Ollama crash-like failures get one clean retry
 
 ## Top-Level Layout
 
@@ -48,7 +57,7 @@ Read these first:
 - `README.md`: source-of-truth architecture intent
   - now includes a short `prompts.json` editing note covering retrieval placeholders vs. chat-history placeholders
 - `src/arignan/application.py`: main orchestration layer
-  - now owns the ask-route classifier, shared session-context prompt blocks, and single-main-LLM reuse for ask flows
+  - now owns the ask-route classifier, shared session-context prompt blocks, single-main-LLM reuse for ask flows, the split between conversational system instructions vs. real chat-turn messages, honest no-context/local-LLM-failure fallback wording, and the raised default answer-generation token cap
 - `src/arignan/cli.py`: CLI surface and user-visible flow
 - `src/arignan/config.py`: defaults and settings behavior
 - `src/arignan/setup_flow.py`: user bootstrap flow
@@ -95,6 +104,7 @@ Commands currently implemented:
 
 - `load`
 - `ask`
+- `retrieve`
 - `delete`
 - `list-loads`
 - `save-session`
@@ -107,6 +117,7 @@ CLI behavior worth remembering:
 - normal `ask` uses a compact spinner-style status reporter instead of line-by-line progress spam
 - `ask` supports `--answer-mode default|light|none|raw`
 - default/light `ask` first runs a small route classifier to decide whether to retrieve or continue directly from chat context
+- `retrieve` runs retrieval + reranking only and never calls an answer LLM
 - `load --debug` and `ask --debug` print model-call traces and internal details
 - uncaught CLI exceptions are logged to the active session log before being re-raised
 
@@ -114,15 +125,17 @@ CLI behavior worth remembering:
 
 Flow:
 
-1. `src/arignan/mcp/server.py`
-2. `ArignanApp`
-3. retrieval pipeline  reranker
+1. `arignan --mcp`
+2. `src/arignan/cli.py:launch_mcp`
+3. `src/arignan/mcp/stdio_server.py`
+4. `src/arignan/mcp/server.py`
+5. `ArignanApp`
+6. retrieval pipeline + reranker
 
 Implemented MCP surface:
 
-- tools: `ask`, `retrieve_context`, `load`, `list_loads`, `delete_loads`, `delete_hat`, `save_session`, `load_session`, `reset_session`
+- tools: `retrieve_context`
 - resource: `arignan://global-map`
-- client-answer mode uses MCP sampling when available and falls back gracefully when the client does not expose sampling
 
 ## Source Map by Area
 
@@ -133,6 +146,7 @@ Implemented MCP surface:
   - writes and loads `settings.json`
   - now recreates a missing `settings.json` automatically from defaults at runtime so accidental deletion does not leave the app-home unusable
   - defaults the local markdown-generation backend to the managed local runtime
+  - now includes `ask_route_backend` so route classification can use either the main LLM or the embedder
   - stores both the default local answer model and the lightweight local answer model
   - infers `local_llm_backend` for older settings files that only stored a model string
   - enforces that `embedding_model` is fixed and cannot be overridden in settings
@@ -143,12 +157,14 @@ Implemented MCP surface:
   - shared model alias resolution
   - local-LLM backend inference for config migration
   - local-runtime model-tag normalization for the default markdown-generation path
+  - carries the legacy mistaken Gemma default marker so setup can migrate it back to Qwen
   - model-id sanitization
   - model storage directory derivation
   - this is the shared source used by setup and runtime loading
 - `src/arignan/prompts.py`
   - owns prompt defaults, `prompts.json` creation/loading, and placeholder rendering for user-edited prompt templates
   - now includes dedicated prompt slots for retrieval-grounded answers, conversational follow-up answers, and no-context warning answers
+  - conversational/classifier prompt defaults are now instruction-only and no longer inline session-summary placeholders by default
   - now recreates a missing `prompts.json` automatically from defaults at runtime so prompt editing remains recoverable after accidental deletion
 
 ### Storage and Schemas
@@ -225,6 +241,8 @@ Implemented MCP surface:
   - provides the managed local generation adapter used by default for markdown artifacts and final answers
   - still contains an explicit transformers runtime path for non-default/back-compat use
   - strips reasoning blocks from managed-runtime output before markdown validation
+  - now records the last Ollama runtime failure detail and resets model readiness after connect, HTTP, non-JSON, or thinking-only-empty-answer failures
+  - now performs one clean retry after crash-like Ollama failures by re-checking runtime/model readiness once instead of immediately giving up
 - `src/arignan/llm/service.py`
   - provisions the managed local runtime bundle during setup
   - auto-starts the local runtime in the background on first use
@@ -301,6 +319,9 @@ Active session log invariant:
   - batches map regeneration during `load` and grouped-topic regeneration to avoid redundant LLM calls
   - owns user-facing progress emission for multi-step operations
   - `load` now writes provisional topic summaries first, then runs one post-load regroup pass over the finished topic summaries in the hat
+  - owns both the shared retrieval-only path and the ask-route classifier
+  - the ask-route classifier now supports both the original LLM path and an alternate embedder-similarity path
+  - routes prior turns into chat-message lists for conversational/default Ollama calls instead of pasting the transcript directly into the prompt body
   - after regrouping, the current load is reindexed once from the final manifests so the CLI summary and retrieval state reflect final grouped topics rather than provisional folders
   - the regroup step is now batch-based: the light LLM sees the full topic list for the hat and returns confidence-scored merge recommendations instead of one topic-at-a-time hints
   - grouping now compares the incoming document’s provisional topic summary against every existing topic summary in the hat before deciding merge vs standalone
@@ -335,6 +356,10 @@ Active session log invariant:
   - dark responsive frontend styling for desktop, half-window, and mobile layouts
 - `src/arignan/cli.py`
   - supports `-gui` / `--gui` as a one-command local GUI launch path
+  - now also exposes `retrieve` for no-LLM reranked context inspection and `--mcp` for the stdio MCP server
+- `src/arignan/mcp/stdio_server.py`
+  - framed stdio MCP transport
+  - handles `initialize`, `tools/list`, `tools/call`, `resources/list`, `resources/read`, and `ping`
 
 ## Behavior That Is Intentionally Simplified
 
@@ -342,7 +367,7 @@ These are the main places where the repo still keeps deterministic fallbacks eve
 
 - `src/arignan/application.py:generate_answer`
   - primary final-answer path
-  - builds the LLM prompt from session summary, recent turns, and top retrieved hits
+  - builds the LLM prompt from session summary and top retrieved hits while recent turns flow separately as chat messages when supported
   - falls back to deterministic synthesis on local-runtime failure
 - `src/arignan/application.py:compose_answer`
   - answer-mode switch for `default`, `light`, `none`, and `raw`
@@ -453,6 +478,8 @@ Touch:
 - Arignan force-disables TensorFlow and Flax backends for its local text runtime
 - active session exceptions are logged to `<app_home>/sessions/active/pid-<pid>/exceptions.log`
 - `load` and grouped delete/regeneration should avoid redundant map/global-map refreshes inside inner loops
+- the GUI header now exposes small utility buttons for opening the active exception log, `settings.json`, and `prompts.json`
+- the GUI backend owns a narrow `/api/open-file/{target}` route for those utility buttons and self-heals missing settings/prompts/log targets before opening them
 
 ## Test Map
 

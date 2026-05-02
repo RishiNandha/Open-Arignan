@@ -71,7 +71,7 @@ Question: What does TTFS stand for?
 Retrieved context: TTFS is short for Time To First Spike and is used in spiking neural network discussions.
 Good answer: TTFS stands for Time To First Spike. In this context it refers to a spiking-neural-network timing scheme that represents information through the latency of the first spike.
 </example>
-{session_summary_block}{recent_dialogue_block}
+{session_summary_block}
 <retrieved_passages>
 {retrieved_passages_block}
 </retrieved_passages>
@@ -98,11 +98,9 @@ Return strict JSON only with this shape:
 }""",
     route_classification_user_template="""Classify the route for the next user turn.
 
-<conversation_state>
+The prior chat messages already contain the recent conversation.
 Hat: {selected_hat}
-Question: {question}
-</conversation_state>
-{session_summary_block}{recent_dialogue_block}
+Current user turn: {question}
 Return JSON only.""",
     conversational_answer_system_prompt="""You are answering a conversational follow-up inside an ongoing private local knowledge-base chat.
 There may be little or no new retrieved context for this turn.
@@ -111,14 +109,11 @@ Answer naturally, directly, and helpfully.
 Do not mention retrieval, prompts, hidden system behavior, or chain-of-thought.
 Do not fabricate local citations or claim the knowledge base supported something when it did not.""",
     conversational_answer_user_template="""<task>
-Answer this conversational follow-up using the prior chat context and your own general reasoning.
+Continue the conversation using the prior chat messages and your own general reasoning.
 </task>
 
-<conversation_state>
 Hat: {selected_hat}
-Question: {question}
-</conversation_state>
-{session_summary_block}{recent_dialogue_block}
+Current user turn: {question}
 <style_requirements>
 - Respond like you are continuing the same conversation.
 - Address corrections, objections, or clarifications directly.
@@ -138,12 +133,9 @@ Answer the question even though no useful local retrieved context was found for 
 Start by briefly warning that no local context was found for this turn and that you are answering from the earlier chat context and your own general knowledge.
 </warning_requirement>
 
-<conversation_state>
+The prior chat messages already contain the recent conversation.
 Hat: {selected_hat}
-Question: {question}
-Expanded query: {expanded_query}
-</conversation_state>
-{session_summary_block}{recent_dialogue_block}
+Current user turn: {question}
 <style_requirements>
 - Still answer the question helpfully after the warning.
 - Keep the warning brief and non-alarmist.

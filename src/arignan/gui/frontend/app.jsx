@@ -8,6 +8,7 @@ function App() {
     default_hat: "default",
     answer_modes: ANSWER_MODES,
     default_rerank_top_k: 8,
+    default_answer_context_top_k: 8,
     default_show_thinking: true,
   });
   const [library, setLibrary] = useState({
@@ -17,6 +18,7 @@ function App() {
   const [hat, setHat] = useState("auto");
   const [answerMode, setAnswerMode] = useState("default");
   const [rerankTopK, setRerankTopK] = useState(8);
+  const [answerContextTopK, setAnswerContextTopK] = useState(8);
   const [showThinking, setShowThinking] = useState(true);
   const [question, setQuestion] = useState("");
   const [messages, setMessages] = useState([
@@ -59,6 +61,7 @@ function App() {
     setLoadHat(payload.default_hat || "default");
     setAnswerMode("default");
     setRerankTopK(payload.default_rerank_top_k || 8);
+    setAnswerContextTopK(payload.default_answer_context_top_k || 8);
     setShowThinking(payload.default_show_thinking !== false);
     await refreshLibrary();
   }
@@ -66,6 +69,14 @@ function App() {
   async function refreshLibrary() {
     const payload = await fetchJson("/api/library");
     setLibrary(payload);
+  }
+
+  async function openFileTarget(target) {
+    try {
+      await fetchJson(`/api/open-file/${target}`, { method: "POST" });
+    } catch (error) {
+      window.alert(normalizeError(error));
+    }
   }
 
   function openLoadDialog() {
@@ -293,6 +304,10 @@ function appendMessage(message) {
           hat,
           answer_mode: answerMode,
           rerank_top_k: normalizeRerankTopK(rerankTopK, options.default_rerank_top_k || 8),
+          answer_context_top_k: normalizeRerankTopK(
+            answerContextTopK,
+            options.default_answer_context_top_k || 8
+          ),
           show_thinking: showThinking,
         }),
       });
@@ -360,9 +375,27 @@ function appendMessage(message) {
   return (
     <div className="app-shell">
       <header className="app-header">
-        <div>
+        <div className="brand-block">
           <h1 className="brand-title">Open Arignan</h1>
-          <p className="brand-subtitle">Local knowledge base loading and questioning with a chat-style UI.</p>
+          <div className="brand-tools">
+            <button type="button" className="ghost-button header-tool-button" onClick={() => openFileTarget("logs")}>
+              Open Logs
+            </button>
+            <button
+              type="button"
+              className="ghost-button header-tool-button"
+              onClick={() => openFileTarget("settings")}
+            >
+              Open Settings
+            </button>
+            <button
+              type="button"
+              className="ghost-button header-tool-button"
+              onClick={() => openFileTarget("prompts")}
+            >
+              Open Prompts
+            </button>
+          </div>
         </div>
         <div className="header-actions">
           <button type="button" className="ghost-button" onClick={openManageDialog}>
@@ -420,14 +453,28 @@ function appendMessage(message) {
               onChange={(event) => setRerankTopK(event.target.value)}
             />
           </label>
-          <label className="toggle-control">
+          <label className="control-label compact-control">
+            Final Context
             <input
-              type="checkbox"
-              checked={showThinking}
-              onChange={(event) => setShowThinking(event.target.checked)}
+              className="text-control"
+              type="number"
+              min="1"
+              step="1"
+              value={answerContextTopK}
+              onChange={(event) => setAnswerContextTopK(event.target.value)}
             />
-            <span>Show Thinking</span>
           </label>
+          <button
+            type="button"
+            className={`toggle-control${showThinking ? " is-active" : ""}`}
+            aria-pressed={showThinking}
+            onClick={() => setShowThinking((value) => !value)}
+          >
+            <span className="toggle-pill" aria-hidden="true">
+              <span className="toggle-thumb" />
+            </span>
+            <span>Show Thinking</span>
+          </button>
         </div>
         <div className="question-row">
           <textarea

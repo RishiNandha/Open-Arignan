@@ -80,10 +80,15 @@ def test_mcp_server_exposes_retrieval_tool_and_global_map_resource(tmp_path: Pat
 
     tools = server.list_tools()
     resources = server.list_resources()
-    tool_result = server.call_tool("retrieve_context", {"query": "JEPA architecture", "hat": "default"})
+    tool_result = server.call_tool(
+        "retrieve_context",
+        {"query": "JEPA architecture", "hat": "default", "rerank_top_k": 4, "answer_context_top_k": 1},
+    )
     global_map = server.read_resource("arignan://global-map")
 
     assert tools[0].name == "retrieve_context"
+    assert "answer_context_top_k" in tools[0].input_schema["properties"]
     assert resources[0].uri == "arignan://global-map"
     assert tool_result["contexts"]
+    assert len(tool_result["contexts"]) == 1
     assert "default" in global_map.lower()

@@ -84,6 +84,10 @@ def test_ollama_text_generator_posts_chat_request_and_strips_think_blocks(app_ho
     output = generator.generate(
         system_prompt="System prompt",
         user_prompt="User prompt",
+        chat_messages=[
+            {"role": "user", "content": "Earlier question"},
+            {"role": "assistant", "content": "Earlier answer"},
+        ],
         max_new_tokens=256,
         temperature=0.0,
         response_format={"type": "object"},
@@ -97,6 +101,11 @@ def test_ollama_text_generator_posts_chat_request_and_strips_think_blocks(app_ho
     assert payload["options"]["num_ctx"] == 6144
     assert payload["format"] == {"type": "object"}
     assert payload["think"] is False
+    assert payload["messages"][1:] == [
+        {"role": "user", "content": "Earlier question"},
+        {"role": "assistant", "content": "Earlier answer"},
+        {"role": "user", "content": "User prompt"},
+    ]
 
 
 def test_ollama_text_generator_retries_once_after_memory_pressure(app_home, monkeypatch) -> None:
@@ -155,6 +164,37 @@ def test_ollama_text_generator_retries_once_after_memory_pressure(app_home, monk
         {"endpoint": "http://127.0.0.1:11434", "exclude": {"qwen3:4b-q4_K_M"}}
     ]
     assert any("retrying once" in message for message in progress)
+
+
+def test_ollama_text_generator_retries_once_after_connect_failure(app_home) -> None:
+    progress: list[str] = []
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        @staticmethod
+        def json() -> dict[str, object]:
+            return {"message": {"content": "Recovered answer."}}
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def post(self, url: str, json: dict[str, object]):
+            self.calls += 1
+            if self.calls == 1:
+                raise httpx.ConnectError("connection reset by peer")
+            return FakeResponse()
+
+    generator = OllamaTextGenerator(AppConfig(app_home=app_home), progress_sink=progress.append)
+    generator._model_ready = True
+    generator._client = FakeClient()  # type: ignore[assignment]
+
+    output = generator.generate(system_prompt="System prompt", user_prompt="User prompt")
+
+    assert output == "Recovered answer."
+    assert any("stopped mid-generation" in message for message in progress)
 
 
 def test_ollama_text_generator_reports_gpu_state_once_after_success(app_home, monkeypatch) -> None:
@@ -238,6 +278,50 @@ def test_ollama_text_generator_streams_thinking_and_answer_separately(app_home) 
     assert "".join(answer_chunks) == "Final answer."
     assert generator.last_thinking == "Let me think. More reasoning."
     assert generator.last_usage == {"total_duration": 2000000000, "eval_count": 12}
+
+
+def test_ollama_text_generator_reports_empty_stream_after_thinking_with_detail(app_home) -> None:
+    class FakeStreamResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def raise_for_status(self) -> None:
+            return None
+
+        @staticmethod
+        def iter_lines():
+            return iter(
+                [
+                    b'{"message":{"thinking":"Let me think."},"done":false}',
+                    b'{"done":true,"done_reason":"stop"}',
+                ]
+            )
+
+    class FakeClient:
+        def stream(self, method: str, url: str, json: dict[str, object]):
+            return FakeStreamResponse()
+
+    generator = OllamaTextGenerator(AppConfig(app_home=app_home))
+    generator._model_ready = True
+    generator._client = FakeClient()  # type: ignore[assignment]
+    generator.thinking_sink = lambda text: None
+    generator.stream_sink = lambda text: None
+
+    try:
+        generator.generate(system_prompt="System prompt", user_prompt="User prompt")
+    except RuntimeError as exc:
+        message = str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("Expected an empty-stream runtime error")
+
+    assert "finished without answer text" in message
+    assert "after producing thinking tokens" in message
+    assert generator.last_failure_detail is not None
+    assert "after producing thinking tokens" in generator.last_failure_detail
+    assert generator._model_ready is False
 
 
 def test_transformers_text_generator_prefers_cuda_load_when_available(app_home, monkeypatch) -> None:

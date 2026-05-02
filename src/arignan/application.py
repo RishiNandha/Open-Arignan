@@ -103,9 +103,45 @@ class AskResult:
 
 
 @dataclass(slots=True)
+class RetrievalResult:
+    question: str
+    selected_hat: str
+    expanded_query: str
+    dense_hits: list[RetrievalHit]
+    lexical_hits: list[RetrievalHit]
+    map_hits: list[RetrievalHit]
+    fused_hits: list[RetrievalHit]
+    reranked_hits: list[RetrievalHit]
+    answer_hits: list[RetrievalHit]
+
+
+@dataclass(slots=True)
 class AskRouteDecision:
     route: Literal["retrieve", "chat_context"]
     reason: str
+
+
+CONVERSATIONAL_ROUTE_EXAMPLES = (
+    "can you explain further?",
+    "explain more",
+    "can you elaborate?",
+    "what do you mean?",
+    "say that more simply",
+    "answer properly",
+    "that's not what i asked",
+    "be more specific",
+    "continue from the previous answer",
+    "can you clarify that?",
+)
+
+RETRIEVAL_ROUTE_EXAMPLES = (
+    "what is jepa?",
+    "compare mamba and transformer",
+    "how do i implement a spiking mamba?",
+    "find sources about sparse attention",
+    "what does this paper say about training?",
+    "summarize the local notes on spike timing",
+)
 
 
 @dataclass(slots=True)
@@ -294,6 +330,7 @@ class ArignanApp:
         terminal_pid: int | None = None,
         answer_mode: Literal["default", "light", "none", "raw"] = "default",
         rerank_top_k: int | None = None,
+        answer_context_top_k: int | None = None,
     ) -> AskResult:
         self.trace_collector.clear()
         pid = terminal_pid or self.terminal_pid
@@ -317,7 +354,11 @@ class ArignanApp:
                 question,
                 [],
                 answer_mode=answer_mode,
-                context_limit=self._answer_context_limit(answer_mode, rerank_top_k=effective_rerank_top_k),
+                context_limit=self._answer_context_limit(
+                    answer_mode,
+                    rerank_top_k=effective_rerank_top_k,
+                    answer_context_top_k=answer_context_top_k,
+                ),
                 expanded_query=question,
                 selected_hat=selected_hat,
                 default_generator=self.local_text_generator,
@@ -350,6 +391,87 @@ class ArignanApp:
                 citations=citations,
                 debug=debug,
             )
+        retrieval = self._retrieve_context_internal(question, hat=hat, rerank_top_k=effective_rerank_top_k)
+        answer_hits = retrieval.answer_hits
+        if answer_mode in {"default", "light"} and not answer_hits:
+            self._emit_progress("No useful local context found; answering from chat context and general knowledge...")
+        answer, citations = compose_answer(
+            question,
+            answer_hits,
+            answer_mode=answer_mode,
+            context_limit=self._answer_context_limit(
+                answer_mode,
+                rerank_top_k=effective_rerank_top_k,
+                answer_context_top_k=answer_context_top_k,
+            ),
+            expanded_query=retrieval.expanded_query,
+            selected_hat=retrieval.selected_hat,
+            default_generator=self.local_text_generator,
+            light_generator=self.light_text_generator,
+            trace_sink=self.trace_collector,
+            exception_logger=self.exception_logger,
+            progress_sink=self.progress_sink,
+            session=session,
+            prompts=self.prompts,
+            allow_llm_without_context=answer_mode in {"default", "light"},
+                no_context_warning=answer_mode in {"default", "light"},
+        )
+        self.session_manager.append_turn(pid, role="assistant", content=answer)
+        debug = AskDebug(
+            answer_mode=answer_mode,
+            expanded_query=retrieval.expanded_query,
+            selected_hat=retrieval.selected_hat,
+            dense_hits=retrieval.dense_hits,
+            lexical_hits=retrieval.lexical_hits,
+            map_hits=retrieval.map_hits,
+            fused_hits=retrieval.fused_hits,
+            reranked_hits=retrieval.reranked_hits,
+            model_calls=self.trace_collector.snapshot(),
+        )
+        return AskResult(
+            question=question,
+            selected_hat=retrieval.selected_hat,
+            answer_mode=answer_mode,
+            answer=answer,
+            citations=citations,
+            debug=debug,
+        )
+
+    def retrieve_context(
+        self,
+        question: str,
+        *,
+        hat: str = "auto",
+        rerank_top_k: int | None = None,
+        answer_context_top_k: int | None = None,
+    ) -> RetrievalResult:
+        self.trace_collector.clear()
+        retrieval = self._retrieve_context_internal(question, hat=hat, rerank_top_k=rerank_top_k)
+        context_limit = self._answer_context_limit(
+            "default",
+            rerank_top_k=self._effective_rerank_top_k(rerank_top_k),
+            answer_context_top_k=answer_context_top_k,
+        )
+        return RetrievalResult(
+            question=retrieval.question,
+            selected_hat=retrieval.selected_hat,
+            expanded_query=retrieval.expanded_query,
+            dense_hits=retrieval.dense_hits,
+            lexical_hits=retrieval.lexical_hits,
+            map_hits=retrieval.map_hits,
+            fused_hits=retrieval.fused_hits,
+            reranked_hits=retrieval.reranked_hits,
+            answer_hits=retrieval.answer_hits[:context_limit],
+        )
+
+    def _retrieve_context_internal(
+        self,
+        question: str,
+        *,
+        hat: str,
+        rerank_top_k: int | None,
+    ) -> RetrievalResult:
+        effective_rerank_top_k = self._effective_rerank_top_k(rerank_top_k)
         self._emit_progress("Running retrieval pipeline...")
         bundle = RetrievalPipeline(
             self.layout,
@@ -383,44 +505,16 @@ class ArignanApp:
             if fallback_hits:
                 self._emit_progress("Reranker found no strong hits; using top retrieved context instead...")
                 answer_hits = fallback_hits
-        if answer_mode in {"default", "light"} and not answer_hits:
-            self._emit_progress("No useful local context found; answering from chat context and general knowledge...")
-        answer, citations = compose_answer(
-            question,
-            answer_hits,
-            answer_mode=answer_mode,
-            context_limit=self._answer_context_limit(answer_mode, rerank_top_k=effective_rerank_top_k),
-            expanded_query=bundle.expanded_query,
+        return RetrievalResult(
+            question=question,
             selected_hat=bundle.selected_hat,
-            default_generator=self.local_text_generator,
-            light_generator=self.light_text_generator,
-            trace_sink=self.trace_collector,
-            exception_logger=self.exception_logger,
-            progress_sink=self.progress_sink,
-            session=session,
-            prompts=self.prompts,
-            allow_llm_without_context=answer_mode in {"default", "light"},
-            no_context_warning=answer_mode in {"default", "light"},
-        )
-        self.session_manager.append_turn(pid, role="assistant", content=answer)
-        debug = AskDebug(
-            answer_mode=answer_mode,
             expanded_query=bundle.expanded_query,
-            selected_hat=bundle.selected_hat,
             dense_hits=bundle.dense_hits,
             lexical_hits=bundle.lexical_hits,
             map_hits=bundle.map_hits,
             fused_hits=bundle.fused_hits,
             reranked_hits=reranked,
-            model_calls=self.trace_collector.snapshot(),
-        )
-        return AskResult(
-            question=question,
-            selected_hat=bundle.selected_hat,
-            answer_mode=answer_mode,
-            answer=answer,
-            citations=citations,
-            debug=debug,
+            answer_hits=answer_hits,
         )
 
     def _classify_ask_route(
@@ -437,18 +531,27 @@ class ArignanApp:
             return AskRouteDecision(route="retrieve", reason="no prior assistant context")
         if not question.strip():
             return AskRouteDecision(route="retrieve", reason="empty question")
+        backend = str(getattr(self.config, "ask_route_backend", "llm")).strip().lower() or "llm"
         selected_hat = self._fallback_selected_hat(hat, session)
-        self._emit_progress("Classifying whether this turn needs retrieval or can continue from chat context...")
+        self._emit_progress(
+            "Classifying whether this turn needs retrieval or can continue from chat context"
+            + (f" ({backend})" if backend else "")
+            + "..."
+        )
+        if backend == "embedding":
+            return self._classify_ask_route_with_embeddings(question, selected_hat=selected_hat, session=session)
         prompt = _build_route_classification_prompt(
             question,
             selected_hat=selected_hat,
-            session=session,
             template=self.prompts.route_classification_user_template,
         )
+        chat_messages = _chat_messages_for_session(session, question=question)
         try:
-            raw = self.local_text_generator.generate(
-                system_prompt=self.prompts.route_classification_system_prompt,
-                user_prompt=prompt,
+            raw = _generate_with_chat_messages(
+                self.local_text_generator,
+                system_prompt=_compose_system_prompt(self.prompts.route_classification_system_prompt, prompt),
+                user_prompt=question,
+                chat_messages=chat_messages,
                 max_new_tokens=120,
                 temperature=0.0,
                 response_format=ASK_ROUTE_RESPONSE_FORMAT,
@@ -480,6 +583,76 @@ class ArignanApp:
             task="ask route classification",
             model_name=self.local_text_generator.model_name,
             backend=getattr(self.local_text_generator, "backend_name", type(self.local_text_generator).__name__),
+            status="ok",
+            detail=f"{selected_hat} -> {decision.route}",
+        )
+        return decision
+
+    def _classify_ask_route_with_embeddings(
+        self,
+        question: str,
+        *,
+        selected_hat: str,
+        session: SessionState,
+    ) -> AskRouteDecision:
+        comparison_texts = list(CONVERSATIONAL_ROUTE_EXAMPLES) + list(RETRIEVAL_ROUTE_EXAMPLES)
+        prior_turns = _recent_turns_for_prompt(session, question=question)
+        prior_texts = [turn.content.strip() for turn in prior_turns if turn.content.strip()]
+        try:
+            question_embedding = self.embedder.embed_query(question)
+            comparison_embeddings = self.embedder.embed_texts(comparison_texts + prior_texts)
+        except Exception as exc:
+            log_path = self.log_exception(
+                component="embedder",
+                task="ask route classification",
+                exc=exc,
+                context={"hat": selected_hat, "backend": "embedding"},
+            )
+            if self.progress_sink is not None:
+                self.progress_sink(
+                    "Embedding route classification failed; continuing with retrieval."
+                    + (f" See {log_path}" if log_path else "")
+                )
+            self.trace_collector.record(
+                component="embedder",
+                task="ask route classification",
+                model_name=self.embedder.model_name,
+                backend=getattr(self.embedder, "backend_name", type(self.embedder).__name__),
+                status="fallback",
+                detail=f"{selected_hat} -> retrieve",
+            )
+            return AskRouteDecision(route="retrieve", reason="embedding classification fallback")
+
+        conversational_count = len(CONVERSATIONAL_ROUTE_EXAMPLES)
+        retrieval_count = len(RETRIEVAL_ROUTE_EXAMPLES)
+        conversational_embeddings = comparison_embeddings[:conversational_count]
+        retrieval_embeddings = comparison_embeddings[conversational_count : conversational_count + retrieval_count]
+        prior_embeddings = comparison_embeddings[conversational_count + retrieval_count :]
+
+        conversational_score = _max_similarity(question_embedding, conversational_embeddings)
+        retrieval_score = _max_similarity(question_embedding, retrieval_embeddings)
+        prior_score = _max_similarity(question_embedding, prior_embeddings)
+        chat_context_score = max(conversational_score, (conversational_score * 0.65) + (prior_score * 0.35))
+
+        if chat_context_score >= 0.62 and chat_context_score >= retrieval_score + 0.02:
+            decision = AskRouteDecision(
+                route="chat_context",
+                reason=f"embedding similarity {chat_context_score:.2f} favored conversational follow-up",
+            )
+        else:
+            decision = AskRouteDecision(
+                route="retrieve",
+                reason=(
+                    f"embedding similarity favored retrieval "
+                    f"(chat={chat_context_score:.2f}, retrieve={retrieval_score:.2f})"
+                ),
+            )
+
+        self.trace_collector.record(
+            component="embedder",
+            task="ask route classification",
+            model_name=self.embedder.model_name,
+            backend=getattr(self.embedder, "backend_name", type(self.embedder).__name__),
             status="ok",
             detail=f"{selected_hat} -> {decision.route}",
         )
@@ -1000,6 +1173,7 @@ class ArignanApp:
         answer_mode: Literal["default", "light", "none", "raw"],
         *,
         rerank_top_k: int | None = None,
+        answer_context_top_k: int | None = None,
     ) -> int:
         retrieval = self.config.retrieval
         if answer_mode == "light":
@@ -1010,6 +1184,8 @@ class ArignanApp:
             limit = retrieval.answer_context_top_k_raw
         else:
             limit = retrieval.answer_context_top_k_default
+        if answer_context_top_k is not None:
+            limit = max(1, int(answer_context_top_k))
         if rerank_top_k is None:
             return limit
         return max(limit, rerank_top_k)
@@ -1116,7 +1292,7 @@ def compose_answer(
         expanded_query=expanded_query,
         selected_hat=selected_hat,
         generator=generator,
-        max_new_tokens=480 if answer_mode == "default" else 320,
+        max_new_tokens=4096 if answer_mode == "default" else 4096,
         trace_sink=trace_sink,
         exception_logger=exception_logger,
         progress_sink=progress_sink,
@@ -1136,7 +1312,7 @@ def generate_answer(
     expanded_query: str,
     selected_hat: str,
     generator: LocalTextGenerator,
-    max_new_tokens: int = 480,
+    max_new_tokens: int = 4096,
     trace_sink: ModelTraceCollector | None = None,
     exception_logger: SessionExceptionLogger | None = None,
     progress_sink: Callable[[str], None] | None = None,
@@ -1153,7 +1329,6 @@ def generate_answer(
                 question,
                 selected_hat=selected_hat,
                 expanded_query=expanded_query,
-                session=session,
                 template=(
                     prompts.no_context_answer_user_template
                     if no_context_warning
@@ -1166,9 +1341,11 @@ def generate_answer(
                 else prompts.conversational_answer_system_prompt
             )
             try:
-                raw = generator.generate(
-                    system_prompt=system_prompt,
-                    user_prompt=prompt,
+                raw = _generate_with_chat_messages(
+                    generator,
+                    system_prompt=_compose_system_prompt(system_prompt, prompt),
+                    user_prompt=question,
+                    chat_messages=_chat_messages_for_session(session, question=question),
                     max_new_tokens=max_new_tokens,
                     temperature=0.1,
                 )
@@ -1189,7 +1366,7 @@ def generate_answer(
                     item_count=0,
                     detail=f"{selected_hat} (no context exception)",
                 )
-                return "No relevant local knowledge was found for that question."
+                return _no_context_llm_failure_message()
             if answer:
                 _record_answer_trace(
                     trace_sink,
@@ -1220,9 +1397,11 @@ def generate_answer(
         template=prompts.answer_user_template,
     )
     try:
-        raw = generator.generate(
+        raw = _generate_with_chat_messages(
+            generator,
             system_prompt=prompts.answer_system_prompt,
             user_prompt=prompt,
+            chat_messages=_chat_messages_for_session(session, question=question),
             max_new_tokens=max_new_tokens,
             temperature=0.1,
         )
@@ -1403,19 +1582,16 @@ def _build_no_context_answer_prompt(
     *,
     selected_hat: str,
     expanded_query: str,
-    session: SessionState | None,
     template: str,
 ) -> str:
-    session_summary_block, recent_dialogue_block = _session_prompt_blocks(session, question=question)
-
     return render_prompt_template(
         "no_context_answer_user_template",
         template,
         selected_hat=selected_hat,
         question=question,
         expanded_query=expanded_query,
-        session_summary_block=session_summary_block,
-        recent_dialogue_block=recent_dialogue_block,
+        session_summary_block="",
+        recent_dialogue_block="",
     )
 
 
@@ -1423,17 +1599,15 @@ def _build_route_classification_prompt(
     question: str,
     *,
     selected_hat: str,
-    session: SessionState | None,
     template: str,
 ) -> str:
-    session_summary_block, recent_dialogue_block = _session_prompt_blocks(session, question=question)
     return render_prompt_template(
         "route_classification_user_template",
         template,
         selected_hat=selected_hat,
         question=question,
-        session_summary_block=session_summary_block,
-        recent_dialogue_block=recent_dialogue_block,
+        session_summary_block="",
+        recent_dialogue_block="",
     )
 
 
@@ -1442,17 +1616,7 @@ def _session_prompt_blocks(session: SessionState | None, *, question: str) -> tu
     session_summary_block = ""
     if summary:
         session_summary_block = "\n\n<session_summary>\n" + summary + "\n</session_summary>"
-
-    recent_turns = _recent_turns_for_prompt(session, question=question)
-    recent_dialogue_block = ""
-    if recent_turns:
-        lines = ["<recent_dialogue>"]
-        for turn in recent_turns:
-            role = "User" if turn.role.lower() == "user" else "Assistant"
-            lines.append(f"{role}: {turn.content.strip()}")
-        lines.append("</recent_dialogue>")
-        recent_dialogue_block = "\n\n" + "\n".join(lines)
-    return session_summary_block, recent_dialogue_block
+    return session_summary_block, ""
 
 
 def _recent_turns_for_prompt(session: SessionState | None, *, question: str) -> list:
@@ -1462,6 +1626,70 @@ def _recent_turns_for_prompt(session: SessionState | None, *, question: str) -> 
     if turns and turns[-1].role.lower() == "user" and turns[-1].content == question:
         turns = turns[:-1]
     return turns[-4:]
+
+
+def _chat_messages_for_session(session: SessionState | None, *, question: str) -> list[dict[str, str]]:
+    chat_messages: list[dict[str, str]] = []
+    for turn in _recent_turns_for_prompt(session, question=question):
+        role = turn.role.lower().strip()
+        content = turn.content.strip()
+        if role not in {"user", "assistant"} or not content:
+            continue
+        chat_messages.append({"role": role, "content": content})
+    return chat_messages
+
+
+def _vector_similarity(left: list[float], right: list[float]) -> float:
+    if not left or not right or len(left) != len(right):
+        return 0.0
+    return float(sum(a * b for a, b in zip(left, right)))
+
+
+def _max_similarity(query_embedding: list[float], embeddings: list[list[float]]) -> float:
+    if not embeddings:
+        return 0.0
+    return max(_vector_similarity(query_embedding, candidate) for candidate in embeddings)
+
+
+def _generate_with_chat_messages(
+    generator: LocalTextGenerator,
+    *,
+    system_prompt: str,
+    user_prompt: str,
+    chat_messages: list[dict[str, str]] | None = None,
+    max_new_tokens: int = 800,
+    temperature: float = 0.1,
+    response_format: dict[str, object] | None = None,
+) -> str:
+    try:
+        return generator.generate(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            chat_messages=chat_messages,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            response_format=response_format,
+        )
+    except TypeError as exc:
+        if "chat_messages" not in str(exc):
+            raise
+        return generator.generate(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            response_format=response_format,
+        )
+
+
+def _compose_system_prompt(base_prompt: str, instruction_prompt: str) -> str:
+    base = base_prompt.strip()
+    instructions = instruction_prompt.strip()
+    if not instructions:
+        return base
+    if not base:
+        return instructions
+    return f"{base}\n\nAdditional turn-specific instructions:\n{instructions}"
 
 
 def _normalize_generated_answer(text: str) -> str:
@@ -1522,10 +1750,17 @@ def _log_answer_exception(
 
 
 def _answer_fallback_message(log_path: Path | None) -> str:
-    message = "Local LLM unavailable for answer generation; using retrieval synthesis fallback."
+    message = "Local LLM answer generation failed; using retrieval synthesis fallback."
     if log_path is None:
         return message
     return f"{message} Log: {log_path.resolve()}"
+
+
+def _no_context_llm_failure_message() -> str:
+    return (
+        "The local LLM stopped before producing an answer for this turn, "
+        "and no retrieved local context was available to fall back on."
+    )
 
 
 GROUPING_REVIEW_MIN_CONFIDENCE = 0.68
@@ -1819,4 +2054,3 @@ def _citation_location(metadata, filename: str) -> str:
     if locations:
         return ", ".join(locations)
     return Path(filename).stem or filename
-

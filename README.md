@@ -22,6 +22,25 @@
 2. Your browser opens locally
 3. Use **Add More Files To Knowledge Base** to load material, then ask questions in the chat box
 
+### Option 3: MCP
+
+Run the MCP server with:
+
+```text
+arignan --mcp --app-home <install dir>
+```
+
+For MCP clients such as VS Code or Claude Code, the launch command should be:
+
+```json
+{
+  "command": "arignan",
+  "args": ["--mcp", "--app-home", "E:/arignan"]
+}
+```
+
+Use `retrieve_context` to fetch reranked local context without calling an answer LLM.
+
 ## Key Points
 
 ### Behavioral

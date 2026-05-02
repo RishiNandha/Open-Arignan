@@ -54,6 +54,7 @@ class MarkdownConfig:
 
 @dataclass(slots=True)
 class AppConfig:
+    ask_route_backend: str = "llm"
     local_llm_backend: str = "ollama"
     local_llm_model: str = DEFAULT_LOCAL_LLM_REPO_ID
     local_llm_light_model: str = DEFAULT_LIGHT_LOCAL_LLM_REPO_ID

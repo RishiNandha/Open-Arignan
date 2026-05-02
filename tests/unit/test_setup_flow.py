@@ -208,6 +208,28 @@ def test_initialize_local_state_migrates_legacy_modernbert_defaults_when_not_ref
     assert migrated["reranker_model"] == "mixedbread-ai/mxbai-rerank-base-v1"
 
 
+def test_initialize_local_state_migrates_legacy_gemma_default_when_not_refreshing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    app_home = tmp_path / ".arignan"
+    settings_path = write_default_settings(app_home=app_home)
+    payload = json.loads(settings_path.read_text(encoding="utf-8"))
+    payload["local_llm_backend"] = "ollama"
+    payload["local_llm_model"] = "gemma4:e2b"
+    settings_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+    _, migrated_settings_path = initialize_local_state(
+        app_home=app_home,
+        refresh_existing=False,
+    )
+
+    migrated = json.loads(migrated_settings_path.read_text(encoding="utf-8"))
+    assert migrated["local_llm_backend"] == "ollama"
+    assert migrated["local_llm_model"] == "qwen3:4b-q4_K_M"
+
+
 def test_initialize_local_state_can_keep_existing_settings_when_not_refreshing(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
 

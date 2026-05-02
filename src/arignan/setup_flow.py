@@ -23,6 +23,7 @@ from arignan.model_registry import (
     DEFAULT_RERANKER_MODEL_REPO_ID,
     LEGACY_EMBEDDING_MODEL_REPO_ID,
     LEGACY_MODERNBERT_RERANKER_MODEL_REPO_ID,
+    LEGACY_OLLAMA_LOCAL_LLM_REPO_ID,
     LEGACY_TRANSFORMERS_LOCAL_LLM_DISPLAY_NAME,
     LEGACY_TRANSFORMERS_LOCAL_LLM_REPO_ID,
     LEGACY_RERANKER_MODEL_REPO_ID,
@@ -359,10 +360,11 @@ def _migrate_legacy_local_llm_defaults(settings_path: Path) -> None:
     current_backend = payload.get("local_llm_backend")
     legacy_models = {
         None,
+        LEGACY_OLLAMA_LOCAL_LLM_REPO_ID,
         LEGACY_TRANSFORMERS_LOCAL_LLM_DISPLAY_NAME,
         LEGACY_TRANSFORMERS_LOCAL_LLM_REPO_ID,
     }
-    if current_backend not in {None, "transformers"}:
+    if current_backend not in {None, "transformers", "ollama"}:
         return
     if current_model not in legacy_models:
         return

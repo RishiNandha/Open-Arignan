@@ -25,6 +25,7 @@ def test_gui_options_and_root_render(tmp_path: Path) -> None:
     assert "react-root" in root.text
     assert "/gui-static/app.jsx" in root.text
     assert "Add More Files To Knowledge Base" not in root.text
+    assert "Open Settings" not in root.text
     assert options.status_code == 200
     payload = options.json()
     assert "auto" in payload["hats"]
@@ -32,7 +33,35 @@ def test_gui_options_and_root_render(tmp_path: Path) -> None:
     assert "SNNs" in payload["hats"]
     assert payload["answer_modes"] == ["default", "light", "none", "raw"]
     assert payload["default_rerank_top_k"] == 8
+    assert payload["default_answer_context_top_k"] == 8
     assert payload["default_show_thinking"] is True
+
+
+def test_gui_can_open_logs_settings_and_prompts_targets(tmp_path: Path, monkeypatch) -> None:
+    app_home = tmp_path / ".arignan"
+    app = ArignanApp(load_config(app_home=app_home))
+    client = TestClient(create_gui_app(app))
+    opened: list[Path] = []
+
+    def fake_open_local_path(path: Path) -> None:
+        opened.append(path)
+
+    monkeypatch.setattr("arignan.gui.react_server._open_local_path", fake_open_local_path)
+
+    settings_response = client.post("/api/open-file/settings")
+    prompts_response = client.post("/api/open-file/prompts")
+    logs_response = client.post("/api/open-file/logs")
+
+    assert settings_response.status_code == 200
+    assert prompts_response.status_code == 200
+    assert logs_response.status_code == 200
+    assert len(opened) == 3
+    assert opened[0].name == "settings.json"
+    assert opened[0].exists()
+    assert opened[1].name == "prompts.json"
+    assert opened[1].exists()
+    assert opened[2].name == "exceptions.log"
+    assert opened[2].exists()
 
 
 def test_gui_task_endpoints_use_existing_app_flows(tmp_path: Path, monkeypatch) -> None:
@@ -75,11 +104,13 @@ def test_gui_task_endpoints_use_existing_app_flows(tmp_path: Path, monkeypatch) 
         terminal_pid: int | None = None,
         answer_mode: str = "default",
         rerank_top_k: int | None = None,
+        answer_context_top_k: int | None = None,
     ) -> AskResult:
         captured["question"] = question
         captured["ask_hat"] = hat
         captured["answer_mode"] = answer_mode
         captured["rerank_top_k"] = rerank_top_k
+        captured["answer_context_top_k"] = answer_context_top_k
         return AskResult(
             question=question,
             selected_hat=hat,
@@ -146,7 +177,13 @@ def test_gui_task_endpoints_use_existing_app_flows(tmp_path: Path, monkeypatch) 
 
     ask_start = client.post(
         "/api/ask/start",
-        json={"question": "What is JEPA?", "hat": "SNNs", "answer_mode": "light", "rerank_top_k": 11},
+        json={
+            "question": "What is JEPA?",
+            "hat": "SNNs",
+            "answer_mode": "light",
+            "rerank_top_k": 11,
+            "answer_context_top_k": 5,
+        },
     )
     assert ask_start.status_code == 200
     ask_payload = _wait_for_task(client, ask_start.json()["task_id"])
@@ -157,6 +194,7 @@ def test_gui_task_endpoints_use_existing_app_flows(tmp_path: Path, monkeypatch) 
     assert captured["ask_hat"] == "SNNs"
     assert captured["answer_mode"] == "light"
     assert captured["rerank_top_k"] == 11
+    assert captured["answer_context_top_k"] == 5
 
     delete_start = client.post("/api/delete/start", json={"load_ids": ["load-gui"]})
     assert delete_start.status_code == 200
@@ -232,7 +270,14 @@ def test_gui_ask_task_exposes_progress_log_and_partial_answer(tmp_path: Path, mo
     app_home = tmp_path / ".arignan"
     app = ArignanApp(load_config(app_home=app_home))
 
-    def fake_ask(question: str, hat: str = "auto", terminal_pid: int | None = None, answer_mode: str = "default", rerank_top_k: int | None = None) -> AskResult:
+    def fake_ask(
+        question: str,
+        hat: str = "auto",
+        terminal_pid: int | None = None,
+        answer_mode: str = "default",
+        rerank_top_k: int | None = None,
+        answer_context_top_k: int | None = None,
+    ) -> AskResult:
         app.progress_sink("Running retrieval pipeline...")
         app.progress_sink("Reranking")
         stream_sink = getattr(app.local_text_generator, "stream_sink", None)
@@ -285,7 +330,14 @@ def test_gui_ask_task_exposes_thinking_trace_and_toggle(tmp_path: Path, monkeypa
     app_home = tmp_path / ".arignan"
     app = ArignanApp(load_config(app_home=app_home))
 
-    def fake_ask(question: str, hat: str = "auto", terminal_pid: int | None = None, answer_mode: str = "default", rerank_top_k: int | None = None) -> AskResult:
+    def fake_ask(
+        question: str,
+        hat: str = "auto",
+        terminal_pid: int | None = None,
+        answer_mode: str = "default",
+        rerank_top_k: int | None = None,
+        answer_context_top_k: int | None = None,
+    ) -> AskResult:
         thinking_sink = getattr(app.local_text_generator, "thinking_sink", None)
         stream_sink = getattr(app.local_text_generator, "stream_sink", None)
         if callable(thinking_sink):

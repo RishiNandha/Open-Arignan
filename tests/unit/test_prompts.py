@@ -44,6 +44,12 @@ def test_load_prompt_set_recreates_missing_prompts_json(tmp_path: Path) -> None:
     assert path.exists()
 
 
+def test_conversational_prompt_defaults_do_not_inline_session_history() -> None:
+    assert "{session_summary_block}" not in DEFAULT_PROMPT_SET.route_classification_user_template
+    assert "{session_summary_block}" not in DEFAULT_PROMPT_SET.conversational_answer_user_template
+    assert "{session_summary_block}" not in DEFAULT_PROMPT_SET.no_context_answer_user_template
+
+
 def test_render_prompt_template_raises_for_unknown_placeholder() -> None:
     with pytest.raises(RuntimeError) as exc_info:
         render_prompt_template("answer_user_template", "Question: {question}\nExtra: {missing}", question="What is JEPA?")
