@@ -488,6 +488,10 @@ Touch:
 - the GUI ask flow now exposes a minimal cooperative cancel path through `/api/tasks/{task_id}/cancel`, and active ask tasks can settle into a `canceled` status without widening cancellation across load/delete flows
 - the MCP stdio reader now also logs incoming header maps and a truncated preview of each received JSON payload to `stderr` for handshake debugging
 - the GUI composer reuses the same primary action button for `Ask` and `Stop`; there is no separate cancel control in the composer row
+- the MCP entrypoint is now SDK-native: `src/arignan/mcp/server.py` builds a `FastMCP` server directly, `arignan --mcp` runs the SDK stdio transport, and the retrieve/global-map surfaces stay lazy behind an app factory so Ollama is not touched during MCP initialize
+- `tests/integration/test_mcp_server.py` now uses the official SDK's in-memory session helper, and `tests/integration/test_mcp_stdio.py` now probes the SDK's real newline-delimited stdio transport instead of the repo's removed custom framing
+- the project now pins `starlette>=0.37.2,<0.39` explicitly so the FastAPI GUI stack remains compatible while the MCP SDK is installed
+- the MCP package export surface is now minimal (`build_mcp_server` only), and generated `src/open_arignan.egg-info/` packaging artifacts have been removed from the source tree as non-runtime fluff
 
 ## Test Map
 
