@@ -6,7 +6,7 @@
 
 ### Option 1: Git Clone + CLI
 
-0. Clone the repo
+0. Clone the repo with `git clone https://github.com/RishiNandha/Open-Arignan`
 1. Run the `python setup.py --app-home <install dir>`. This will:
    - Download all the models needed, including the default local answer model and a lighter fallback answer model
    - Create a **bin directory** folder with executables
