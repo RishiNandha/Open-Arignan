@@ -3,9 +3,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+from mcp.shared.memory import create_connected_server_and_client_session
+
 from arignan.application import ArignanApp
 from arignan.config import load_config
-from arignan.mcp import ArignanMCPServer
+from arignan.mcp import build_mcp_server
 
 
 class FakeLocalGenerator:
@@ -65,7 +68,8 @@ class FakeLocalGenerator:
         return "JEPA stands for Joint Embedding Predictive Architecture."
 
 
-def test_mcp_server_exposes_retrieval_tool_and_global_map_resource(tmp_path: Path, monkeypatch) -> None:
+@pytest.mark.anyio
+async def test_mcp_server_exposes_retrieval_tool_and_global_map_resource(tmp_path: Path, monkeypatch) -> None:
     app_home = tmp_path / ".arignan"
     source = tmp_path / "notes.md"
     source.write_text("# JEPA Notes\n\nJoint embedding predictive architecture overview.\n", encoding="utf-8")
@@ -76,19 +80,22 @@ def test_mcp_server_exposes_retrieval_tool_and_global_map_resource(tmp_path: Pat
     )
     app = ArignanApp(load_config(app_home=app_home))
     app.load(str(source), hat="default")
-    server = ArignanMCPServer(app)
+    server = build_mcp_server(app=app)
 
-    tools = server.list_tools()
-    resources = server.list_resources()
-    tool_result = server.call_tool(
-        "retrieve_context",
-        {"query": "JEPA architecture", "hat": "default", "rerank_top_k": 4, "answer_context_top_k": 1},
-    )
-    global_map = server.read_resource("arignan://global-map")
+    async with create_connected_server_and_client_session(server) as session:
+        await session.initialize()
+        tools = await session.list_tools()
+        resources = await session.list_resources()
+        tool_result = await session.call_tool(
+            "retrieve_context",
+            {"query": "JEPA architecture", "hat": "default", "rerank_top_k": 4, "answer_context_top_k": 1},
+        )
+        global_map = await session.read_resource("arignan://global-map")
 
-    assert tools[0].name == "retrieve_context"
-    assert "answer_context_top_k" in tools[0].input_schema["properties"]
-    assert resources[0].uri == "arignan://global-map"
-    assert tool_result["contexts"]
-    assert len(tool_result["contexts"]) == 1
-    assert "default" in global_map.lower()
+    assert tools.tools[0].name == "retrieve_context"
+    assert "answer_context_top_k" in tools.tools[0].inputSchema["properties"]
+    assert str(resources.resources[0].uri) == "arignan://global-map"
+    assert tool_result.structuredContent["contexts"]
+    assert len(tool_result.structuredContent["contexts"]) == 1
+    assert tool_result.structuredContent["contexts"][0]["citation"].startswith("default/jepa-notes/notes.md:")
+    assert global_map.contents[0].text and "default" in global_map.contents[0].text.lower()

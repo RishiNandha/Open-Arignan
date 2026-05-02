@@ -350,21 +350,23 @@ def launch_gui(*, app_home: Path | None, settings_path: Path | None, terminal_pi
 
 def launch_mcp(*, app_home: Path | None, settings_path: Path | None, terminal_pid: int) -> int:
     from arignan.application import ArignanApp
-    from arignan.mcp import ArignanMCPServer
-    from arignan.mcp.stdio_server import run_stdio_server
+    from arignan.mcp import build_mcp_server
 
     def _mcp_progress(message: str) -> None:
         print(f"[arignan-mcp] {message}", file=sys.stderr, flush=True)
 
-    return run_stdio_server(
-        ArignanMCPServer(
-            app_factory=lambda: ArignanApp(
-                load_config(settings_path=settings_path, app_home=app_home),
-                progress_sink=_mcp_progress,
-                terminal_pid=terminal_pid,
-            )
-        )
+    _mcp_progress("Server started")
+    server = build_mcp_server(
+        progress_sink=_mcp_progress,
+        app_factory=lambda: ArignanApp(
+            load_config(settings_path=settings_path, app_home=app_home),
+            progress_sink=_mcp_progress,
+            terminal_pid=terminal_pid,
+        ),
     )
+    server.run(transport="stdio")
+    _mcp_progress("Server stopped")
+    return 0
 
 
 def _print_output_block(text: str) -> None:
