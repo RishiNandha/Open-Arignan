@@ -324,6 +324,99 @@ def test_ollama_text_generator_reports_empty_stream_after_thinking_with_detail(a
     assert generator._model_ready is False
 
 
+def test_ollama_text_generator_retries_once_after_memory_pressure(app_home, monkeypatch) -> None:
+    progress: list[str] = []
+    release_calls: list[str] = []
+    released_models: list[dict[str, object]] = []
+
+    class RetryResponse:
+        def __init__(self, *, text: str = "", ok: bool = False) -> None:
+            self.text = text
+            self._ok = ok
+
+        def raise_for_status(self) -> None:
+            if self._ok:
+                return None
+            request = httpx.Request("POST", "http://127.0.0.1:11434/api/chat")
+            response = httpx.Response(500, request=request, text=self.text)
+            raise httpx.HTTPStatusError("boom", request=request, response=response)
+
+        @staticmethod
+        def json() -> dict[str, object]:
+            return {"message": {"content": "Recovered answer."}}
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def post(self, url: str, json: dict[str, object]):
+            self.calls += 1
+            if self.calls == 1:
+                return RetryResponse(text='{"error":"model requires more system memory (7.1 GiB) than is available (4.7 GiB)"}')
+            return RetryResponse(ok=True)
+
+    monkeypatch.setattr(
+        "arignan.llm.runtime.release_running_models",
+        lambda endpoint, progress=None, exclude=None: released_models.append(
+            {"endpoint": endpoint, "exclude": exclude}
+        )
+        or ["gemma4:e2b"],
+    )
+
+    generator = OllamaTextGenerator(
+        AppConfig(app_home=app_home, local_llm_model="qwen3:4b-q4_K_M"),
+        progress_sink=progress.append,
+        memory_recovery=lambda reason: release_calls.append(reason) or True,
+    )
+    generator._model_ready = True
+    generator._client = FakeClient()  # type: ignore[assignment]
+
+    output = generator.generate(system_prompt="System prompt", user_prompt="User prompt")
+
+    assert output == "Recovered answer."
+    assert len(release_calls) == 1
+    assert "requires more system memory" in release_calls[0]
+    assert released_models == [
+        {"endpoint": "http://127.0.0.1:11434", "exclude": {"qwen3:4b-q4_K_M"}}
+    ]
+    assert any("retrying once" in message for message in progress)
+
+
+def test_ollama_text_generator_reports_gpu_state_once_after_success(app_home, monkeypatch) -> None:
+    progress: list[str] = []
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        @staticmethod
+        def json() -> dict[str, object]:
+            return {"message": {"content": "Visible answer."}}
+
+    class FakeClient:
+        def post(self, url: str, json: dict[str, object]) -> FakeResponse:
+            return FakeResponse()
+
+    monkeypatch.setattr(
+        "arignan.llm.runtime.describe_running_models",
+        lambda endpoint: ["qwen3:4b-q4_K_M (2.70 GiB VRAM)"],
+    )
+    monkeypatch.setattr(
+        "arignan.llm.runtime.format_torch_cuda_memory",
+        lambda label: f"{label}: torch cuda allocated=0.20 GiB, reserved=0.30 GiB, total=4.00 GiB",
+    )
+
+    generator = OllamaTextGenerator(AppConfig(app_home=app_home), progress_sink=progress.append)
+    generator._model_ready = True
+    generator._client = FakeClient()  # type: ignore[assignment]
+
+    generator.generate(system_prompt="System prompt", user_prompt="User prompt")
+    generator.generate(system_prompt="System prompt", user_prompt="User prompt")
+
+    assert progress.count("Ollama GPU state: qwen3:4b-q4_K_M (2.70 GiB VRAM)") == 1
+    assert sum("GPU after first LLM response" in message for message in progress) == 1
+
+
 def test_transformers_text_generator_prefers_cuda_load_when_available(app_home, monkeypatch) -> None:
     captured: dict[str, object] = {}
 
