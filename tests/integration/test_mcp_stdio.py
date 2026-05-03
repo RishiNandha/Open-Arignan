@@ -160,6 +160,7 @@ def test_mcp_stdio_logs_progress_to_stderr(tmp_path: Path) -> None:
         stderr_text = _stop_process(process)
 
     assert "[arignan-mcp] Server started" in stderr_text
+    assert "[arignan-mcp] Initialize request received" in stderr_text
 
 
 def _spawn_mcp_process(*, app_home: Path, extra_script: str) -> subprocess.Popen[bytes]:
@@ -212,7 +213,7 @@ def _read_response(process: subprocess.Popen[bytes], *, request_id: object, time
     thread.start()
     thread.join(timeout_seconds)
     if thread.is_alive():
-        stderr = process.stderr.read().decode("utf-8", errors="replace") if process.stderr else ""
+        stderr = _stop_process(process)
         raise TimeoutError(f"MCP response timed out after {timeout_seconds} seconds. stderr:\n{stderr}")
     if error:
         raise error[0]

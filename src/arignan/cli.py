@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Sequence, TextIO
+
+import anyio
 
 from arignan.config import load_config
 
@@ -88,6 +91,22 @@ class AskStatusReporter:
         if "Composing raw retrieval output" in message or "Composing retrieval synthesis answer" in message:
             return "Composing answer"
         return None
+
+
+class McpStderrFormatter(logging.Formatter):
+    _MESSAGE_MAP = {
+        "Processing request of type InitializeRequest": "Initialize request received",
+        "Processing request of type PingRequest": "Ping request received",
+        "Processing request of type ListToolsRequest": "Listing tools",
+        "Processing request of type ListResourcesRequest": "Listing resources",
+        "Processing request of type ReadResourceRequest": "Reading resource",
+        "Processing request of type CallToolRequest": "Tool call received",
+    }
+
+    def format(self, record: logging.LogRecord) -> str:
+        message = record.getMessage()
+        mapped = self._MESSAGE_MAP.get(message, message)
+        return f"[arignan-mcp] {mapped}"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -350,23 +369,42 @@ def launch_gui(*, app_home: Path | None, settings_path: Path | None, terminal_pi
 
 def launch_mcp(*, app_home: Path | None, settings_path: Path | None, terminal_pid: int) -> int:
     from arignan.application import ArignanApp
-    from arignan.mcp import build_mcp_server
+    from arignan.mcp import build_mcp_server, run_mcp_stdio_logged
+
+    config = load_config(settings_path=settings_path, app_home=app_home)
+    _configure_mcp_stderr_logging(sys.stderr)
 
     def _mcp_progress(message: str) -> None:
         print(f"[arignan-mcp] {message}", file=sys.stderr, flush=True)
 
     _mcp_progress("Server started")
     server = build_mcp_server(
+        config=config,
         progress_sink=_mcp_progress,
         app_factory=lambda: ArignanApp(
-            load_config(settings_path=settings_path, app_home=app_home),
+            config,
             progress_sink=_mcp_progress,
             terminal_pid=terminal_pid,
         ),
     )
-    server.run(transport="stdio")
+    anyio.run(lambda: run_mcp_stdio_logged(server, progress_sink=_mcp_progress))
     _mcp_progress("Server stopped")
     return 0
+
+
+def _configure_mcp_stderr_logging(stream: TextIO) -> None:
+    logger = logging.getLogger("mcp")
+    handler_name = "arignan_mcp_stderr"
+    for handler in list(logger.handlers):
+        if getattr(handler, "name", "") == handler_name:
+            logger.removeHandler(handler)
+    handler = logging.StreamHandler(stream)
+    handler.name = handler_name
+    handler.setLevel(logging.INFO)
+    handler.setFormatter(McpStderrFormatter())
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
 
 
 def _print_output_block(text: str) -> None:

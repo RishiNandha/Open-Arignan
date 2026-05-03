@@ -491,7 +491,17 @@ Touch:
 - the MCP entrypoint is now SDK-native: `src/arignan/mcp/server.py` builds a `FastMCP` server directly, `arignan --mcp` runs the SDK stdio transport, and the retrieve/global-map surfaces stay lazy behind an app factory so Ollama is not touched during MCP initialize
 - `tests/integration/test_mcp_server.py` now uses the official SDK's in-memory session helper, and `tests/integration/test_mcp_stdio.py` now probes the SDK's real newline-delimited stdio transport instead of the repo's removed custom framing
 - the project now pins `starlette>=0.37.2,<0.39` explicitly so the FastAPI GUI stack remains compatible while the MCP SDK is installed
-- the MCP package export surface is now minimal (`build_mcp_server` only), and generated `src/open_arignan.egg-info/` packaging artifacts have been removed from the source tree as non-runtime fluff
+- the MCP package export surface is now intentionally small (`build_mcp_server` plus the logged stdio runner), and generated `src/open_arignan.egg-info/` packaging artifacts have been removed from the source tree as non-runtime fluff
+- `settings.json` now includes `mcp_llm_backend`, defaulting to `client`, so MCP answer flows can stay off the local Ollama path unless explicitly opted into `local`
+- `mcp.json` now lives beside `settings.json` and `prompts.json`, self-heals when missing, and carries editable MCP server instructions plus tool/resource/prompt descriptions
+- the MCP server now exposes a broader SDK-backed tool surface: `retrieve_context`, `ask`, `load_content`, `list_loads`, `delete_loads`, `delete_hat`, `save_session`, `load_session`, `reset_session`, plus the `arignan://global-map` resource
+- MCP tools can now be individually disabled from `mcp.json` with an `enabled` flag, and `ask` is intentionally disabled by default so MCP clients prefer `retrieve_context`
+- MCP no longer exposes session-management tools; session save/load/reset remain CLI/app concerns rather than MCP tools
+- MCP `ask` now splits cleanly by backend:
+  - `mcp_llm_backend=client` prepares a client-LLM answer package without invoking the local answer model
+  - `mcp_llm_backend=local` uses the local Arignan answer flow lazily
+- the MCP stdio entrypoint now uses a thin SDK-backed wrapper that logs raw inbound payload previews plus initialize/ping receipt to `stderr`, while the underlying MCP protocol/session stack still comes from the official Python MCP SDK
+- `settings.json` now includes `mcp_retrieval_keep_alive_seconds`, and the MCP lazy app wrapper prewarms embedding + reranking on startup, keeps them warm for that idle window, and releases them from GPU after the keepalive timeout
 
 ## Test Map
 
