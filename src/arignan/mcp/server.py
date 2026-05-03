@@ -285,9 +285,7 @@ def build_mcp_server(
         )
         def retrieve_context(
             query: str,
-            hat: str = "auto",
-            rerank_top_k: int | None = None,
-            answer_context_top_k: int | None = None,
+            hat: str = "auto"
         ) -> RetrieveContextResult:
             state.progress(f"Running retrieve_context for query={query!r}")
             with state.retrieval_usage("retrieve_context") as app_instance:
