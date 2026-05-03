@@ -200,6 +200,7 @@ def initialize_local_state(
     refresh_existing: bool = True,
 ) -> tuple[Path, Path]:
     from arignan.config import write_default_settings
+    from arignan.mcp_config import write_default_mcp_config
     from arignan.paths import write_persisted_app_home
     from arignan.prompts import write_default_prompts
     from arignan.storage import StorageLayout
@@ -241,6 +242,7 @@ def initialize_local_state(
         )
     layout = StorageLayout.from_home(app_home).ensure()
     write_default_prompts(resolved_home, overwrite=refresh_existing)
+    write_default_mcp_config(resolved_home, overwrite=refresh_existing)
     return layout.root, settings_path
 
 

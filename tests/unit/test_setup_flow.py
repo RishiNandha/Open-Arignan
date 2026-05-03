@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from arignan.config import write_default_settings
+from arignan.mcp_config import mcp_config_path
 from arignan.paths import read_persisted_app_home
 from arignan.prompts import prompts_path
 from arignan.setup_flow import (
@@ -138,6 +139,7 @@ def test_initialize_local_state_can_override_local_llm_model(tmp_path: Path, mon
     assert payload["embedding_model"] == "BAAI/bge-base-en-v1.5"
     assert payload["reranker_model"] == "mixedbread-ai/mxbai-rerank-base-v1"
     assert prompts_path(app_home).exists()
+    assert mcp_config_path(app_home).exists()
     assert read_persisted_app_home() == (tmp_path / ".arignan").resolve()
 
 
@@ -280,7 +282,7 @@ def test_initialize_local_state_keeps_existing_user_settings_payload_when_not_re
     assert preserved["session"]["soft_token_limit"] == 12345
 
 
-def test_initialize_local_state_recreates_missing_settings_and_prompts_when_not_refreshing(
+def test_initialize_local_state_recreates_missing_settings_prompts_and_mcp_config_when_not_refreshing(
     tmp_path: Path, monkeypatch
 ) -> None:
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
@@ -297,6 +299,7 @@ def test_initialize_local_state_recreates_missing_settings_and_prompts_when_not_
 
     assert settings_path.exists()
     assert prompts_path(app_home).exists()
+    assert mcp_config_path(app_home).exists()
     payload = json.loads(settings_path.read_text(encoding="utf-8"))
     assert payload["local_llm_model"] == "qwen3:4b-q4_K_M"
 

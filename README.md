@@ -39,13 +39,13 @@ For MCP clients such as VS Code or Claude Code, the launch command should be:
 }
 ```
 
-Use `retrieve_context` to fetch reranked local context without calling an answer LLM.
+Use `retrieve_context` to fetch reranked local context without calling an answer LLM. This is the flagship tool, which allows your MCP clients like Github Copilot and Claude Code to get excellent context from your local library of papers / books / documentations. Other tools exposed include `load_content`, `list_loads`, `delete_loads`, and `delete_hat`. 
 
 ## Key Points
 
 ### Behavioral
 
-- **Fully local RAG / Knowledge-base system**: Guilt-free caching of proprietary docs, or things under NDA, or unpublished material.
+- **Fully local RAG / Knowledge-base system**: Caching of proprietary docs, or things under NDA, or unpublished material free of all privacy concerns
 - **Load and store knowledge over time**: Maybe software help docs as you discover them, research papers as you read them, personal notes, tutorial markdowns, textbooks, etc
 - **Session history**: For detailed prompting workflows where the user might choose to ask a series of questions
 - **User switches for topic/category**: For advanced users who might wear different "hats" and maintain different knowledge bases for each of them.
@@ -65,6 +65,7 @@ Use `retrieve_context` to fetch reranked local context without calling an answer
   - **Loading hook** appends the vector cache to the semantic RAG database, map.md for a quick lookup of "where to find what", and makes the LLM write a summary/knowledge-base markdown
   - **Deleting** allows picking a past load and undoing it gracefully
   - **Optional parameter "hat"** tells the load hook which subdirectory / subdivision of the knowledge base to write to.
+- Default models chosen are with a 4GB consumer GPU in mind. LLM + Embedding + Reranking has been tested to work without swapping on a 4 GB VRAM.
 
 ### Entry Points
 
@@ -80,9 +81,10 @@ Use `retrieve_context` to fetch reranked local context without calling an answer
   - **GUI launch**: `arignan -gui` starts the local browser UI and opens it automatically
 - **MCP Entry Points**:
 
-  - **Context Retreival tool**: A client such as copilot or codex or claude code can tap into the knowledge base and retrieve context
-  - **Global Map Resource**: The "map" given as a context, so that the MCP client has context of what all knowledge are available
-  - (To implement in future) **LLM Setting**: Toggle to use the local LLM in internal functions or start using the MCP Client's LLM
+  - **Context Retrieval tool**: `retrieve_context` fetches reranked local context without calling an answer LLM
+  - **Ask tool**: `ask` can either prepare a client-LLM answer package or use the local LLM, based on `settings.json`. It is disabled by default in `mcp.json`.
+  - **Knowledge-base management tools**: load, list, delete, and hat-delete operations are available through MCP
+  - **Global Map Resource**: `arignan://global-map` gives a high-level map of available local knowledge
 
 ## Detailed Description
 
@@ -276,11 +278,17 @@ When the chat history is becoming too long:
 
 #### Prompt Editing
 
-- Prompt text lives in `<app_home>/prompts.json`.
-- Keep `{retrieved_passages_block}` only in retrieval-grounded answer prompts, because that is where the local RAG context is injected.
-- Keep `{question}` for the user’s current ask, and use the surrounding template text to frame it however you want, for example: `Alex said: "{question}"`.
-- For conversational or no-context prompts, prefer session placeholders like `{recent_dialogue_block}` and `{session_summary_block}` instead of retrieval placeholders.
-- Do not invent placeholder names; only use the ones already present in the default template you are editing.
+- Prompt can be editted in `<app_home>/prompts.json`.
+- `{retrieved_passages_block}` inserts the retrieved content into answer prompts.
+- `{question}` injects the user’s current ask. For example, `Alex said, "{retrieved_passages_block}". Accord to Alex answer: "{question}"`.
+- For conversational or no-context prompts, use `{recent_dialogue_block}` and `{session_summary_block}` to utilize the KV Cache.
+
+#### MCP Editing
+
+- MCP tool descriptions can be editted in `<app_home>/mcp.json`.
+- `settings.json` controls MCP backend behavior:
+  - `mcp_llm_backend`: `client` by default, or `local` if MCP should call the local answer LLM directly.
+  - `mcp_retrieval_keep_alive_seconds`: how long the embedding and reranking models stay warm on GPU after MCP startup or the last retrieval-like tool call.
 
 ### For Developers
 
