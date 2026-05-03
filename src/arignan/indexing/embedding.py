@@ -160,7 +160,8 @@ def create_embedder(
         raise RuntimeError(_missing_embedder_model_error(config.embedding_model, model_dir))
     
     try:
-        progress_sink("Calling SentenceTransformerEmbedder... (embedding.py)")
+        if progress_sink:
+            progress_sink("Calling SentenceTransformerEmbedder... (embedding.py)")
         embedder = SentenceTransformerEmbedder(
             model_name=config.embedding_model, 
             model_source=model_dir,

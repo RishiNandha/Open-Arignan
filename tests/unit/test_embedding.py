@@ -45,7 +45,7 @@ def test_sentence_transformer_embedder_prefers_cuda_when_available(monkeypatch) 
 
     fake_module = types.SimpleNamespace(SentenceTransformer=FakeSentenceTransformer)
     monkeypatch.setitem(sys.modules, "sentence_transformers", fake_module)
-    monkeypatch.setattr("arignan.indexing.embedding.preferred_torch_device", lambda: "cuda")
+    monkeypatch.setattr("arignan.indexing.embedding.preferred_torch_device", lambda x: "cuda")
 
     embedder = SentenceTransformerEmbedder()
     embedder.embed_texts(["hello world"])
@@ -68,7 +68,7 @@ def test_sentence_transformer_embedder_uses_query_prompt_for_bge(monkeypatch) ->
 
     fake_module = types.SimpleNamespace(SentenceTransformer=FakeSentenceTransformer)
     monkeypatch.setitem(sys.modules, "sentence_transformers", fake_module)
-    monkeypatch.setattr("arignan.indexing.embedding.preferred_torch_device", lambda: "cuda")
+    monkeypatch.setattr("arignan.indexing.embedding.preferred_torch_device", lambda x: "cuda")
 
     embedder = SentenceTransformerEmbedder(model_name="BAAI/bge-small-en-v1.5")
     embedder.embed_query("what is jepa")
@@ -93,9 +93,9 @@ def test_create_embedder_uses_sentence_transformer_when_model_cached(tmp_path: P
             return [[1.0, 0.0] for _ in texts]
 
     monkeypatch.setitem(sys.modules, "sentence_transformers", types.SimpleNamespace(SentenceTransformer=FakeSentenceTransformer))
-    monkeypatch.setattr("arignan.indexing.embedding.preferred_torch_device", lambda: "cuda")
+    monkeypatch.setattr("arignan.indexing.embedding.preferred_torch_device", lambda x: "cuda")
 
-    embedder = create_embedder(load_config(app_home=app_home))
+    embedder = create_embedder(load_config(app_home=app_home), progress_sink=None)
     embedder.embed_query("test")
 
     assert embedder.backend_name == "sentence-transformers"
@@ -117,7 +117,7 @@ def test_create_embedder_emits_gpu_telemetry_when_loaded_on_cuda(tmp_path: Path,
             return [[1.0, 0.0] for _ in texts]
 
     monkeypatch.setitem(sys.modules, "sentence_transformers", types.SimpleNamespace(SentenceTransformer=FakeSentenceTransformer))
-    monkeypatch.setattr("arignan.indexing.embedding.preferred_torch_device", lambda: "cuda")
+    monkeypatch.setattr("arignan.indexing.embedding.preferred_torch_device", lambda x: "cuda")
     monkeypatch.setattr(
         "arignan.indexing.embedding.format_torch_cuda_memory",
         lambda label: f"{label}: torch cuda allocated=0.40 GiB, reserved=0.50 GiB, total=4.00 GiB",

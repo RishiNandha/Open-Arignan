@@ -33,6 +33,7 @@ class LineProgressReporter:
 class McpReporter:
     def __init__(self, app_home: Path) -> None:
         self.mcp_logs = app_home / "sessions" / "mcp.log"
+        self.mcp_logs.parent.mkdir(parents=True, exist_ok=True)
         print("MCP Log Path: ", self.mcp_logs, file=sys.stderr, flush=True)
 
     def log(self, message: str) -> None:
@@ -262,7 +263,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         command=args.command, debug=getattr(args, "debug", False), 
         isMcp=args.mcp, app_home=args.app_home)
     
-    app = ArignanApp(config, progress_sink=lambda x: reporter.emit, terminal_pid=resolved_pid)
+    app = ArignanApp(config, progress_sink= reporter.emit, terminal_pid=resolved_pid)
 
     try:
         if args.command == "load":
