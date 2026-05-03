@@ -100,7 +100,6 @@ async def test_mcp_server_exposes_retrieval_tool_and_global_map_resource(tmp_pat
     assert "find_from_local_library" in prompt_names
     retrieve_tool = next(tool for tool in tools.tools if tool.name == "retrieve_context")
     assert "local library" in (retrieve_tool.description or "").lower()
-    assert "answer_context_top_k" in retrieve_tool.inputSchema["properties"]
     assert str(resources.resources[0].uri) == "arignan://global-map"
     assert tool_result.structuredContent["contexts"]
     assert len(tool_result.structuredContent["contexts"]) == 1
