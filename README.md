@@ -4,9 +4,10 @@
 
 ## Quick-Start
 
+0. Clone the repo with `git clone https://github.com/RishiNandha/Open-Arignan`
+
 ### Option 1: Git Clone + CLI
 
-0. Clone the repo with `git clone https://github.com/RishiNandha/Open-Arignan`
 1. Run the `python setup.py --app-home <install dir>`. This will:
    - Download all the models needed, including the default local answer model and a lighter fallback answer model
    - Create a **bin directory** folder with executables
@@ -17,20 +18,22 @@
 
 ### Option 2: GUI
 
-0. Run  `python setup.py --app-home <install dir>`
-1. Run `arignan -gui`
-2. Your browser opens locally
-3. Use **Add More Files To Knowledge Base** to load material, then ask questions in the chat box
+1. Run  `python setup.py --app-home <install dir>`
+2. Run `arignan -gui`
+3. Your browser opens locally
+4. Use **Add More Files To Knowledge Base** to load material, then ask questions in the chat box
 
 ### Option 3: MCP
 
-Run the MCP server with:
+1. Run  `python setup.py --app-home <install dir>`
+
+2. Add the following command into your MCP Client of choice (Github Copilot / Claude Code / etc)
 
 ```text
 arignan --mcp --app-home <install dir>
 ```
 
-For MCP clients such as VS Code or Claude Code, the launch command should look something like this:
+The launch json would possibly look something like this:
 
 ```json
 {
@@ -39,7 +42,7 @@ For MCP clients such as VS Code or Claude Code, the launch command should look s
 }
 ```
 
-Now Github Copilot / Claude Code can use `retrieve_context` tool to fetch local context on the fly. This is our flagship tool to check local papers, private docs, etc. Other tools exposed include `load_content`, `list_loads`, `delete_loads`, and `delete_hat`. 
+3. Now Github Copilot / Claude Code can use `retrieve_context` tool to fetch local context on the fly. This is our flagship tool to check local papers, private docs, etc. Other tools exposed include `load_content`, `list_loads`, `delete_loads`, and `delete_hat`. Try asking something while mentioning "local library" or "arignan" in the chat windows with the LLMs on these platforms.
 
 ## Key Points
 
