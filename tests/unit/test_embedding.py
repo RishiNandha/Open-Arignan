@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import sys
-import types
 from pathlib import Path
 
 import pytest
@@ -43,8 +41,7 @@ def test_sentence_transformer_embedder_prefers_cuda_when_available(monkeypatch) 
         def encode(self, texts, normalize_embeddings=True):
             return [[1.0, 0.0] for _ in texts]
 
-    fake_module = types.SimpleNamespace(SentenceTransformer=FakeSentenceTransformer)
-    monkeypatch.setitem(sys.modules, "sentence_transformers", fake_module)
+    monkeypatch.setattr("arignan.indexing.embedding.SentenceTransformer", FakeSentenceTransformer)
     monkeypatch.setattr("arignan.indexing.embedding.preferred_torch_device", lambda x: "cuda")
 
     embedder = SentenceTransformerEmbedder()
@@ -66,8 +63,7 @@ def test_sentence_transformer_embedder_uses_query_prompt_for_bge(monkeypatch) ->
             captured["prompt"] = prompt
             return [[1.0, 0.0] for _ in texts]
 
-    fake_module = types.SimpleNamespace(SentenceTransformer=FakeSentenceTransformer)
-    monkeypatch.setitem(sys.modules, "sentence_transformers", fake_module)
+    monkeypatch.setattr("arignan.indexing.embedding.SentenceTransformer", FakeSentenceTransformer)
     monkeypatch.setattr("arignan.indexing.embedding.preferred_torch_device", lambda x: "cuda")
 
     embedder = SentenceTransformerEmbedder(model_name="BAAI/bge-small-en-v1.5")
@@ -92,7 +88,7 @@ def test_create_embedder_uses_sentence_transformer_when_model_cached(tmp_path: P
         def encode(self, texts, normalize_embeddings=True):
             return [[1.0, 0.0] for _ in texts]
 
-    monkeypatch.setitem(sys.modules, "sentence_transformers", types.SimpleNamespace(SentenceTransformer=FakeSentenceTransformer))
+    monkeypatch.setattr("arignan.indexing.embedding.SentenceTransformer", FakeSentenceTransformer)
     monkeypatch.setattr("arignan.indexing.embedding.preferred_torch_device", lambda x: "cuda")
 
     embedder = create_embedder(load_config(app_home=app_home), progress_sink=None)
@@ -116,7 +112,7 @@ def test_create_embedder_emits_gpu_telemetry_when_loaded_on_cuda(tmp_path: Path,
         def encode(self, texts, normalize_embeddings=True):
             return [[1.0, 0.0] for _ in texts]
 
-    monkeypatch.setitem(sys.modules, "sentence_transformers", types.SimpleNamespace(SentenceTransformer=FakeSentenceTransformer))
+    monkeypatch.setattr("arignan.indexing.embedding.SentenceTransformer", FakeSentenceTransformer)
     monkeypatch.setattr("arignan.indexing.embedding.preferred_torch_device", lambda x: "cuda")
     monkeypatch.setattr(
         "arignan.indexing.embedding.format_torch_cuda_memory",
