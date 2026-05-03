@@ -158,10 +158,10 @@ function appendMessage(message) {
       await followTask({
         taskId: payload.task_id,
         pendingId,
-        onComplete: (result) => {
+        onComplete: (snapshot) => {
           patchMessage(pendingId, {
             pending: false,
-            body: formatLoadResult(result),
+            body: formatLoadResult(snapshot.result || {}),
             citations: [],
           });
           bootstrap();
@@ -207,10 +207,10 @@ function appendMessage(message) {
       await followTask({
         taskId: payload.task_id,
         pendingId,
-        onComplete: (result) => {
+        onComplete: (snapshot) => {
           patchMessage(pendingId, {
             pending: false,
-            body: result.message,
+            body: (snapshot.result || {}).message,
             citations: [],
           });
           bootstrap();
@@ -256,10 +256,10 @@ function appendMessage(message) {
       await followTask({
         taskId: payload.task_id,
         pendingId,
-        onComplete: (result) => {
+        onComplete: (snapshot) => {
           patchMessage(pendingId, {
             pending: false,
-            body: result.message,
+            body: (snapshot.result || {}).message,
             citations: [],
           });
           bootstrap();

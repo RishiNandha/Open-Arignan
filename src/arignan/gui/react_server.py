@@ -478,10 +478,13 @@ async def _handle_direct_load(app: ArignanApp, *, hat: str, files: list[UploadFi
     try:
         written_files = await _write_uploaded_files(batch_dir, files)
         result = app.load(str(batch_dir), hat=hat)
-        return _serialize_load_result(result, uploaded_files=written_files)
     finally:
-        shutil.rmtree(batch_dir, ignore_errors=True)
-
+        shutil.rmtree(batch_dir, ignore_errors=True) 
+        try:
+            upload_root.rmdir()
+        except OSError:
+            pass
+    return _serialize_load_result(result, uploaded_files=written_files)
 
 async def _write_uploaded_files(batch_dir: Path, files: list[UploadFile]) -> list[str]:
     if not files:
