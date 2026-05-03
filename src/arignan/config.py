@@ -56,7 +56,6 @@ class MarkdownConfig:
 class AppConfig:
     ask_route_backend: str = "llm"
     mcp_llm_backend: str = "client"
-    mcp_retrieval_keep_alive_seconds: int = 180
     local_llm_backend: str = "ollama"
     local_llm_model: str = DEFAULT_LOCAL_LLM_REPO_ID
     local_llm_light_model: str = DEFAULT_LIGHT_LOCAL_LLM_REPO_ID
@@ -127,6 +126,7 @@ def load_config(
         raw["embedding_model"] = DEFAULT_EMBEDDING_MODEL_REPO_ID
     if raw.get("reranker_model") == LEGACY_MODERNBERT_RERANKER_MODEL_REPO_ID:
         raw["reranker_model"] = DEFAULT_RERANKER_MODEL_REPO_ID
+    raw.pop("mcp_retrieval_keep_alive_seconds", None)
 
     if "app_home" in raw:
         raw["app_home"] = Path(raw["app_home"])

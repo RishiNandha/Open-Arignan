@@ -6,6 +6,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
 
+from sentence_transformers import SentenceTransformer
+
 from arignan.compute import (
     _report_best_effort_exception,
     format_torch_cuda_memory,
@@ -14,9 +16,8 @@ from arignan.compute import (
 )
 from arignan.model_registry import DEFAULT_EMBEDDING_MODEL_REPO_ID, resolve_model_storage_dir
 
-if False:  # pragma: no cover
-    from arignan.config import AppConfig
-    from arignan.session import SessionExceptionLogger
+from arignan.session import SessionExceptionLogger
+from arignan.config import AppConfig
 
 DEFAULT_EMBEDDING_MODEL = DEFAULT_EMBEDDING_MODEL_REPO_ID
 
@@ -60,12 +61,22 @@ class HashingEmbedder:
 
 
 class SentenceTransformerEmbedder:
-    def __init__(self, model_name: str = DEFAULT_EMBEDDING_MODEL, model_source: str | Path | None = None) -> None:
+    def __init__(self, model_name: str = DEFAULT_EMBEDDING_MODEL, 
+                 model_source: str | Path | None = None, 
+                 progress_sink: Callable[[str], None] | None = None) -> None:
+        
+        if progress_sink:
+            progress_sink(f"Initializing Embedder with source: {model_source} and name: {model_name}")
+
         self.model_name = model_name
         self.backend_name = "sentence-transformers"
-        self.device = preferred_torch_device()
+        self.device = preferred_torch_device(progress_sink)
         self.model_source = str(model_source or model_name)
+        self.progress_sink = progress_sink
         self._model = None
+        
+        if self.progress_sink:
+            self.progress_sink("Embedder Class Ready.")
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
         encoded = self._encode(texts, is_query=False)
@@ -89,14 +100,22 @@ class SentenceTransformerEmbedder:
     def _ensure_model(self):
         if self._model is not None:
             return self._model
-        try:
-            from sentence_transformers import SentenceTransformer
-        except ImportError as exc:  # pragma: no cover - exercised only when dependency is installed
-            raise RuntimeError(
-                "sentence-transformers is required for SentenceTransformerEmbedder; "
-                "install the optional ml dependencies"
-            ) from exc
+        # try:
+        #     from sentence_transformers import SentenceTransformer
+        # except ImportError as exc:  # pragma: no cover - exercised only when dependency is installed
+        #     raise RuntimeError(
+        #         "sentence-transformers is required for SentenceTransformerEmbedder; "
+        #         "install the optional ml dependencies"
+        #     ) from exc
+        
+        if self.progress_sink: 
+            self.progress_sink("Ensuring Model (embedding.py)...")
+
         self._model = SentenceTransformer(self.model_source, device=self.device)
+        
+        if self.progress_sink:
+            self.progress_sink("Model loaded: " + (self.model_source or self.model_name))
+        
         return self._model
 
     def release_device_memory(self) -> bool:
@@ -126,21 +145,46 @@ def create_embedder(
     *,
     progress_sink: Callable[[str], None] | None = None,
     exception_logger: "SessionExceptionLogger | None" = None,
+    eager_load: bool = True,
 ) -> Embedder:
+    
     model_dir = resolve_model_storage_dir(config.app_home, config.embedding_model)
-    if progress_sink is not None:
-        progress_sink(f"Preparing local embedding model ({config.embedding_model})...")
+
+    if progress_sink:
+        progress_sink("create_embedder(): model_dir is " + str(model_dir))
+
+    if eager_load and progress_sink is not None:
+        progress_sink(f"Preparing local embedding model ({config.embedding_model})... (from embedding.py)")
+    
     if not model_dir.exists():
         raise RuntimeError(_missing_embedder_model_error(config.embedding_model, model_dir))
+    
     try:
-        embedder = SentenceTransformerEmbedder(model_name=config.embedding_model, model_source=model_dir)
-        embedder._ensure_model()
-        if progress_sink is not None and embedder.device == "cuda":
+        if progress_sink:
+            progress_sink("Calling SentenceTransformerEmbedder... (embedding.py)")
+        embedder = SentenceTransformerEmbedder(
+            model_name=config.embedding_model, 
+            model_source=model_dir,
+            progress_sink=progress_sink)
+        
+        if eager_load:
+            if progress_sink:
+                progress_sink("Eager load is true. Ensuring model...(within create_embedder())")
+            embedder._ensure_model()
+        else:
+            if progress_sink:
+                progress_sink("Eager load is false. But embedding model found.")
+        
+        if eager_load and progress_sink is not None and embedder.device == "cuda":
             message = format_torch_cuda_memory(f"GPU after embedding model load ({config.embedding_model})")
             if message:
                 progress_sink(message)
+
         return embedder
+    
     except Exception as exc:
+        if progress_sink:
+            progress_sink("Exception in create_embedder(): " + str(exc))
         log_path = None
         if exception_logger is not None:
             log_path = exception_logger.log_exception(

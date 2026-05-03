@@ -5,6 +5,7 @@ from io import TextIOWrapper
 from pathlib import Path
 import sys
 import threading
+import time
 from typing import TYPE_CHECKING, Literal
 from contextlib import contextmanager
 
@@ -102,89 +103,148 @@ class _LazyArignanApp:
     app: ArignanApp | None
     app_factory: Callable[[], ArignanApp] | None
     progress_sink: Callable[[str], None] | None
-    retrieval_keep_alive_seconds: int
     _lock: threading.Lock = field(default_factory=threading.Lock)
-    _offload_timer: threading.Timer | None = None
+    _retrieval_gate: threading.Semaphore = field(default_factory=lambda: threading.Semaphore(1))
     _active_operations: int = 0
+    _operation_counter: int = 0
+    _init_in_progress: bool = False
+    _init_event: threading.Event = field(default_factory=threading.Event)
+    _init_error: BaseException | None = None
 
     def resolve(self) -> ArignanApp:
-        with self._lock:
-            if self.app is None:
+        started = time.perf_counter()
+        thread_name = threading.current_thread().name
+        self.progress(f"[thread={thread_name}] App resolve requested")
+        while True:
+            wait_event: threading.Event | None = None
+            initialize_here = False
+            with self._lock:
+                if self.app is not None:
+                    app = self.app
+                    self.progress(f"[thread={thread_name}] Reusing existing Arignan app")
+                    break
                 if self.app_factory is None:  # pragma: no cover - guarded by builder
                     raise RuntimeError("Arignan MCP app factory is not configured.")
-                self.progress("Loading Arignan app")
-                self.app = self.app_factory()
-                self.progress("Arignan app loaded")
+                if self._init_in_progress:
+                    wait_event = self._init_event
+                    self.progress(f"[thread={thread_name}] Waiting for app init to finish")
+                else:
+                    self._init_in_progress = True
+                    self._init_event = threading.Event()
+                    self._init_error = None
+                    initialize_here = True
+                    wait_event = self._init_event
+                    self.progress(f"[thread={thread_name}] App init started")
+            if initialize_here:
+                try:
+                    created_app = self.app_factory()
+                except Exception as exc:
+                    with self._lock:
+                        self._init_in_progress = False
+                        self._init_error = exc
+                        wait_event.set()
+                    self.progress(
+                        f"[thread={thread_name}] App init failed after {time.perf_counter() - started:.2f}s: {exc}"
+                    )
+                    raise
+                with self._lock:
+                    self.app = created_app
+                    self._init_in_progress = False
+                    self._init_error = None
+                    wait_event.set()
+                    app = created_app
+                self.progress(
+                    f"[thread={thread_name}] Arignan app loaded in {time.perf_counter() - started:.2f}s"
+                )
                 gpu_snapshot = (
                     format_torch_cuda_memory("GPU allocated after Arignan app load") if "torch" in sys.modules else None
                 )
                 if gpu_snapshot is not None:
                     self.progress(gpu_snapshot)
-            app = self.app
+                break
+            assert wait_event is not None
+            wait_event.wait()
+            with self._lock:
+                if self.app is not None:
+                    app = self.app
+                    self.progress(f"[thread={thread_name}] App init finished; reusing initialized app")
+                    break
+                init_error = self._init_error
+            if init_error is not None:
+                raise init_error
+        self.progress(f"[thread={thread_name}] App resolve finished in {time.perf_counter() - started:.2f}s")
         return app
 
-    def prewarm_retrieval_models(self) -> None:
-        self.resolve()
-        self.progress(
-            f"Embedding and reranking models warm-started; keep-alive is {self.retrieval_keep_alive_seconds} seconds"
-        )
-        self._schedule_retrieval_offload()
+    def background_load_retrieval_models(self) -> None:
+        started = time.perf_counter()
+        self.progress("Starting background MCP retrieval-model load")
+        with self.retrieval_usage("background_retrieval_model_load") as app:
+            warm = getattr(app, "warm_retrieval_models", None)
+            if callable(warm):
+                self.progress("Running background retrieval-model load")
+                warm()
+        self.progress(f"Background retrieval-model load finished in {time.perf_counter() - started:.2f}s")
 
     @contextmanager
-    def retrieval_usage(self):
+    def retrieval_usage(self, label: str = "retrieval"):
+        started = time.perf_counter()
+        thread_name = threading.current_thread().name
+        self.progress(f"[thread={thread_name}] {label}: waiting for retrieval gate")
+        self._retrieval_gate.acquire()
+        gate_acquired_at = time.perf_counter()
+        self.progress(
+            f"[thread={thread_name}] {label}: acquired retrieval gate in {gate_acquired_at - started:.2f}s"
+        )
         with self._lock:
+            self._operation_counter += 1
+            operation_id = self._operation_counter
+            active_before = self._active_operations
+            self.progress(
+                f"[op={operation_id} thread={thread_name}] {label}: entering retrieval usage "
+                f"(active_before={active_before})"
+            )
             self._active_operations += 1
-            self._cancel_retrieval_offload_locked()
         try:
-            yield self.resolve()
+            resolved_app = self.resolve()
+            self.progress(
+                f"[op={operation_id} thread={thread_name}] {label}: retrieval app ready "
+                f"in {time.perf_counter() - started:.2f}s"
+            )
+            yield resolved_app
         finally:
-            with self._lock:
-                self._active_operations = max(0, self._active_operations - 1)
-                self._schedule_retrieval_offload_locked()
+            try:
+                with self._lock:
+                    self._active_operations = max(0, self._active_operations - 1)
+                    active_after = self._active_operations
+                self.progress(
+                    f"[op={operation_id} thread={thread_name}] {label}: leaving retrieval usage "
+                    f"(active_after={active_after}, duration={time.perf_counter() - started:.2f}s)"
+                )
+            finally:
+                self._retrieval_gate.release()
+                self.progress(f"[thread={thread_name}] {label}: released retrieval gate")
 
     def progress(self, message: str) -> None:
         if self.progress_sink is not None:
             self.progress_sink(message)
 
-    def _schedule_retrieval_offload(self) -> None:
-        with self._lock:
-            self._schedule_retrieval_offload_locked()
-
-    def _schedule_retrieval_offload_locked(self) -> None:
-        self._cancel_retrieval_offload_locked()
-        if self.retrieval_keep_alive_seconds <= 0 or self.app is None or self._active_operations > 0:
+    def release_retrieval_models(self, reason: str) -> None:
+        app = self.app
+        if app is None:
             return
-        timer = threading.Timer(self.retrieval_keep_alive_seconds, self._offload_retrieval_models)
-        timer.daemon = True
-        self._offload_timer = timer
-        timer.start()
-
-    def _cancel_retrieval_offload_locked(self) -> None:
-        timer = self._offload_timer
-        self._offload_timer = None
-        if timer is not None:
-            timer.cancel()
-
-    def _offload_retrieval_models(self) -> None:
-        with self._lock:
-            if self.app is None or self._active_operations > 0:
-                self._schedule_retrieval_offload_locked()
-                return
-            app = self.app
-            self._offload_timer = None
-
+        self.progress(reason)
         released_any = False
         for label, component in (("embedding", getattr(app, "embedder", None)), ("reranking", getattr(app, "reranker", None))):
             release = getattr(component, "release_device_memory", None)
             if callable(release):
                 try:
                     if release():
-                        self.progress(f"Released {label} model from GPU after MCP keep-alive timeout")
+                        self.progress(f"Released {label} model from GPU")
                         released_any = True
                 except Exception as exc:  # pragma: no cover - best effort
                     self.progress(f"Non-fatal {label} GPU release error: {exc}")
         if released_any and "torch" in sys.modules:
-            gpu_snapshot = format_torch_cuda_memory("GPU after MCP retrieval offload")
+            gpu_snapshot = format_torch_cuda_memory("GPU after MCP retrieval-model release")
             if gpu_snapshot is not None:
                 self.progress(gpu_snapshot)
 
@@ -195,6 +255,8 @@ def build_mcp_server(
     config: AppConfig | None = None,
     app_factory: Callable[[], ArignanApp] | None = None,
     progress_sink: Callable[[str], None] | None = None,
+    host: str | None = None,
+    port: int | None = None,
 ) -> FastMCP:
     if app is None and app_factory is None:
         raise ValueError("build_mcp_server requires either an app instance or an app_factory.")
@@ -207,12 +269,13 @@ def build_mcp_server(
         app=app,
         app_factory=app_factory,
         progress_sink=progress_sink,
-        retrieval_keep_alive_seconds=max(0, int(getattr(effective_config, "mcp_retrieval_keep_alive_seconds", 180))),
     )
     mcp = FastMCP(
         mcp_config.server_name,
         instructions=mcp_config.instructions,
         log_level="INFO",
+        host=host or "127.0.0.1",
+        port=port or 8000,
     )
 
     if mcp_config.tools["retrieve_context"].enabled:
@@ -227,7 +290,7 @@ def build_mcp_server(
             answer_context_top_k: int | None = None,
         ) -> RetrieveContextResult:
             state.progress(f"Running retrieve_context for query={query!r}")
-            with state.retrieval_usage() as app_instance:
+            with state.retrieval_usage("retrieve_context") as app_instance:
                 result = app_instance.retrieve_context(
                     query,
                     hat=hat,
@@ -253,10 +316,13 @@ def build_mcp_server(
             rerank_top_k: int | None = None,
             answer_context_top_k: int | None = None,
         ) -> AskToolResult:
-            with state.retrieval_usage() as app_instance:
+            with state.retrieval_usage("ask") as app_instance:
                 backend = str(getattr(app_instance.config, "mcp_llm_backend", "client")).strip().lower() or "client"
                 state.progress(f"Running ask for query={query!r} using {backend} MCP backend")
                 if backend == "local":
+                    state.release_retrieval_models(
+                        "Releasing retrieval models before handing the GPU to the local LLM"
+                    )
                     state.progress("Hitting local LLM through ask")
                     result = app_instance.ask(
                         query,
@@ -310,7 +376,7 @@ def build_mcp_server(
         )
         def load_content(input_ref: str, hat: str = "auto") -> LoadContentResult:
             state.progress(f"Loading content from {input_ref!r}")
-            with state.retrieval_usage() as app_instance:
+            with state.retrieval_usage("load_content") as app_instance:
                 result = app_instance.load(input_ref, hat=hat)
             return LoadContentResult(
                 load_id=result.load_id,
@@ -339,7 +405,7 @@ def build_mcp_server(
         )
         def delete_loads(load_ids: list[str]) -> DeleteLoadsResult:
             state.progress(f"Deleting load IDs: {', '.join(load_ids) if load_ids else '<none>'}")
-            with state.retrieval_usage() as app_instance:
+            with state.retrieval_usage("delete_loads") as app_instance:
                 result = app_instance.delete(load_ids)
             return DeleteLoadsResult(
                 deleted_load_ids=result.deleted_load_ids,
@@ -354,7 +420,7 @@ def build_mcp_server(
         )
         def delete_hat(hat: str) -> DeleteHatToolResult:
             state.progress(f"Deleting hat {hat!r}")
-            with state.retrieval_usage() as app_instance:
+            with state.retrieval_usage("delete_hat") as app_instance:
                 result = app_instance.delete_hat(hat)
             return DeleteHatToolResult(
                 hat=result.hat,
@@ -362,6 +428,15 @@ def build_mcp_server(
                 deleted_load_ids=result.deleted_load_ids,
                 deleted_topics=result.deleted_topics,
             )
+
+    @mcp.prompt(
+        name=mcp_config.prompts["find_from_local_library"].name,
+        description=mcp_config.prompts["find_from_local_library"].description,
+        title="Find From Local Library",
+    )
+    def find_from_local_library(user_request: str) -> str:
+        state.progress(f"Rendering MCP prompt for local-library retrieval guidance: {user_request!r}")
+        return mcp_config.prompts["find_from_local_library"].template.format(user_request=user_request)
 
     @mcp.resource(
         "arignan://global-map",
@@ -374,7 +449,11 @@ def build_mcp_server(
         return state.resolve().layout.global_map_path.read_text(encoding="utf-8")
 
     if app is None and app_factory is not None:
-        threading.Thread(target=state.prewarm_retrieval_models, daemon=True).start()
+        threading.Thread(
+            target=state.background_load_retrieval_models,
+            name="background_retrieval_model_load",
+            daemon=True,
+        ).start()
 
     return mcp
 

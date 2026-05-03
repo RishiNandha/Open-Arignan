@@ -478,10 +478,13 @@ async def _handle_direct_load(app: ArignanApp, *, hat: str, files: list[UploadFi
     try:
         written_files = await _write_uploaded_files(batch_dir, files)
         result = app.load(str(batch_dir), hat=hat)
-        return _serialize_load_result(result, uploaded_files=written_files)
     finally:
-        shutil.rmtree(batch_dir, ignore_errors=True)
-
+        shutil.rmtree(batch_dir, ignore_errors=True) 
+        try:
+            upload_root.rmdir()
+        except OSError:
+            pass
+    return _serialize_load_result(result, uploaded_files=written_files)
 
 async def _write_uploaded_files(batch_dir: Path, files: list[UploadFile]) -> list[str]:
     if not files:
@@ -513,7 +516,15 @@ async def _write_uploaded_files(batch_dir: Path, files: list[UploadFile]) -> lis
 
 @contextmanager
 def _gui_task_context(app: ArignanApp, task_lock: threading.Lock, progress_sink, stream_sink=None, thinking_sink=None):
+    started = time.perf_counter()
+    thread_name = threading.current_thread().name
+    if app.progress_sink is not None:
+        app.progress_sink(f"[gui thread={thread_name}] Waiting for GUI task lock")
     with task_lock:
+        if app.progress_sink is not None:
+            app.progress_sink(
+                f"[gui thread={thread_name}] Acquired GUI task lock in {time.perf_counter() - started:.2f}s"
+            )
         restore = _bind_task_sinks(
             app,
             progress_sink=_tee_progress(app.progress_sink, progress_sink),
@@ -524,6 +535,10 @@ def _gui_task_context(app: ArignanApp, task_lock: threading.Lock, progress_sink,
             yield app
         finally:
             restore()
+            if app.progress_sink is not None:
+                app.progress_sink(
+                    f"[gui thread={thread_name}] Releasing GUI task lock after {time.perf_counter() - started:.2f}s"
+                )
 
 
 def _terminal_progress_sink():

@@ -11,6 +11,7 @@ from typing import Literal
 from pathlib import Path
 from urllib.parse import urlparse
 
+from arignan.compute import format_torch_cuda_memory
 from arignan.config import AppConfig
 from arignan.grouping import (
     GroupingDecision,
@@ -24,6 +25,7 @@ from arignan.ingestion import IngestionFailure, IngestionLog, IngestionService
 from arignan.llm import LocalTextGenerator, create_local_text_generator
 from arignan.markdown import MarkdownRepository, derive_keywords
 from arignan.markdown.writer import HeuristicArtifactWriter, LLMArtifactWriter
+from arignan.model_registry import resolve_model_storage_dir
 from arignan.models import ChunkRecord, LoadEvent, LoadOperation, ParsedDocument, RetrievalHit, SessionState, SourceDocument
 from arignan.prompts import DEFAULT_PROMPT_SET, PromptSet, load_prompt_set, render_prompt_template
 from arignan.retrieval import RetrievalPipeline, create_reranker, describe_question
@@ -165,6 +167,8 @@ class ArignanApp:
         config: AppConfig,
         progress_sink: Callable[[str], None] | None = None,
         terminal_pid: int | None = None,
+        *,
+        preload_retrieval_models: bool = True,
     ) -> None:
         self.config = config
         self.progress_sink = progress_sink
@@ -178,20 +182,26 @@ class ArignanApp:
         self.model_call_logger = SessionModelCallLogger(self.session_manager.store, self.terminal_pid)
         self.trace_collector = ModelTraceCollector(on_record=self.model_call_logger.log_call)
         self.prompts = load_prompt_set(config.app_home)
+        self._emit_progress("Initializing embedding model...(App Constructor)")
         self.embedder = create_embedder(
             config,
             progress_sink=self.progress_sink,
             exception_logger=self.exception_logger,
+            eager_load=preload_retrieval_models,
         )
+        self._emit_progress("Initializing chunker...(App Constructor)")
         self.chunker = Chunker(
             chunk_size=config.chunking.chunk_size,
             chunk_overlap=config.chunking.chunk_overlap,
         )
+        self._emit_progress("Initializing reranker...(App Constructor)")
         self.reranker = create_reranker(
             config,
             progress_sink=self.progress_sink,
             exception_logger=self.exception_logger,
+            eager_load=preload_retrieval_models,
         )
+
         self.local_text_generator = create_local_text_generator(config, progress_sink=self.progress_sink)
         # Reuse the same live generator throughout ask flows to avoid swapping a second Ollama model into memory.
         self.light_text_generator = self.local_text_generator
@@ -210,6 +220,26 @@ class ArignanApp:
             exception_logger=self.exception_logger,
         )
         self.markdown_repository = MarkdownRepository(artifact_writer=artifact_writer)
+
+    def warm_retrieval_models(self) -> None:
+        self._emit_progress("Preparing local embedding model " f"({self.config.embedding_model})... (from application.py)")
+        self._warm_component(
+            self.embedder,
+            task="embedding model load",
+            component_name="embedder",
+            model_name=self.config.embedding_model,
+            model_source=resolve_model_storage_dir(self.config.app_home, self.config.embedding_model),
+            gpu_label=f"GPU after embedding model load ({self.config.embedding_model})",
+        )
+        self._emit_progress("Preparing local reranker model " f"({self.config.reranker_model})...")
+        self._warm_component(
+            self.reranker,
+            task="reranker model load",
+            component_name="reranker",
+            model_name=self.config.reranker_model,
+            model_source=resolve_model_storage_dir(self.config.app_home, self.config.reranker_model),
+            gpu_label=f"GPU after reranker load ({self.config.reranker_model})",
+        )
 
     def load(self, input_ref: str, hat: str = "auto") -> LoadResult:
         self.trace_collector.clear()
@@ -310,6 +340,10 @@ class ArignanApp:
                     metadata={"input_ref": batch.input_ref},
                 )
             )
+        self._emit_progress(f"""load_id = {batch.load_id}, hat = {target_hat}, 
+                    document_count = {len(batch.documents)}, topic_folders = {topic_folders}, 
+                    total_chunks = {total_chunks}, total_markdown_segments = {total_markdown_segments},
+                    failures = {len(batch.failures)}""")
         return LoadResult(
             load_id=batch.load_id,
             hat=target_hat,
@@ -804,6 +838,39 @@ class ArignanApp:
             joined = ", ".join(released_parts)
             self._emit_progress(f"Released {joined} from CUDA after local LLM memory pressure ({reason}).")
         return released
+
+    def _warm_component(
+        self,
+        model_component,
+        *,
+        task: str,
+        component_name: str,
+        model_name: str,
+        model_source: Path,
+        gpu_label: str,
+    ) -> None:
+        ensure = getattr(model_component, "_ensure_model", None)
+        if not callable(ensure):
+            self._emit_progress(f"No ensure method defined for {model_name}")
+            return
+        try:
+            ensure()
+            self._emit_progress(f"Ensure() worked for {model_name}")
+            device = getattr(model_component, "device", None)
+            if device == "cuda":
+                message = format_torch_cuda_memory(gpu_label)
+                if message:
+                    self._emit_progress(message)
+        except Exception as exc:
+            log_path = self.exception_logger.log_exception(
+                component=component_name,
+                task=task,
+                exc=exc,
+                context={"model_name": model_name, "model_source": str(model_source)},
+            )
+            raise RuntimeError(
+                f"Failed to warm {component_name} ({model_name}). See exception log: {log_path.resolve()}"
+            ) from exc
 
     def save_session(self, terminal_pid: int | None = None, destination: Path | None = None) -> Path:
         pid = terminal_pid or self.terminal_pid

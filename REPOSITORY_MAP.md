@@ -494,14 +494,25 @@ Touch:
 - the MCP package export surface is now intentionally small (`build_mcp_server` plus the logged stdio runner), and generated `src/open_arignan.egg-info/` packaging artifacts have been removed from the source tree as non-runtime fluff
 - `settings.json` now includes `mcp_llm_backend`, defaulting to `client`, so MCP answer flows can stay off the local Ollama path unless explicitly opted into `local`
 - `mcp.json` now lives beside `settings.json` and `prompts.json`, self-heals when missing, and carries editable MCP server instructions plus tool/resource/prompt descriptions
-- the MCP server now exposes a broader SDK-backed tool surface: `retrieve_context`, `ask`, `load_content`, `list_loads`, `delete_loads`, `delete_hat`, `save_session`, `load_session`, `reset_session`, plus the `arignan://global-map` resource
+- the MCP server now exposes a broader SDK-backed tool surface: `retrieve_context`, `ask`, `load_content`, `list_loads`, `delete_loads`, `delete_hat`, plus the `arignan://global-map` resource
 - MCP tools can now be individually disabled from `mcp.json` with an `enabled` flag, and `ask` is intentionally disabled by default so MCP clients prefer `retrieve_context`
 - MCP no longer exposes session-management tools; session save/load/reset remain CLI/app concerns rather than MCP tools
+- `mcp.json` now also carries an editable FastMCP prompt, `find_from_local_library`, which nudges clients toward retrieval-first local-library lookups
 - MCP `ask` now splits cleanly by backend:
   - `mcp_llm_backend=client` prepares a client-LLM answer package without invoking the local answer model
   - `mcp_llm_backend=local` uses the local Arignan answer flow lazily
 - the MCP stdio entrypoint now uses a thin SDK-backed wrapper that logs raw inbound payload previews plus initialize/ping receipt to `stderr`, while the underlying MCP protocol/session stack still comes from the official Python MCP SDK
-- `settings.json` now includes `mcp_retrieval_keep_alive_seconds`, and the MCP lazy app wrapper prewarms embedding + reranking on startup, keeps them warm for that idle window, and releases them from GPU after the keepalive timeout
+- the MCP lazy app wrapper now starts a background retrieval-model load for embedding + reranking on startup but no longer uses timed GPU offload; retrieval-model release is request-driven instead
+- the MCP lazy app wrapper now emits timing logs for app resolve and retrieval-usage enter/leave, while the GUI task context emits matching lock wait/acquire/release timing logs for ask/load/delete work
+- MCP retrieval-like tool calls are now serialized behind a single retrieval gate inside the lazy MCP app wrapper, so one MCP server process cannot load or use the retrieval singleton concurrently from overlapping requests
+- MCP app initialization now uses a short-lock plus init-event pattern, so slow `ArignanApp` construction happens outside the shared state mutex and concurrent callers wait on initialization completion rather than stalling behind a long-held lock
+- `tests/integration/test_mcp_gui_parallel.py` now locks in the GUI+MCP overlap contract with fake embedder/reranker/local-generator classes, proving the first MCP retrieval call can wait behind an active GUI ask and still complete without duplicate model usage
+- MCP-side `ArignanApp` construction now uses `preload_retrieval_models=False`, so the MCP app object is built quickly and the background retrieval-model load thread explicitly loads only the embedder and reranker afterward through `ArignanApp.warm_retrieval_models()`
+- `README.md` now includes a one-line manual MCP debugging command using the official Inspector: `npx @modelcontextprotocol/inspector arignan --mcp --app-home E:/arignan`
+- `cli.py` now supports both MCP transports:
+  - `--mcp` for stdio
+  - `--mcp-http` plus `--mcp-host` / `--mcp-port` for separate-process Streamable HTTP debugging
+- `tests/integration/test_mcp_http.py` verifies the new Streamable HTTP entry point by starting a subprocess server and connecting through the official Python MCP SDK client
 
 ## Test Map
 
@@ -537,3 +548,10 @@ python -m pytest
 - Treat docs in `docs/` as implementation-state notes, not the primary runtime surface
 - Ignore `.setuptools/` and `__pycache__/` unless you are debugging packaging or caches
 - If a change touches setup, retrieval, storage layout, or sessions, verify both unit and integration coverage
+
+## Recent Notes
+
+- README MCP docs now include both:
+  - the separate-process Inspector UI flow for `http://127.0.0.1:8765/mcp`
+  - the direct Inspector CLI probe:
+    - `npx @modelcontextprotocol/inspector --cli http://127.0.0.1:8765/mcp --transport http --method tools/list`

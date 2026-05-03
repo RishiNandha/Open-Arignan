@@ -85,6 +85,7 @@ async def test_mcp_server_exposes_retrieval_tool_and_global_map_resource(tmp_pat
     async with create_connected_server_and_client_session(server) as session:
         await session.initialize()
         tools = await session.list_tools()
+        prompts = await session.list_prompts()
         resources = await session.list_resources()
         tool_result = await session.call_tool(
             "retrieve_context",
@@ -95,7 +96,10 @@ async def test_mcp_server_exposes_retrieval_tool_and_global_map_resource(tmp_pat
     tool_names = {tool.name for tool in tools.tools}
     assert "retrieve_context" in tool_names
     assert "ask" not in tool_names
+    prompt_names = {prompt.name for prompt in prompts.prompts}
+    assert "find_from_local_library" in prompt_names
     retrieve_tool = next(tool for tool in tools.tools if tool.name == "retrieve_context")
+    assert "local library" in (retrieve_tool.description or "").lower()
     assert "answer_context_top_k" in retrieve_tool.inputSchema["properties"]
     assert str(resources.resources[0].uri) == "arignan://global-map"
     assert tool_result.structuredContent["contexts"]
@@ -213,6 +217,48 @@ async def test_mcp_server_uses_mcp_json_tool_descriptions(tmp_path: Path, monkey
 
     retrieve_tool = next(tool for tool in tools.tools if tool.name == "retrieve_context")
     assert retrieve_tool.description == "Custom retrieve description from mcp.json."
+
+
+@pytest.mark.anyio
+async def test_mcp_server_uses_mcp_json_prompt_overrides(tmp_path: Path, monkeypatch) -> None:
+    app_home = tmp_path / ".arignan"
+    source = tmp_path / "notes.md"
+    source.write_text("# JEPA Notes\n\nJoint embedding predictive architecture overview.\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "arignan.application.create_local_text_generator",
+        lambda config, progress_sink=None, **kwargs: FakeLocalGenerator(kwargs.get("model_name") or config.local_llm_model),
+    )
+    mcp_path = app_home / "mcp.json"
+    mcp_path.parent.mkdir(parents=True, exist_ok=True)
+    mcp_path.write_text(
+        json.dumps(
+            {
+                "prompts": {
+                    "find_from_local_library": {
+                        "description": "Custom MCP prompt description.",
+                        "template": "Use retrieve_context first for this request: {user_request}",
+                    }
+                }
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    app = ArignanApp(load_config(app_home=app_home))
+    app.load(str(source), hat="default")
+    server = build_mcp_server(app=app, config=app.config)
+
+    async with create_connected_server_and_client_session(server) as session:
+        await session.initialize()
+        prompts = await session.list_prompts()
+        prompt = await session.get_prompt("find_from_local_library", {"user_request": "Find out from the local library what JEPA is."})
+
+    prompt_meta = next(item for item in prompts.prompts if item.name == "find_from_local_library")
+    assert prompt_meta.description == "Custom MCP prompt description."
+    message_text = prompt.messages[-1].content.text if hasattr(prompt.messages[-1].content, "text") else str(prompt.messages[-1].content)
+    assert "Use retrieve_context first for this request" in message_text
 
 
 @pytest.mark.anyio

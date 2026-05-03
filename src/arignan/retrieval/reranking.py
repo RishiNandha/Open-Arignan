@@ -103,16 +103,18 @@ def create_reranker(
     *,
     progress_sink: Callable[[str], None] | None = None,
     exception_logger: "SessionExceptionLogger | None" = None,
+    eager_load: bool = True,
 ) -> Reranker:
     model_dir = resolve_model_storage_dir(config.app_home, config.reranker_model)
-    if progress_sink is not None:
+    if eager_load and progress_sink is not None:
         progress_sink(f"Preparing local reranker model ({config.reranker_model})...")
     if not model_dir.exists():
         raise RuntimeError(_missing_reranker_model_error(config.reranker_model, model_dir))
     try:
         reranker = CrossEncoderReranker(model_name=config.reranker_model, model_source=model_dir)
-        reranker._ensure_model()
-        if progress_sink is not None and reranker.device == "cuda":
+        if eager_load:
+            reranker._ensure_model()
+        if eager_load and progress_sink is not None and reranker.device == "cuda":
             message = format_torch_cuda_memory(f"GPU after reranker load ({config.reranker_model})")
             if message:
                 progress_sink(message)

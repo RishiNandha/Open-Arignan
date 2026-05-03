@@ -30,6 +30,23 @@ class LineProgressReporter:
     def finish(self) -> None:
         return None
 
+class McpReporter:
+    def __init__(self, app_home: Path) -> None:
+        self.mcp_logs = app_home / "sessions" / "mcp.log"
+        self.mcp_logs.parent.mkdir(parents=True, exist_ok=True)
+        print("MCP Log Path: ", self.mcp_logs, file=sys.stderr, flush=True)
+
+    def log(self, message: str) -> None:
+        with open(self.mcp_logs, "a+") as f:
+            f.write(message + "\n")
+            f.flush()
+
+    def emit(self, message: str) -> None:
+        print(f"[arignan-mcp] {message}", file=sys.stderr, flush=True)
+        self.log(message)
+
+    def finish(self) -> None:
+        return None
 
 class AskStatusReporter:
     _spinner_frames = "|/-\\"
@@ -129,6 +146,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pid", type=int, default=None, help="Override the terminal PID used for session state.")
     parser.add_argument("-gui", "--gui", action="store_true", help="Launch the local browser GUI.")
     parser.add_argument("--mcp", action="store_true", help="Run the MCP stdio server.")
+    parser.add_argument("--mcp-http", action="store_true", help="Run the MCP Streamable HTTP server.")
+    parser.add_argument("--mcp-host", default="127.0.0.1", help="Host for MCP Streamable HTTP server.")
+    parser.add_argument("--mcp-port", type=int, default=8765, help="Port for MCP Streamable HTTP server.")
 
     subparsers = parser.add_subparsers(dest="command", required=False, title="commands", metavar="<command>")
 
@@ -215,13 +235,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     return parser
 
-
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     resolved_pid = args.pid or os.getppid() or os.getpid()
+    if args.mcp and args.mcp_http:
+        parser.error("use either --mcp or --mcp-http, not both")
     if args.mcp:
         return launch_mcp(app_home=args.app_home, settings_path=args.settings, terminal_pid=resolved_pid)
+    if args.mcp_http:
+        return launch_mcp_http(
+            app_home=args.app_home,
+            settings_path=args.settings,
+            terminal_pid=resolved_pid,
+            host=args.mcp_host,
+            port=args.mcp_port,
+        )
     if args.gui:
         return launch_gui(app_home=args.app_home, settings_path=args.settings, terminal_pid=resolved_pid)
     if args.command is None:
@@ -229,8 +258,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     from arignan.application import ArignanApp
 
     config = load_config(settings_path=args.settings, app_home=args.app_home)
-    reporter = _build_progress_reporter(command=args.command, debug=getattr(args, "debug", False))
-    app = ArignanApp(config, progress_sink=reporter.emit, terminal_pid=resolved_pid)
+
+    reporter = _build_progress_reporter(
+        command=args.command, debug=getattr(args, "debug", False), 
+        isMcp=args.mcp, app_home=args.app_home)
+    
+    app = ArignanApp(config, progress_sink= reporter.emit, terminal_pid=resolved_pid)
 
     try:
         if args.command == "load":
@@ -355,9 +388,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         raise
 
 
-def _build_progress_reporter(*, command: str, debug: bool):
+def _build_progress_reporter(*, command: str, debug: bool, isMcp:bool, app_home: Path | None = None):
     if command == "ask" and not debug:
         return AskStatusReporter()
+    elif isMcp:
+        return McpReporter(app_home)
     return LineProgressReporter()
 
 
@@ -368,8 +403,35 @@ def launch_gui(*, app_home: Path | None, settings_path: Path | None, terminal_pi
 
 
 def launch_mcp(*, app_home: Path | None, settings_path: Path | None, terminal_pid: int) -> int:
-    from arignan.application import ArignanApp
     from arignan.mcp import build_mcp_server, run_mcp_stdio_logged
+
+    config = load_config(settings_path=settings_path, app_home=app_home)
+    _configure_mcp_stderr_logging(sys.stderr)
+
+    _reporter = McpReporter(app_home)
+    _mcp_progress = _reporter.emit
+
+    _mcp_progress("Server started")
+
+    server = build_mcp_server(
+        config=config,
+        progress_sink=_mcp_progress,
+        app_factory=lambda: _build_mcp_app(config, terminal_pid=terminal_pid, progress_sink=_mcp_progress),
+    )
+    anyio.run(lambda: run_mcp_stdio_logged(server, progress_sink=_mcp_progress))
+    _mcp_progress("Server stopped")
+    return 0
+
+
+def launch_mcp_http(
+    *,
+    app_home: Path | None,
+    settings_path: Path | None,
+    terminal_pid: int,
+    host: str,
+    port: int,
+) -> int:
+    from arignan.mcp import build_mcp_server
 
     config = load_config(settings_path=settings_path, app_home=app_home)
     _configure_mcp_stderr_logging(sys.stderr)
@@ -377,18 +439,18 @@ def launch_mcp(*, app_home: Path | None, settings_path: Path | None, terminal_pi
     def _mcp_progress(message: str) -> None:
         print(f"[arignan-mcp] {message}", file=sys.stderr, flush=True)
 
-    _mcp_progress("Server started")
+    _mcp_progress(f"Server started on http://{host}:{port}/mcp")
     server = build_mcp_server(
         config=config,
         progress_sink=_mcp_progress,
-        app_factory=lambda: ArignanApp(
-            config,
-            progress_sink=_mcp_progress,
-            terminal_pid=terminal_pid,
-        ),
+        app_factory=lambda: _build_mcp_app(config, terminal_pid=terminal_pid, progress_sink=_mcp_progress),
+        host=host,
+        port=port,
     )
-    anyio.run(lambda: run_mcp_stdio_logged(server, progress_sink=_mcp_progress))
-    _mcp_progress("Server stopped")
+    try:
+        server.run("streamable-http")
+    finally:
+        _mcp_progress("Server stopped")
     return 0
 
 
@@ -405,6 +467,20 @@ def _configure_mcp_stderr_logging(stream: TextIO) -> None:
     logger.addHandler(handler)
     logger.setLevel(logging.INFO)
     logger.propagate = False
+
+
+def _build_mcp_app(config, *, terminal_pid: int, progress_sink) -> "ArignanApp":
+    progress_sink("Constructing Arignan app for MCP")
+    from arignan.application import ArignanApp
+
+    app = ArignanApp(
+        config,
+        progress_sink=progress_sink,
+        terminal_pid=terminal_pid,
+        preload_retrieval_models=True,
+    )
+    progress_sink("Arignan MCP app constructed; retrieval models remain lazy until background load or first retrieval")
+    return app
 
 
 def _print_output_block(text: str) -> None:
