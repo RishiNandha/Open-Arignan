@@ -30,7 +30,7 @@ Run the MCP server with:
 arignan --mcp --app-home <install dir>
 ```
 
-For MCP clients such as VS Code or Claude Code, the launch command should be:
+For MCP clients such as VS Code or Claude Code, the launch command should look something like this:
 
 ```json
 {
@@ -39,7 +39,7 @@ For MCP clients such as VS Code or Claude Code, the launch command should be:
 }
 ```
 
-Use `retrieve_context` to fetch reranked local context without calling an answer LLM. This is the flagship tool, which allows your MCP clients like Github Copilot and Claude Code to get excellent context from your local library of papers / books / documentations. Other tools exposed include `load_content`, `list_loads`, `delete_loads`, and `delete_hat`. 
+Now Github Copilot / Claude Code can use `retrieve_context` tool to fetch local context on the fly. This is our flagship tool to check local papers, private docs, etc. Other tools exposed include `load_content`, `list_loads`, `delete_loads`, and `delete_hat`. 
 
 ## Key Points
 
@@ -286,9 +286,10 @@ When the chat history is becoming too long:
 #### MCP Editing
 
 - MCP tool descriptions can be editted in `<app_home>/mcp.json`.
+- MCP prompts can also be editted in `<app_home>/mcp.json`.
+- `find_from_local_library` is the built-in MCP prompt that nudges clients toward `retrieve_context` for grounded local-library lookups.
 - `settings.json` controls MCP backend behavior:
   - `mcp_llm_backend`: `client` by default, or `local` if MCP should call the local answer LLM directly.
-  - `mcp_retrieval_keep_alive_seconds`: how long the embedding and reranking models stay warm on GPU after MCP startup or the last retrieval-like tool call.
 
 ### For Developers
 
@@ -297,6 +298,22 @@ When the chat history is becoming too long:
 3. GitHub Actions now runs `python -m pip install .[dev]` and then `python -m pytest` automatically on every push and pull request through `.github/workflows/tests.yml`
 4. Debug Load Command: `arignan load "filepath" --debug`
 5. Debug Ask Command: `arignan ask "question" --debug`
+
+#### To manually test MCP: 
+
+Use this command to launch it as a HTTP server:
+
+```text
+arignan --mcp-http --app-home E:/arignan --mcp-host 127.0.0.1 --mcp-port 8765
+```
+
+Then start the Inspector with:
+
+```text
+npx -y @modelcontextprotocol/inspector
+```
+
+Then set the transport to streamable HTTP, enter http://127.0.0.1:8765/mcp as the URL and connect through proxy. 
 
 ## Declaration
 

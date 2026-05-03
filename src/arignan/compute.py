@@ -4,22 +4,26 @@ import gc
 import sys
 import traceback
 from typing import Any
+import torch
 
 
-def preferred_torch_device() -> str:
-    try:
-        import torch
-    except ImportError:  # pragma: no cover
-        return "cpu"
+def preferred_torch_device(sink: callable | None = None) -> str:
+    # try:
+    #     if sink: sink("Trying to import torch..")
+    #     import torch
+    #     if sink:
+    #         sink("Torch Imported")
+    # except ImportError:  # pragma: no cover
+    #     return "cpu"
     return "cuda" if torch.cuda.is_available() else "cpu"
 
 
 def release_torch_cuda_memory() -> bool:
     gc.collect()
-    try:
-        import torch
-    except ImportError:  # pragma: no cover
-        return False
+    # try:
+    #     import torch
+    # except ImportError:  # pragma: no cover
+    #     return False
     if not torch.cuda.is_available():
         return False
     released = False
@@ -36,10 +40,10 @@ def release_torch_cuda_memory() -> bool:
 
 
 def torch_cuda_memory_snapshot() -> dict[str, float] | None:
-    try:
-        import torch
-    except ImportError:  # pragma: no cover
-        return None
+    # try:
+    #     import torch
+    # except ImportError:  # pragma: no cover
+    #     return None
     if not torch.cuda.is_available():
         return None
     total = float(torch.cuda.get_device_properties(0).total_memory)

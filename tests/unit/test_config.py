@@ -13,7 +13,6 @@ def test_load_config_uses_defaults_when_settings_missing(app_home: Path) -> None
     assert config.app_home == app_home.resolve()
     assert config.ask_route_backend == "llm"
     assert config.mcp_llm_backend == "client"
-    assert config.mcp_retrieval_keep_alive_seconds == 180
     assert config.local_llm_backend == "ollama"
     assert config.local_llm_model == "qwen3:4b-q4_K_M"
     assert config.local_llm_light_model == "qwen3:0.6b"
@@ -52,7 +51,6 @@ def test_load_config_recreates_missing_settings_file(app_home: Path) -> None:
     payload = json.loads(settings_path.read_text(encoding="utf-8"))
     assert payload["ask_route_backend"] == "llm"
     assert payload["mcp_llm_backend"] == "client"
-    assert payload["mcp_retrieval_keep_alive_seconds"] == 180
     assert payload["local_llm_model"] == "qwen3:4b-q4_K_M"
 
 
@@ -80,7 +78,6 @@ def test_load_config_merges_nested_overrides(app_home: Path) -> None:
 
     assert config.ask_route_backend == "embedding"
     assert config.mcp_llm_backend == "local"
-    assert config.mcp_retrieval_keep_alive_seconds == 45
     assert config.local_llm_backend == "transformers"
     assert config.local_llm_model == "custom-llm"
     assert config.local_llm_light_model == "qwen3:0.6b"
@@ -117,7 +114,6 @@ def test_write_default_settings_creates_file(app_home: Path) -> None:
     assert payload["app_home"] == str(app_home.resolve())
     assert payload["ask_route_backend"] == "llm"
     assert payload["mcp_llm_backend"] == "client"
-    assert payload["mcp_retrieval_keep_alive_seconds"] == 180
     assert payload["local_llm_backend"] == "ollama"
     assert payload["local_llm_model"] == "qwen3:4b-q4_K_M"
     assert payload["local_llm_light_model"] == "qwen3:0.6b"

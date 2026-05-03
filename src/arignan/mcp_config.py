@@ -15,6 +15,7 @@ class McpResourceDescription:
 class McpPromptDescription:
     name: str
     description: str
+    template: str
 
 
 @dataclass(slots=True)
@@ -38,19 +39,25 @@ class McpConfig:
 DEFAULT_MCP_CONFIG = McpConfig(
     server_name="arignan",
     instructions=(
-        "Arignan is a local-first knowledge-base MCP server. Prefer retrieve_context when the client "
-        "wants grounded local context without invoking a local answer LLM. Other tools map to the "
-        "local knowledge-base maintenance flows."
+        "Arignan is a local-first knowledge-base MCP server for a private local library of PDFs, books, "
+        "papers, notes, and docs. Prefer retrieve_context when the user wants to find out something from "
+        "the local library, private notes, local papers, or grounded local documentation without invoking "
+        "a local answer LLM. Use the other tools for knowledge-base ingestion and cleanup."
     ),
     tools={
         "retrieve_context": McpToolDescription(
-            description="Retrieve reranked local Arignan knowledge context for a query without calling an answer LLM.",
+            description=(
+                "Retrieve reranked grounded context from the local library without calling an answer LLM. "
+                "Use this when the user asks to find out something from local papers, books, PDFs, notes, "
+                "private documentation, or the local knowledge base."
+            ),
             enabled=True,
         ),
         "ask": McpToolDescription(
             description=(
                 "Answer a question against the local knowledge base. Depending on settings, this either uses the "
-                "local LLM lazily or prepares a client-LLM answer package from retrieved context."
+                "local LLM lazily or prepares a client-LLM answer package from retrieved context. Keep this "
+                "disabled unless the MCP client explicitly needs Arignan to answer instead of just retrieving."
             ),
             enabled=False,
         ),
@@ -78,9 +85,18 @@ DEFAULT_MCP_CONFIG = McpConfig(
         )
     },
     prompts={
-        "client_answer_with_context": McpPromptDescription(
-            name="client_answer_with_context",
-            description="Prompt template metadata for client-side answer synthesis from Arignan retrieval context.",
+        "find_from_local_library": McpPromptDescription(
+            name="find_from_local_library",
+            description=(
+                "Prompt template that nudges an MCP client to use retrieve_context first whenever the user asks "
+                "to find out something from the local library or private local documents."
+            ),
+            template=(
+                "Use Arignan's retrieve_context tool first when the user wants grounded information from the "
+                "local library of papers, books, PDFs, notes, or private docs. Prefer retrieve_context over ask. "
+                "After retrieval, answer using the returned contexts and citations.\n\n"
+                "User request: {user_request}"
+            ),
         )
     },
 )

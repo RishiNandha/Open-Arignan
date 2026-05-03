@@ -16,6 +16,7 @@ def test_write_default_mcp_config_creates_mcp_json(tmp_path: Path) -> None:
     assert "retrieve_context" in payload["tools"]
     assert payload["tools"]["ask"]["enabled"] is False
     assert "global_map" in payload["resources"]
+    assert "find_from_local_library" in payload["prompts"]
 
 
 def test_load_mcp_config_merges_user_overrides(tmp_path: Path) -> None:
@@ -24,6 +25,7 @@ def test_load_mcp_config_merges_user_overrides(tmp_path: Path) -> None:
     payload["instructions"] = "Custom MCP instructions."
     payload["tools"]["retrieve_context"]["description"] = "Custom retrieve description."
     payload["resources"]["global_map"]["description"] = "Custom global map description."
+    payload["prompts"]["find_from_local_library"]["template"] = "Custom prompt: {user_request}"
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
     config = load_mcp_config(tmp_path)
@@ -31,6 +33,7 @@ def test_load_mcp_config_merges_user_overrides(tmp_path: Path) -> None:
     assert config.instructions == "Custom MCP instructions."
     assert config.tools["retrieve_context"].description == "Custom retrieve description."
     assert config.resources["global_map"].description == "Custom global map description."
+    assert config.prompts["find_from_local_library"].template == "Custom prompt: {user_request}"
     assert config.tools["ask"].description == DEFAULT_MCP_CONFIG.tools["ask"].description
 
 
