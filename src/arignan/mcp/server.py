@@ -285,17 +285,13 @@ def build_mcp_server(
         )
         def retrieve_context(
             query: str,
-            hat: str = "auto",
-            rerank_top_k: int | None = None,
-            answer_context_top_k: int | None = None,
+            hat: str = "auto"
         ) -> RetrieveContextResult:
             state.progress(f"Running retrieve_context for query={query!r}")
             with state.retrieval_usage("retrieve_context") as app_instance:
                 result = app_instance.retrieve_context(
                     query,
-                    hat=hat,
-                    rerank_top_k=rerank_top_k,
-                    answer_context_top_k=answer_context_top_k,
+                    hat=hat
                 )
             return RetrieveContextResult(
                 query=query,
@@ -555,9 +551,7 @@ def _build_client_ask_package(
 
     retrieval = app.retrieve_context(
         query,
-        hat=hat,
-        rerank_top_k=rerank_top_k,
-        answer_context_top_k=answer_context_top_k,
+        hat=hat
     )
     answer_hits = retrieval.answer_hits
     if not answer_hits:
