@@ -53,6 +53,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Override local_llm_model in settings.json before model downloads begin.",
     )
+    parser.add_argument(
+        "--llm-light-model",
+        default=None,
+        help="Override local_llm_light_model in settings.json before model downloads begin.",
+    )
     return parser
 
 
@@ -76,6 +81,22 @@ def _choose_app_home_action(inspection) -> str:
         print("Please enter K to keep the existing app-home or C to clear it.")
 
 
+def _choose_existing_install_action(inspection) -> str:
+    print("Existing Arignan Python installation detected.")
+    for marker in inspection.markers:
+        print(f"- {marker}")
+    print("Choose what to do:")
+    print("- K: Keep and update the existing virtual environment")
+    print("- R: Recreate the virtual environment from scratch")
+    while True:
+        answer = input("Enter K or R: ").strip().lower()
+        if not answer or answer in {"k", "keep"}:
+            return "keep"
+        if answer in {"r", "recreate", "fresh"}:
+            return "recreate"
+        print("Please enter K to keep the existing install or R to recreate it.")
+
+
 def main() -> int:
     if is_packaging_invocation(sys.argv):
         setuptools_setup()
@@ -91,8 +112,10 @@ def main() -> int:
             app_home=args.app_home,
             llm_backend=args.llm_backend,
             llm_model=args.llm_model,
+            llm_light_model=args.llm_light_model,
             progress=print,
             choose_app_home_action=_choose_app_home_action,
+            choose_existing_install_action=_choose_existing_install_action,
         )
     except Exception as exc:
         traceback.print_exc()

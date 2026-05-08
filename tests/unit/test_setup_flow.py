@@ -16,11 +16,15 @@ from arignan.setup_flow import (
     _emit,
     _display_path,
     create_launchers,
+    default_venv_dir,
     download_required_models,
+    ensure_setup_venv,
     initialize_local_state,
+    inspect_existing_install,
     install_package,
     install_target,
     inspect_app_home,
+    prepare_python_install,
     prepare_app_home,
     render_summary,
     resolve_ollama_model_id,
@@ -35,7 +39,7 @@ def test_install_target_switches_for_dev() -> None:
     assert install_target(dev=True) == ".[dev]"
 
 
-def test_install_package_uses_no_deps_to_avoid_resolving_user_environment(tmp_path: Path, monkeypatch) -> None:
+def test_install_package_installs_into_requested_python_environment(tmp_path: Path, monkeypatch) -> None:
     calls: list[tuple[list[str], Path, bool]] = []
 
     def fake_run(command, cwd=None, check=None):
@@ -43,38 +47,62 @@ def test_install_package_uses_no_deps_to_avoid_resolving_user_environment(tmp_pa
         return None
 
     monkeypatch.setattr("arignan.setup_flow.subprocess.run", fake_run)
-    monkeypatch.setattr(sys, "executable", str((tmp_path / "python.exe").resolve()))
+    python_executable = (tmp_path / ".venv" / "Scripts" / "python.exe").resolve()
 
-    target = install_package(root=tmp_path, dev=True)
+    target = install_package(root=tmp_path, dev=True, python_executable=python_executable)
 
     assert target == ".[dev]"
     assert calls == [
         (
-            [str((tmp_path / "python.exe").resolve()), "-m", "pip", "install", "--no-deps", ".[dev]"],
+            [str(python_executable), "-m", "pip", "install", ".[dev]"],
             tmp_path.resolve(),
             True,
         )
     ]
 
 
-def test_create_launchers_writes_bin_scripts(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(sys, "executable", str((tmp_path / "python.exe").resolve()))
+def test_ensure_setup_venv_creates_repo_local_virtual_environment(tmp_path: Path, monkeypatch) -> None:
+    created: list[Path] = []
 
-    bin_dir, windows_launcher, posix_launcher = create_launchers(root=tmp_path)
+    class FakeBuilder:
+        def __init__(self, *, with_pip: bool) -> None:
+            assert with_pip is True
+
+        def create(self, path: Path) -> None:
+            created.append(path)
+            python = path / ("Scripts" if sys.platform == "win32" else "bin") / ("python.exe" if sys.platform == "win32" else "python")
+            python.parent.mkdir(parents=True, exist_ok=True)
+            python.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr("arignan.setup_flow.venv.EnvBuilder", FakeBuilder)
+
+    venv_dir, python = ensure_setup_venv(root=tmp_path)
+
+    assert venv_dir == default_venv_dir(tmp_path)
+    assert created == [venv_dir]
+    assert python.exists()
+
+
+def test_create_launchers_writes_bin_scripts(tmp_path: Path, monkeypatch) -> None:
+    python = (tmp_path / ".venv" / "Scripts" / "python.exe").resolve()
+
+    bin_dir, windows_launcher, posix_launcher = create_launchers(root=tmp_path, python_executable=python)
 
     assert bin_dir == tmp_path / "bin"
     assert windows_launcher.exists()
     assert posix_launcher.exists()
     assert "-m arignan.cli" in windows_launcher.read_text(encoding="utf-8")
     assert "-m arignan.cli" in posix_launcher.read_text(encoding="utf-8")
+    assert str(python) in windows_launcher.read_text(encoding="utf-8")
+    assert str(python) in posix_launcher.read_text(encoding="utf-8")
     assert "--app-home" not in windows_launcher.read_text(encoding="utf-8")
 
 
 def test_create_launchers_can_pin_app_home(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr(sys, "executable", str((tmp_path / "python.exe").resolve()))
+    python = (tmp_path / ".venv" / "Scripts" / "python.exe").resolve()
     app_home = (tmp_path / "custom-home").resolve()
 
-    _, windows_launcher, posix_launcher = create_launchers(root=tmp_path, app_home=app_home)
+    _, windows_launcher, posix_launcher = create_launchers(root=tmp_path, app_home=app_home, python_executable=python)
 
     assert f'--app-home "{app_home}"' in windows_launcher.read_text(encoding="utf-8")
     assert f"--app-home '{app_home}'" in posix_launcher.read_text(encoding="utf-8")
@@ -83,6 +111,8 @@ def test_create_launchers_can_pin_app_home(tmp_path: Path, monkeypatch) -> None:
 def test_render_summary_mentions_next_steps(tmp_path: Path) -> None:
     result = SetupResult(
         install_target=".",
+        venv_dir=tmp_path / ".venv",
+        python_executable=tmp_path / ".venv" / "Scripts" / "python.exe",
         app_home=tmp_path / ".arignan",
         settings_path=tmp_path / ".arignan" / "settings.json",
         models_dir=tmp_path / ".arignan" / "models",
@@ -99,6 +129,7 @@ def test_render_summary_mentions_next_steps(tmp_path: Path) -> None:
     summary = render_summary(result)
 
     assert "Arignan setup complete." in summary
+    assert "Virtual environment:" in summary
     assert "Next steps:" in summary
     assert str(result.bin_dir) in summary
 
@@ -161,6 +192,23 @@ def test_initialize_local_state_can_pin_lightweight_full_model(tmp_path: Path, m
     assert payload["local_llm_light_model"] == "qwen3:0.6b"
     assert payload["embedding_model"] == "BAAI/bge-small-en-v1.5"
     assert payload["reranker_model"] == "mixedbread-ai/mxbai-rerank-xsmall-v1"
+
+
+def test_initialize_local_state_can_use_hugging_face_only_llm_models(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    _, settings_path = initialize_local_state(
+        app_home=tmp_path / ".arignan",
+        local_llm_backend="transformers",
+        local_llm_model="Qwen3-0.6B",
+        local_llm_light_model="Qwen3-0.6B",
+    )
+
+    payload = json.loads(settings_path.read_text(encoding="utf-8"))
+
+    assert payload["local_llm_backend"] == "transformers"
+    assert payload["local_llm_model"] == "Qwen3-0.6B"
+    assert payload["local_llm_light_model"] == "Qwen3-0.6B"
 
 
 def test_initialize_local_state_refreshes_existing_settings_to_current_defaults(tmp_path: Path, monkeypatch) -> None:
@@ -336,6 +384,32 @@ def test_prepare_app_home_freshens_but_preserves_models_and_runtime(tmp_path: Pa
     assert not (app_home / "settings.json").exists()
 
 
+def test_inspect_existing_install_detects_venv_and_launchers(tmp_path: Path) -> None:
+    (tmp_path / ".venv").mkdir()
+    (tmp_path / "bin").mkdir()
+    (tmp_path / "bin" / "arignan.cmd").write_text("", encoding="utf-8")
+
+    inspection = inspect_existing_install(tmp_path)
+
+    assert inspection.exists is True
+    assert str(tmp_path / ".venv") in inspection.markers
+    assert str(tmp_path / "bin" / "arignan.cmd") in inspection.markers
+
+
+def test_prepare_python_install_recreates_existing_venv_when_confirmed(tmp_path: Path) -> None:
+    venv_dir = tmp_path / ".venv"
+    venv_dir.mkdir()
+    (venv_dir / "stale.txt").write_text("old", encoding="utf-8")
+
+    inspection = prepare_python_install(
+        tmp_path,
+        choose_action=lambda current: "recreate",
+    )
+
+    assert inspection.venv_dir == venv_dir
+    assert not venv_dir.exists()
+
+
 def test_download_required_models_pulls_default_ollama_model(tmp_path: Path, monkeypatch) -> None:
     app_home = tmp_path / ".arignan"
     write_default_settings(app_home=app_home)
@@ -461,6 +535,39 @@ def test_download_required_models_supports_transformers_backend(tmp_path: Path, 
     assert f"401 for {resolve_model_repo_id('Qwen3-1.7B')}" in message
 
 
+def test_download_required_models_can_use_hugging_face_only_llms(tmp_path: Path, monkeypatch) -> None:
+    app_home = tmp_path / ".arignan"
+    settings_path = write_default_settings(app_home=app_home)
+    payload = json.loads(settings_path.read_text(encoding="utf-8"))
+    payload["local_llm_backend"] = "transformers"
+    payload["local_llm_model"] = "Qwen3-0.6B"
+    payload["local_llm_light_model"] = "Qwen3-0.6B"
+    settings_path.write_text(json.dumps(payload), encoding="utf-8")
+    provisioned: list[Path] = []
+    ensured: list[str] = []
+    downloaded: list[str] = []
+
+    class FakeHubModule:
+        @staticmethod
+        def snapshot_download(*, repo_id: str, local_dir: Path, local_dir_use_symlinks: bool, ignore_patterns=None) -> None:
+            downloaded.append(repo_id)
+            local_dir.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr("arignan.setup_flow.provision_managed_runtime", lambda app_home_arg, progress=None: provisioned.append(app_home_arg))
+    monkeypatch.setattr("arignan.setup_flow.ensure_model_available", lambda app_home_arg, endpoint, model, **kwargs: ensured.append(model))
+    monkeypatch.setitem(sys.modules, "huggingface_hub", FakeHubModule())
+
+    download_required_models(app_home)
+
+    assert provisioned == []
+    assert ensured == []
+    assert downloaded == [
+        "Qwen/Qwen3-0.6B",
+        "BAAI/bge-base-en-v1.5",
+        "mixedbread-ai/mxbai-rerank-base-v1",
+    ]
+
+
 def test_emit_forwards_progress_messages() -> None:
     messages: list[str] = []
 
@@ -500,3 +607,27 @@ def test_verify_required_ml_runtime_accepts_installed_version_ranges(monkeypatch
     )
 
     verify_required_ml_runtime()
+
+
+def test_verify_required_ml_runtime_can_check_target_python(tmp_path: Path, monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    class Completed:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(command, text=None, capture_output=None, check=None):
+        calls.append(list(command))
+        assert text is True
+        assert capture_output is True
+        assert check is False
+        return Completed()
+
+    python = tmp_path / ".venv" / "Scripts" / "python.exe"
+    monkeypatch.setattr("arignan.setup_flow.subprocess.run", fake_run)
+
+    verify_required_ml_runtime(python_executable=python)
+
+    assert calls[0][0] == str(python.resolve())
+    assert calls[0][1] == "-c"

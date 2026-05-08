@@ -6,6 +6,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import venv
 from importlib import metadata
 from dataclasses import dataclass
 from packaging.specifiers import SpecifierSet
@@ -43,6 +44,8 @@ REQUIRED_ML_PACKAGES: dict[str, str] = {
 @dataclass(frozen=True, slots=True)
 class SetupResult:
     install_target: str
+    venv_dir: Path
+    python_executable: Path
     app_home: Path
     settings_path: Path
     models_dir: Path
@@ -64,6 +67,18 @@ class AppHomeInspection:
     looks_like_arignan: bool
 
 
+@dataclass(frozen=True, slots=True)
+class ExistingInstallInspection:
+    root: Path
+    venv_dir: Path
+    bin_dir: Path
+    markers: list[str]
+
+    @property
+    def exists(self) -> bool:
+        return bool(self.markers)
+
+
 def repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
@@ -80,18 +95,90 @@ def ensure_repo_on_syspath(root: Path | None = None) -> Path:
     return src_dir
 
 
-def install_package(root: Path | None = None, dev: bool = False) -> str:
+def default_venv_dir(root: Path | None = None) -> Path:
+    return (root or repo_root()).resolve() / ".venv"
+
+
+def venv_python(venv_dir: Path) -> Path:
+    scripts_dir = "Scripts" if os.name == "nt" else "bin"
+    executable = "python.exe" if os.name == "nt" else "python"
+    return venv_dir / scripts_dir / executable
+
+
+def inspect_existing_install(root: Path | None = None) -> ExistingInstallInspection:
+    resolved_root = (root or repo_root()).resolve()
+    venv_dir = default_venv_dir(resolved_root)
+    bin_dir = resolved_root / "bin"
+    markers: list[str] = []
+    if venv_dir.exists():
+        markers.append(str(venv_dir))
+    for launcher_name in ("arignan.cmd", "arignan"):
+        launcher = bin_dir / launcher_name
+        if launcher.exists():
+            markers.append(str(launcher))
+    return ExistingInstallInspection(
+        root=resolved_root,
+        venv_dir=venv_dir,
+        bin_dir=bin_dir,
+        markers=markers,
+    )
+
+
+def prepare_python_install(
+    root: Path | None = None,
+    *,
+    choose_action: Callable[[ExistingInstallInspection], str] | None = None,
+    progress: Callable[[str], None] | None = None,
+) -> ExistingInstallInspection:
+    inspection = inspect_existing_install(root)
+    if not inspection.exists:
+        return inspection
+    action = (choose_action(inspection) if choose_action is not None else "keep").strip().lower()
+    if action in {"fresh", "recreate", "r"}:
+        _emit(progress, "Recreating existing Arignan virtual environment...")
+        if inspection.venv_dir.exists():
+            shutil.rmtree(inspection.venv_dir)
+    else:
+        _emit(progress, "Reusing existing Arignan virtual environment.")
+    return inspect_existing_install(inspection.root)
+
+
+def ensure_setup_venv(root: Path | None = None, progress: Callable[[str], None] | None = None) -> tuple[Path, Path]:
+    resolved_root = (root or repo_root()).resolve()
+    venv_dir = default_venv_dir(resolved_root)
+    python_executable = venv_python(venv_dir)
+    if not python_executable.exists():
+        _emit(progress, f"Creating isolated Python environment at {_display_path(venv_dir)}...")
+        venv.EnvBuilder(with_pip=True).create(venv_dir)
+    return venv_dir, python_executable
+
+
+def install_package(root: Path | None = None, dev: bool = False, python_executable: Path | None = None) -> str:
     resolved_root = (root or repo_root()).resolve()
     target = install_target(dev=dev)
+    executable = Path(python_executable).resolve() if python_executable is not None else Path(sys.executable).resolve()
     subprocess.run(
-        [sys.executable, "-m", "pip", "install", "--no-deps", target],
+        [str(executable), "-m", "pip", "install", target],
         cwd=resolved_root,
         check=True,
     )
     return target
 
 
-def verify_required_ml_runtime() -> None:
+def verify_required_ml_runtime(python_executable: Path | None = None) -> None:
+    if python_executable is not None:
+        command = [
+            str(Path(python_executable).resolve()),
+            "-c",
+            _ML_RUNTIME_CHECK_SCRIPT,
+        ]
+        completed = subprocess.run(command, text=True, capture_output=True, check=False)
+        if completed.returncode == 0:
+            return
+        missing = (completed.stdout or completed.stderr).strip()
+        _raise_required_ml_runtime_error(missing)
+        return
+
     missing_or_incompatible: list[str] = []
     for package_name, spec in REQUIRED_ML_PACKAGES.items():
         try:
@@ -103,11 +190,39 @@ def verify_required_ml_runtime() -> None:
             missing_or_incompatible.append(f"{package_name}{spec} (found {version})")
     if not missing_or_incompatible:
         return
+    _raise_required_ml_runtime_error(", ".join(missing_or_incompatible))
+
+
+_ML_RUNTIME_CHECK_SCRIPT = """
+from importlib import metadata
+from packaging.specifiers import SpecifierSet
+
+required = {
+    "transformers": ">=4.48,<4.50",
+    "accelerate": ">=0.30,<1",
+    "sentence-transformers": ">=3.0,<4",
+}
+missing = []
+for package_name, spec in required.items():
+    try:
+        version = metadata.version(package_name)
+    except metadata.PackageNotFoundError:
+        missing.append(f"{package_name}{spec}")
+        continue
+    if version not in SpecifierSet(spec):
+        missing.append(f"{package_name}{spec} (found {version})")
+if missing:
+    print(", ".join(missing))
+    raise SystemExit(1)
+""".strip()
+
+
+def _raise_required_ml_runtime_error(missing_or_incompatible: str) -> None:
     install_parts = [f'"{name}{spec}"' for name, spec in REQUIRED_ML_PACKAGES.items()]
     raise RuntimeError(
         "Arignan setup requires the Python retrieval ML stack in this environment. "
         "Missing or incompatible packages: "
-        + ", ".join(missing_or_incompatible)
+        + missing_or_incompatible
         + ". "
         + "Install or repair them with: "
         + f"{sys.executable} -m pip install {' '.join(install_parts)} "
@@ -394,25 +509,29 @@ def _migrate_legacy_retrieval_defaults(settings_path: Path) -> None:
         settings_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
-def create_launchers(root: Path | None = None, app_home: Path | None = None) -> tuple[Path, Path, Path]:
+def create_launchers(
+    root: Path | None = None,
+    app_home: Path | None = None,
+    python_executable: Path | None = None,
+) -> tuple[Path, Path, Path]:
     resolved_root = (root or repo_root()).resolve()
     bin_dir = resolved_root / "bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
 
-    python_executable = Path(sys.executable).resolve()
+    resolved_python = Path(python_executable).resolve() if python_executable is not None else Path(sys.executable).resolve()
     app_home_arg_windows = f' --app-home "{Path(app_home).resolve()}"' if app_home is not None else ""
     app_home_arg_posix = f" --app-home {_quote_posix_argument(str(Path(app_home).resolve()))}" if app_home is not None else ""
     windows_launcher = bin_dir / "arignan.cmd"
     windows_launcher.write_text(
         "@echo off\r\n"
-        f"\"{python_executable}\" -m arignan.cli{app_home_arg_windows} %*\r\n",
+        f"\"{resolved_python}\" -m arignan.cli{app_home_arg_windows} %*\r\n",
         encoding="utf-8",
     )
 
     posix_launcher = bin_dir / "arignan"
     posix_launcher.write_text(
         "#!/usr/bin/env sh\n"
-        f"{_quote_posix_argument(str(python_executable))} -m arignan.cli{app_home_arg_posix} \"$@\"\n",
+        f"{_quote_posix_argument(str(resolved_python))} -m arignan.cli{app_home_arg_posix} \"$@\"\n",
         encoding="utf-8",
     )
     current_mode = posix_launcher.stat().st_mode
@@ -425,20 +544,25 @@ def run_setup(
     app_home: Path | None = None,
     llm_backend: str | None = None,
     llm_model: str | None = None,
+    llm_light_model: str | None = None,
     lightweight: bool = False,
     progress: Callable[[str], None] | None = None,
     choose_app_home_action: Callable[[AppHomeInspection], str] | None = None,
+    choose_existing_install_action: Callable[[ExistingInstallInspection], str] | None = None,
 ) -> SetupResult:
     root = repo_root()
     ensure_repo_on_syspath(root)
     effective_llm_model = DEFAULT_LIGHT_LOCAL_LLM_REPO_ID if lightweight else llm_model
-    effective_light_model = DEFAULT_LIGHT_LOCAL_LLM_REPO_ID if lightweight else None
+    effective_light_model = DEFAULT_LIGHT_LOCAL_LLM_REPO_ID if lightweight else llm_light_model
     effective_embedding_model = DEFAULT_LIGHT_EMBEDDING_MODEL_REPO_ID if lightweight else None
     effective_reranker_model = DEFAULT_LIGHT_RERANKER_MODEL_REPO_ID if lightweight else None
-    _emit(progress, "[1/4] Installing Python package...")
-    target = install_package(root=root, dev=dev)
-    verify_required_ml_runtime()
-    _emit(progress, "[2/4] Initializing local Arignan state...")
+    _emit(progress, "[1/5] Preparing isolated Python environment...")
+    prepare_python_install(root, choose_action=choose_existing_install_action, progress=progress)
+    venv_dir, python_executable = ensure_setup_venv(root, progress=progress)
+    _emit(progress, "[2/5] Installing Python package into the isolated environment...")
+    target = install_package(root=root, dev=dev, python_executable=python_executable)
+    verify_required_ml_runtime(python_executable=python_executable)
+    _emit(progress, "[3/5] Initializing local Arignan state...")
     from arignan.paths import resolve_app_home
 
     desired_app_home = resolve_app_home(app_home=app_home)
@@ -456,17 +580,23 @@ def run_setup(
         reranker_model=effective_reranker_model,
         refresh_existing=app_home_action == "fresh" or app_home_action in {"new", "empty"},
     )
-    _emit(progress, "[3/4] Downloading required models...")
+    _emit(progress, "[4/5] Downloading required models...")
     models_dir = download_required_models(resolved_home, progress=progress)
-    _emit(progress, "[4/4] Creating CLI launchers...")
+    _emit(progress, "[5/5] Creating CLI launchers...")
     pinned_app_home = resolved_home if app_home is not None else None
-    bin_dir, windows_launcher, posix_launcher = create_launchers(root=root, app_home=pinned_app_home)
+    bin_dir, windows_launcher, posix_launcher = create_launchers(
+        root=root,
+        app_home=pinned_app_home,
+        python_executable=python_executable,
+    )
     from arignan.config import load_config
 
     config = load_config(app_home=resolved_home)
     _emit(progress, "[done] Setup steps completed.")
     return SetupResult(
         install_target=target,
+        venv_dir=venv_dir,
+        python_executable=python_executable,
         app_home=resolved_home,
         settings_path=settings_path,
         models_dir=models_dir,
@@ -487,6 +617,8 @@ def render_summary(result: SetupResult) -> str:
     lines = [
         "Arignan setup complete.",
         f"- Installed package target: {result.install_target}",
+        f"- Virtual environment: {_display_path(result.venv_dir)}",
+        f"- Python executable: {_display_path(result.python_executable)}",
         f"- App home: {_display_path(result.app_home)}",
         f"- Settings: {_display_path(result.settings_path)}",
         f"- Models directory: {_display_path(result.models_dir)}",
