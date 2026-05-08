@@ -4,11 +4,21 @@
 
 ## Quick-Start
 
+### Option 1: Standalone Package (No Python)
+
+1. Download `Open-Arignan-windows-x64.zip` or `Open-Arignan-linux-x64.tar.gz` from the GitHub Releases page.
+2. Extract the bundle.
+3. Run `Start-Arignan-GUI.cmd` on Windows or `./Start-Arignan-GUI.sh` on Linux.
+4. On first launch, Arignan initializes its app-home, downloads required local models, and opens the local GUI.
+
+The standalone bundle includes its own Python runtime. Users do not need to install Python or clone this repository.
+
+### Option 2: Git Clone + CLI
+
 0. Clone the repo with `git clone https://github.com/RishiNandha/Open-Arignan`
 
-### Option 1: Git Clone + CLI
-
 1. Run the `python setup.py --app-home <install dir>`. This will:
+   - Create a repository-local `.venv` and install Arignan into that isolated environment instead of modifying your current Python environment
    - Download all the models needed, including the default local answer model and a lighter fallback answer model
    - Create a **bin directory** folder with executables
    - Print the bin directory for your reference
@@ -16,14 +26,24 @@
 3. Try `arignan load "filename.pdf"`
 4. Try `arignan ask "relevant question"`
 
-### Option 2: GUI
+If you already have an Arignan virtual environment or launcher in the repo, setup warns before reusing or recreating it.
+
+To avoid Ollama entirely and use a small Hugging Face text model instead, run:
+
+```text
+python setup.py --app-home <install dir> --llm-backend transformers --llm-model Qwen3-0.6B --llm-light-model Qwen3-0.6B
+```
+
+This still downloads the embedding and reranking models into the app-home, but it will not provision or pull an Ollama chat model.
+
+### Option 3: GUI
 
 1. Run  `python setup.py --app-home <install dir>`
 2. Run `arignan -gui`
 3. Your browser opens locally
 4. Use **Add More Files To Knowledge Base** to load material, then ask questions in the chat box
 
-### Option 3: MCP
+### Option 4: MCP
 
 1. Run  `python setup.py --app-home <install dir>`
 

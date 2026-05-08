@@ -1,0 +1,101 @@
+name: Standalone Packages
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.artifact_name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact_name: Open-Arignan-windows-x64
+            archive_name: Open-Arignan-windows-x64.zip
+          - os: ubuntu-latest
+            artifact_name: Open-Arignan-linux-x64
+            archive_name: Open-Arignan-linux-x64.tar.gz
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install packaging dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install ".[package]"
+
+      - name: Build PyInstaller bundle
+        working-directory: packaging/pyinstaller
+        run: python -m PyInstaller arignan.spec --noconfirm --clean
+
+      - name: Add Windows launchers
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $bundle = "packaging/pyinstaller/dist/Open-Arignan"
+          Copy-Item "packaging/standalone/README_STANDALONE.md" "$bundle/README_STANDALONE.md"
+          @'
+          @echo off
+          set "ARIGNAN_HOME=%LOCALAPPDATA%\Arignan"
+          "%~dp0arignan.exe" --app-home "%ARIGNAN_HOME%" setup
+          if errorlevel 1 pause & exit /b %errorlevel%
+          "%~dp0arignan.exe" --app-home "%ARIGNAN_HOME%" -gui
+          pause
+          '@ | Set-Content "$bundle/Start-Arignan-GUI.cmd" -Encoding ASCII
+          @'
+          @echo off
+          "%~dp0arignan.exe" %*
+          '@ | Set-Content "$bundle/arignan.cmd" -Encoding ASCII
+
+      - name: Add Linux launchers
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle="packaging/pyinstaller/dist/Open-Arignan"
+          cp packaging/standalone/README_STANDALONE.md "$bundle/README_STANDALONE.md"
+          cat > "$bundle/Start-Arignan-GUI.sh" <<'EOF'
+          #!/usr/bin/env sh
+          set -eu
+          APP_HOME="${ARIGNAN_HOME:-"$HOME/.arignan"}"
+          DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+          "$DIR/arignan" --app-home "$APP_HOME" setup
+          "$DIR/arignan" --app-home "$APP_HOME" -gui
+          EOF
+          chmod +x "$bundle/Start-Arignan-GUI.sh"
+
+      - name: Archive Windows bundle
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path packaging/pyinstaller/dist/Open-Arignan/* -DestinationPath ${{ matrix.archive_name }}
+
+      - name: Archive Linux bundle
+        if: runner.os == 'Linux'
+        shell: bash
+        run: tar -czf "${{ matrix.archive_name }}" -C packaging/pyinstaller/dist Open-Arignan
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.archive_name }}
+
+      - name: Publish release asset
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.archive_name }}

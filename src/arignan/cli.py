@@ -152,6 +152,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers = parser.add_subparsers(dest="command", required=False, title="commands", metavar="<command>")
 
+    setup_parser = subparsers.add_parser(
+        "setup",
+        help="Initialize Arignan local state and download required models.",
+        description="Initialize Arignan local state and download required models. This is intended for standalone packaged builds and does not install Python packages.",
+        formatter_class=ArignanHelpFormatter,
+    )
+    setup_parser.add_argument(
+        "--lightweight",
+        action="store_true",
+        help="Use the default light local model and lightweight retrieval models.",
+    )
+    setup_parser.add_argument("--llm-backend", default=None, help="Override local_llm_backend in settings.json.")
+    setup_parser.add_argument("--llm-model", default=None, help="Override local_llm_model in settings.json.")
+    setup_parser.add_argument("--llm-light-model", default=None, help="Override local_llm_light_model in settings.json.")
+
     load_parser = subparsers.add_parser(
         "load",
         help="Ingest a PDF, markdown file, folder, or URL into the knowledge base.",
@@ -255,6 +270,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return launch_gui(app_home=args.app_home, settings_path=args.settings, terminal_pid=resolved_pid)
     if args.command is None:
         parser.error("either a command or -gui is required")
+    if args.command == "setup":
+        return run_packaged_setup(args)
     from arignan.application import ArignanApp
 
     config = load_config(settings_path=args.settings, app_home=args.app_home)
@@ -386,6 +403,46 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         print(f"[arignan] Full traceback logged to {log_path}", file=sys.stderr)
         raise
+
+
+def run_packaged_setup(args) -> int:
+    from arignan.model_registry import (
+        DEFAULT_LIGHT_EMBEDDING_MODEL_REPO_ID,
+        DEFAULT_LIGHT_LOCAL_LLM_REPO_ID,
+        DEFAULT_LIGHT_RERANKER_MODEL_REPO_ID,
+    )
+    from arignan.setup_flow import download_required_models, initialize_local_state
+
+    reporter = LineProgressReporter()
+    effective_llm_model = DEFAULT_LIGHT_LOCAL_LLM_REPO_ID if args.lightweight else args.llm_model
+    effective_light_model = DEFAULT_LIGHT_LOCAL_LLM_REPO_ID if args.lightweight else args.llm_light_model
+    effective_embedding_model = DEFAULT_LIGHT_EMBEDDING_MODEL_REPO_ID if args.lightweight else None
+    effective_reranker_model = DEFAULT_LIGHT_RERANKER_MODEL_REPO_ID if args.lightweight else None
+    reporter.emit("Initializing local Arignan state...")
+    app_home, settings_path = initialize_local_state(
+        app_home=args.app_home,
+        local_llm_backend=args.llm_backend,
+        local_llm_model=effective_llm_model,
+        local_llm_light_model=effective_light_model,
+        embedding_model=effective_embedding_model,
+        reranker_model=effective_reranker_model,
+        refresh_existing=False,
+    )
+    reporter.emit("Downloading required models...")
+    models_dir = download_required_models(app_home, progress=reporter.emit)
+    reporter.finish()
+    _print_output_block(
+        "\n".join(
+            [
+                "Arignan standalone setup complete.",
+                f"App home: {app_home}",
+                f"Settings: {settings_path}",
+                f"Models directory: {models_dir}",
+                "Next: run `arignan -gui` or use the bundled Start-Arignan-GUI launcher.",
+            ]
+        )
+    )
+    return 0
 
 
 def _build_progress_reporter(*, command: str, debug: bool, isMcp:bool, app_home: Path | None = None):

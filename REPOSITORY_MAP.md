@@ -16,6 +16,10 @@ This file is a fast orientation guide for agents that need to patch the reposito
 Important current reality:
 
 - setup provisions a managed local text-model runtime and runtime uses it for markdown artifacts and final `ask` answers
+- setup installs Arignan into a repository-local `.venv` and writes launchers that use that venv Python instead of modifying the Python that launched `setup.py`
+- setup warns before reusing or recreating an existing Arignan `.venv`/launcher installation
+- GitHub release packaging now builds standalone Windows/Linux bundles with an embedded Python runtime for users who do not have Python installed
+- standalone bundles expose `arignan setup`, which initializes the app-home and downloads models without installing Python packages
 - the default local text model is `qwen3:4b-q4_K_M`
 - setup self-heal now also normalizes the earlier mistaken `gemma4:e2b` default back to `qwen3:4b-q4_K_M`
 - `ask` now reuses the main local text generator across default/light conversational flows so the app does not swap in a second full chat LLM at ask time
@@ -49,6 +53,8 @@ Important current reality:
 |-- src/arignan/
 |-- tests/
 |-- docs/
+|-- packaging/        # PyInstaller spec and standalone package notes
+|-- .github/workflows/
 |-- .setuptools/        # packaging scratch/output
 `-- __pycache__/        # generated cache
 ```
@@ -78,14 +84,19 @@ Flow:
 
 1. `setup.py`
 2. `src/arignan/setup_flow.py:run_setup`
-3. package install
-4. app-home initialization
-5. managed local-runtime provisioning
-6. `bin/` launcher creation
+3. `.venv` creation/reuse confirmation
+4. package install into `.venv`
+5. app-home initialization
+6. managed local-runtime provisioning or Hugging Face model download, depending on settings
+7. `bin/` launcher creation targeting `.venv`
 
 Packaging note:
 
 - `setup.py` also dispatches `egg_info`, `bdist_wheel`, and similar packaging commands back to setuptools. Do not break that split behavior when editing setup.
+- For source installs, `setup.py` is expected to avoid the caller's global/site Python environment and use the repo-local virtual environment.
+- `.github/workflows/package.yml` builds standalone downloadable bundles on tags or manual dispatch.
+- `packaging/pyinstaller/arignan.spec` is the PyInstaller entry for those bundles.
+- Packaged users run `arignan setup` from inside the bundle; that command initializes settings/prompts/model storage and downloads models, but does not construct the main app or install Python packages.
 
 ### CLI
 
@@ -483,6 +494,7 @@ Touch:
 - deleting a grouped load should regenerate surviving grouped markdown, not blindly delete the topic
 - `map.md` and `global_map.md` are regenerated from manifests
 - setup provisions the managed local runtime and writes a local runtime manifest into `<app_home>/models`
+- setup can avoid Ollama entirely when both `--llm-model` and `--llm-light-model` are Hugging Face model IDs/aliases and `--llm-backend transformers` is used
 - Arignan force-disables TensorFlow and Flax backends for its local text runtime
 - active session exceptions are logged to `<app_home>/sessions/active/pid-<pid>/exceptions.log`
 - `load` and grouped delete/regeneration should avoid redundant map/global-map refreshes inside inner loops

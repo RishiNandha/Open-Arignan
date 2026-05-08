@@ -36,6 +36,9 @@ dependencies = [
 dev = [
   "pytest>=8.2,<9",
 ]
+package = [
+  "pyinstaller>=6.6,<7",
+]
 
 [project.scripts]
 arignan = "arignan.cli:main"
