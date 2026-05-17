@@ -65,9 +65,14 @@ def test_create_launchers_writes_bin_scripts(tmp_path: Path, monkeypatch) -> Non
     assert bin_dir == tmp_path / "bin"
     assert windows_launcher.exists()
     assert posix_launcher.exists()
-    assert "-m arignan.cli" in windows_launcher.read_text(encoding="utf-8")
-    assert "-m arignan.cli" in posix_launcher.read_text(encoding="utf-8")
-    assert "--app-home" not in windows_launcher.read_text(encoding="utf-8")
+    win_text = windows_launcher.read_text(encoding="utf-8")
+    posix_text = posix_launcher.read_text(encoding="utf-8")
+    assert "-m arignan.cli" in win_text
+    assert "-m arignan.cli" in posix_text
+    assert "--app-home" not in win_text
+    # Both launchers must silence the HuggingFace tokenizers fork warning.
+    assert "TOKENIZERS_PARALLELISM=false" in win_text
+    assert "TOKENIZERS_PARALLELISM=false" in posix_text
 
 
 def test_create_launchers_can_pin_app_home(tmp_path: Path, monkeypatch) -> None:

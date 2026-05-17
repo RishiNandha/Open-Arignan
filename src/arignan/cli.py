@@ -640,3 +640,7 @@ def render_retrieved_context(hits) -> str:
         if index < len(hits):
             lines.append("")
     return "\n".join(lines)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
