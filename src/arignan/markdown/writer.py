@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Protocol
 
@@ -133,7 +133,7 @@ class HeuristicArtifactWriter:
 class LLMArtifactWriter:
     generator: LocalTextGenerator
     fallback: ArtifactWriter
-    prompts: PromptSet = DEFAULT_PROMPT_SET
+    prompts: PromptSet = field(default_factory=lambda: DEFAULT_PROMPT_SET)
     trace_sink: ModelTraceCollector | None = None
     progress_sink: Callable[[str], None] | None = None
     exception_logger: SessionExceptionLogger | None = None
