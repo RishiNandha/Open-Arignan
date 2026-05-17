@@ -399,12 +399,17 @@ def create_launchers(root: Path | None = None, app_home: Path | None = None) -> 
     bin_dir = resolved_root / "bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
 
-    python_executable = Path(sys.executable).resolve()
+    # Use absolute() rather than resolve() so that the venv symlink (e.g.
+    # .venv/bin/python3.11) is preserved as-is.  resolve() would follow the
+    # symlink all the way to the real interpreter (e.g. the Homebrew Python),
+    # which lives outside the venv and doesn't have this package installed.
+    python_executable = Path(sys.executable).absolute()
     app_home_arg_windows = f' --app-home "{Path(app_home).resolve()}"' if app_home is not None else ""
     app_home_arg_posix = f" --app-home {_quote_posix_argument(str(Path(app_home).resolve()))}" if app_home is not None else ""
     windows_launcher = bin_dir / "arignan.cmd"
     windows_launcher.write_text(
         "@echo off\r\n"
+        "set TOKENIZERS_PARALLELISM=false\r\n"
         f"\"{python_executable}\" -m arignan.cli{app_home_arg_windows} %*\r\n",
         encoding="utf-8",
     )
@@ -412,6 +417,7 @@ def create_launchers(root: Path | None = None, app_home: Path | None = None) -> 
     posix_launcher = bin_dir / "arignan"
     posix_launcher.write_text(
         "#!/usr/bin/env sh\n"
+        "export TOKENIZERS_PARALLELISM=false\n"
         f"{_quote_posix_argument(str(python_executable))} -m arignan.cli{app_home_arg_posix} \"$@\"\n",
         encoding="utf-8",
     )
@@ -436,6 +442,11 @@ def run_setup(
     effective_embedding_model = DEFAULT_LIGHT_EMBEDDING_MODEL_REPO_ID if lightweight else None
     effective_reranker_model = DEFAULT_LIGHT_RERANKER_MODEL_REPO_ID if lightweight else None
     _emit(progress, "[1/4] Installing Python package...")
+    try:
+        existing_version = metadata.version("open-arignan")
+        _emit(progress, f"Existing open-arignan {existing_version} detected in this environment; reinstalling.")
+    except metadata.PackageNotFoundError:
+        pass
     target = install_package(root=root, dev=dev)
     verify_required_ml_runtime()
     _emit(progress, "[2/4] Initializing local Arignan state...")

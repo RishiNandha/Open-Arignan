@@ -56,6 +56,27 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _check_venv() -> None:
+    """Abort early if setup is not running inside a virtual environment.
+
+    Installing into a system or user Python risks package-version conflicts
+    (e.g. torch / sentence-transformers) that are hard to undo.  A venv keeps
+    the install fully isolated and is the only supported setup path.
+    """
+    if sys.prefix == sys.base_prefix:
+        print(
+            "\n[error] Arignan setup must be run inside a Python virtual environment.\n"
+            "Installing into the system or user Python can corrupt existing packages.\n\n"
+            "Create and activate a virtual environment first:\n"
+            "  python3 -m venv .venv\n"
+            "  source .venv/bin/activate    # macOS / Linux\n"
+            "  .venv\\Scripts\\activate       # Windows\n\n"
+            "Then rerun:  python setup.py [options]",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+
+
 def _choose_app_home_action(inspection) -> str:
     if not inspection.exists or not inspection.entries:
         return "fresh"
@@ -80,6 +101,7 @@ def main() -> int:
     if is_packaging_invocation(sys.argv):
         setuptools_setup()
         return 0
+    _check_venv()
     from arignan.setup_flow import render_summary, run_setup
 
     args = build_parser().parse_args()

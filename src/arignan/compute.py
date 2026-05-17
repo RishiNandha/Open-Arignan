@@ -15,7 +15,11 @@ def preferred_torch_device(sink: callable | None = None) -> str:
     #         sink("Torch Imported")
     # except ImportError:  # pragma: no cover
     #     return "cpu"
-    return "cuda" if torch.cuda.is_available() else "cpu"
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
 
 
 def release_torch_cuda_memory() -> bool:
