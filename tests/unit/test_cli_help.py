@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import subprocess
+import sys
+
 from arignan.cli import build_parser, main
 
 
@@ -12,6 +15,21 @@ def test_root_help_is_readable_and_avoids_subparser_ellipsis() -> None:
     assert "-gui" in help_text
     assert "load" in help_text
     assert "ask" in help_text
+
+
+def test_cli_module_is_runnable_via_python_m(tmp_path) -> None:
+    # The shell launcher calls `python -m arignan.cli`.  Verify that the
+    # __main__ guard is present so the invocation actually calls main()
+    # rather than silently importing the module and exiting.
+    result = subprocess.run(
+        [sys.executable, "-m", "arignan.cli", "--help"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "usage: arignan" in result.stdout
+    assert "load" in result.stdout
+    assert "ask" in result.stdout
 
 
 def test_gui_flag_dispatches_to_gui_launcher(monkeypatch, tmp_path) -> None:

@@ -25,6 +25,7 @@ from arignan.setup_flow import (
     render_summary,
     resolve_ollama_model_id,
     resolve_model_repo_id,
+    run_setup,
     sanitize_model_id,
     verify_required_ml_runtime,
 )
@@ -55,6 +56,31 @@ def test_install_package_uses_no_deps_to_avoid_resolving_user_environment(tmp_pa
             True,
         )
     ]
+
+
+def test_run_setup_logs_existing_installation_before_reinstalling(tmp_path: Path, monkeypatch) -> None:
+    progress_messages: list[str] = []
+
+    # Simulate an already-installed version of the package.
+    monkeypatch.setattr("arignan.setup_flow.metadata.version", lambda _name: "0.9.0")
+
+    # Stub out everything that does real work so the test stays fast.
+    monkeypatch.setattr("arignan.setup_flow.install_package", lambda **_kw: ".")
+    monkeypatch.setattr("arignan.setup_flow.verify_required_ml_runtime", lambda: None)
+    monkeypatch.setattr("arignan.setup_flow.download_required_models", lambda *_a, **_kw: tmp_path / "models")
+    monkeypatch.setattr(
+        "arignan.setup_flow.create_launchers",
+        lambda **_kw: (tmp_path / "bin", tmp_path / "bin" / "arignan.cmd", tmp_path / "bin" / "arignan"),
+    )
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    run_setup(app_home=tmp_path / ".arignan", progress=progress_messages.append)
+
+    reinstall_notice = next(
+        (m for m in progress_messages if "0.9.0" in m and "reinstalling" in m),
+        None,
+    )
+    assert reinstall_notice is not None, f"Expected reinstall notice in progress messages: {progress_messages}"
 
 
 def test_create_launchers_writes_bin_scripts(tmp_path: Path, monkeypatch) -> None:
