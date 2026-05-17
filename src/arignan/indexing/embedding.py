@@ -156,6 +156,17 @@ def create_embedder(
     if eager_load and progress_sink is not None:
         progress_sink(f"Preparing local embedding model ({config.embedding_model})... (from embedding.py)")
     
+    # Security: verify the resolved model directory is inside app_home.  This
+    # prevents a tampered config file from pointing model_source at an arbitrary
+    # path on disk (which PyTorch would pickle-load, giving arbitrary code exec).
+    try:
+        model_dir.resolve().relative_to(config.app_home.resolve())
+    except ValueError:
+        raise RuntimeError(
+            f"Embedding model path '{model_dir}' is outside of app_home "
+            f"'{config.app_home}'. Model paths must reside within app_home."
+        )
+
     if not model_dir.exists():
         raise RuntimeError(_missing_embedder_model_error(config.embedding_model, model_dir))
     

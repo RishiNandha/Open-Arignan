@@ -10,8 +10,15 @@ SENTENCE_BOUNDARY_PATTERN = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9\"'(\[])")
 CLAUSE_BOUNDARY_PATTERN = re.compile(r"(?<=[;:])\s+|(?<=,)\s+(?=[A-Z0-9\"'(\[])")
 NUMERIC_CITATION_PATTERN = re.compile(r"\[(?:\d+(?:\s*[-,]\s*\d+)*)\]")
 MARKDOWN_CITATION_PATTERN = re.compile(r"\[@[^\]]+\]|\[\^[^\]]+\]")
+# Safety note: the original pattern used nested quantifiers with alternation which
+# caused catastrophic backtracking on adversarial input (ReDoS).  The replacement
+# below is intentionally simple: it matches a parenthesised span that starts with
+# an uppercase letter, contains at most 200 non-')' characters, and ends with a
+# 4-digit year (optionally followed by a single lowercase disambiguator).  The
+# negated character class [^)] makes the inner match possessive-like in CPython's
+# regex engine — it cannot backtrack across paren boundaries — so matching is O(n).
 AUTHOR_YEAR_CITATION_PATTERN = re.compile(
-    r"\((?:[A-Z][A-Za-z'`\-]+(?:\s+(?:and|&)\s+[A-Z][A-Za-z'`\-]+|\s+et al\.)?,\s*(?:19|20)\d{2}[a-z]?)(?:;\s*(?:[A-Z][A-Za-z'`\-]+(?:\s+(?:and|&)\s+[A-Z][A-Za-z'`\-]+|\s+et al\.)?,\s*(?:19|20)\d{2}[a-z]?))*\)"
+    r"\([A-Z][^)]{1,200}(?:19|20)\d{2}[a-z]?\)"
 )
 REFERENCE_HEADING_PATTERN = re.compile(r"^(references|bibliography|works cited|citations?)$", re.IGNORECASE)
 REFERENCE_BLOCK_PATTERN = re.compile(
