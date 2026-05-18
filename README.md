@@ -23,7 +23,31 @@
 3. Your browser opens locally
 4. Use **Add More Files To Knowledge Base** to load material, then ask questions in the chat box
 
-### Option 3: MCP
+### Option 3: No Ollama — HuggingFace-only (runs everything through Python)
+
+> Use this if you **don't want to install Ollama** at all. All model inference runs directly inside Python via HuggingFace Transformers. The trade-off is slightly higher RAM usage and no streaming, but zero extra tooling.
+
+1. Clone the repo: `git clone https://github.com/RishiNandha/Open-Arignan`
+2. Run setup with the `transformers` backend and the lightweight `qwen3:0.6b` model:
+   ```bash
+   python setup.py --app-home <install dir> \
+       --llm-backend transformers \
+       --llm-model Qwen/Qwen3-0.6B \
+       --lightweight
+   ```
+   This downloads **only** HuggingFace models — Ollama is never called.
+3. Add the printed bin directory to your PATH.
+4. Use exactly like any other install:
+   ```bash
+   arignan load "paper.pdf"
+   arignan ask "What does this paper say about attention?"
+   ```
+
+> **Requirements:** Python 3.10+, ~4 GB free disk space for models, ~2 GB RAM. No GPU required (CPU inference works, just slower).
+
+---
+
+### Option 4: MCP
 
 1. Run  `python setup.py --app-home <install dir>`
 
@@ -262,22 +286,42 @@ When the chat history is becoming too long:
 
 ### For Users
 
-1. Setup: `python setup.py --app-home <install dir>`. 
-2. Optional lightweight setup for smaller GPUs: `python setup.py --app-home <install dir> --lightweight`
-3. Optional smaller/custom local model during setup: `python setup.py --app-home <install dir> --llm-model <model_name> --llm-backend ollama`
-4. Optional post-setup model change: edit `settings.json` 
-5. Add **Bin directory** to PATH. The setup.py will automatically print the bin directory for you.
-6. Help: `arignan --help`
-7. Load: `arignan load "filename.pdf"`
-8. Load with hat: `arignan load "flename.pdf" --hat psychology`
-9. QnA: `arignan ask "What is JEPA?"`
-10. QnA with hat: `arignan ask "How to use CalibreRC" --hat "IC Design"`
-11. Optional answer mode: `arignan ask "What is JEPA?" --answer-mode light`
-12. Ingestion Log: `arignan list-loads`
-13. Delete a past ingestion: `arignan delete <load_id>`
-14. Reset context: `arignan reset-session`
-15. Save context: `arignan save-session <path/session_name.json>`
-16. Reload context: `arignan load-session <path/session_name.json>`
+#### With Ollama (default — recommended)
+1. [Install Ollama](https://ollama.com/download) and make sure it is running.
+2. Setup: `python setup.py --app-home <install dir>`
+3. Optional lightweight setup for smaller GPUs: `python setup.py --app-home <install dir> --lightweight`
+4. Optional smaller/custom local model during setup: `python setup.py --app-home <install dir> --llm-model <model_name> --llm-backend ollama`
+5. Optional post-setup model change: edit `settings.json`
+
+#### Without Ollama — HuggingFace / Transformers backend
+If you prefer not to install Ollama, Arignan can run the answer model entirely through Python using HuggingFace Transformers. This is the fastest way to get started on any machine that has Python already.
+
+```bash
+python setup.py --app-home <install dir> \
+    --llm-backend transformers \
+    --llm-model Qwen/Qwen3-0.6B \
+    --lightweight
+```
+
+- `--llm-backend transformers` — skips Ollama entirely; model is loaded directly into Python
+- `--llm-model Qwen/Qwen3-0.6B` — the default lightweight answer model (~400 MB download)
+- `--lightweight` — also selects smaller embedding and reranker models to keep total footprint low
+
+After setup, **all the same CLI commands work unchanged** — no need to specify a backend again.
+
+#### Common commands (apply to both backends)
+1. Add **Bin directory** to PATH. The setup.py will automatically print the bin directory for you.
+2. Help: `arignan --help`
+3. Load: `arignan load "filename.pdf"`
+4. Load with hat: `arignan load "filename.pdf" --hat psychology`
+5. QnA: `arignan ask "What is JEPA?"`
+6. QnA with hat: `arignan ask "How to use CalibreRC" --hat "IC Design"`
+7. Optional answer mode: `arignan ask "What is JEPA?" --answer-mode light`
+8. Ingestion Log: `arignan list-loads`
+9. Delete a past ingestion: `arignan delete <load_id>`
+10. Reset context: `arignan reset-session`
+11. Save context: `arignan save-session <path/session_name.json>`
+12. Reload context: `arignan load-session <path/session_name.json>`
 
 #### Prompt Editing
 
