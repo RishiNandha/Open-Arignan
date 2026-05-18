@@ -1454,6 +1454,19 @@ def generate_answer(
 
     if progress_sink is not None:
         progress_sink(f"Hitting local LLM for answer generation ({generator.model_name})...")
+
+    # Derive a per-passage character limit from the generator's configured context
+    # window so that we don't silently overflow it.  The fallback (8192 tokens)
+    # is conservative but avoids hard errors when the generator doesn't expose
+    # a config attribute (e.g. during tests with a mock generator).
+    context_window_tokens: int = (
+        getattr(getattr(generator, "config", None), "local_llm_context_window", None) or 8192
+    )
+    # Reserve ≈35% of the token budget for system prompt, question, session
+    # history, XML tags, and the generated response itself.
+    available_passage_chars = int(context_window_tokens * 4 * 0.65)
+    max_passage_chars = max(400, min(1200, available_passage_chars // max(context_limit, 1)))
+
     prompt = _build_answer_prompt(
         question,
         hits,
@@ -1462,7 +1475,21 @@ def generate_answer(
         selected_hat=selected_hat,
         session=session,
         template=prompts.answer_user_template,
+        max_passage_chars=max_passage_chars,
     )
+
+    # Warn if the assembled prompt is close to the context window budget so the
+    # user knows silently-degraded answers might result.
+    estimated_prompt_chars = len(prompt)
+    budget_chars = context_window_tokens * 4
+    if estimated_prompt_chars > int(budget_chars * 0.85) and progress_sink is not None:
+        progress_sink(
+            f"Warning: assembled prompt (~{estimated_prompt_chars:,} chars) approaches the "
+            f"configured context window ({context_window_tokens:,} tokens / ~{budget_chars:,} chars). "
+            "The model may silently truncate earlier context, producing less accurate answers. "
+            "Consider reducing answer_context_top_k or increasing local_llm_context_window in settings."
+        )
+
     try:
         raw = _generate_with_chat_messages(
             generator,
@@ -1615,6 +1642,7 @@ def _build_answer_prompt(
     selected_hat: str,
     session: SessionState | None,
     template: str = DEFAULT_PROMPT_SET.answer_user_template,
+    max_passage_chars: int = 1200,
 ) -> str:
     question_intent, focus_topic, answer_brief = describe_question(question)
     session_summary_block, recent_dialogue_block = _session_prompt_blocks(session, question=question)
@@ -1625,7 +1653,7 @@ def _build_answer_prompt(
         retrieved_passages.extend(
             [
                 f"<passage rank=\"{index}\" score=\"{float(score):.3f}\" citation=\"{format_citation(hit)}\">",
-                _truncate_text(hit.text, 1200),
+                _truncate_text(hit.text, max_passage_chars),
                 "</passage>",
             ]
         )

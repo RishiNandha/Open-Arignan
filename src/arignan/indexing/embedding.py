@@ -33,10 +33,15 @@ class Embedder(Protocol):
         """Embed a single query string."""
 
 
+_MAX_HASHING_EMBEDDER_DIMENSION = 65_536
+
+
 class HashingEmbedder:
     def __init__(self, dimension: int = 24, model_name: str = DEFAULT_EMBEDDING_MODEL) -> None:
         if dimension <= 0:
             raise ValueError("dimension must be positive")
+        if dimension > _MAX_HASHING_EMBEDDER_DIMENSION:
+            raise ValueError(f"dimension must not exceed {_MAX_HASHING_EMBEDDER_DIMENSION}")
         self.dimension = dimension
         self.model_name = model_name
         self.backend_name = "hashing-embedder"

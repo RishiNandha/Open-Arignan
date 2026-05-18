@@ -9,6 +9,7 @@ from typing import Callable
 from arignan.indexing import DenseIndexer, Embedder, HashingEmbedder, LexicalIndex, LexicalIndexer, LocalDenseIndex, tokenize
 from arignan.models import ChunkMetadata, RetrievalHit, RetrievalSource
 from arignan.storage import StorageLayout
+from arignan.storage.layout import validate_hat_name
 from arignan.tracing import ModelTraceCollector
 
 ABBREVIATIONS = {
@@ -31,8 +32,15 @@ class RetrievalBundle:
     fused_hits: list[RetrievalHit]
 
 
+_MAX_QUERY_INPUT_CHARS = 4_096
+_MAX_QUERY_EXPANDED_CHARS = 8_192
+
+
 class QueryExpander:
     def expand(self, query: str) -> str:
+        # Cap input length to prevent memory-exhaustion via giant queries.
+        if len(query) > _MAX_QUERY_INPUT_CHARS:
+            query = query[:_MAX_QUERY_INPUT_CHARS]
         normalized_tokens: list[str] = []
         raw_query = " ".join(query.split()).strip()
         for token in tokenize(raw_query):
@@ -43,7 +51,9 @@ class QueryExpander:
         if focus_phrase:
             normalized_tokens.extend(tokenize(focus_phrase))
         normalized_tokens.extend(_intent_hint_tokens(raw_query, focus_phrase))
-        return " ".join(_dedupe_preserve_order(normalized_tokens))
+        result = " ".join(_dedupe_preserve_order(normalized_tokens))
+        # Cap expanded result to prevent downstream DoS.
+        return result[:_MAX_QUERY_EXPANDED_CHARS]
 
 
 def describe_question(query: str) -> tuple[str, str, str]:
@@ -87,6 +97,15 @@ class HatSelector:
 
     def select(self, query: str, hat: str = "auto") -> str:
         if hat != "auto":
+            # Validate format (catches path traversal, null bytes, etc.) and
+            # confirm the hat actually exists so callers get an early, clear error
+            # rather than a confusing failure deep in the retrieval stack.
+            validate_hat_name(hat)
+            if not (self.layout.hats_dir / hat).is_dir():
+                raise ValueError(
+                    f"Hat {hat!r} does not exist. "
+                    f"Available hats: {sorted(p.name for p in self.layout.hats_dir.iterdir() if p.is_dir()) or ['(none)']}"
+                )
             return hat
         hats = sorted(path.name for path in self.layout.hats_dir.iterdir() if path.is_dir())
         if not hats:
@@ -275,7 +294,7 @@ def split_markdown_sections(text: str) -> list[tuple[str | None, str]]:
 
 
 def map_chunk_id(path: Path, index: int, heading: str | None, text: str) -> str:
-    digest = hashlib.sha1(f"{path}|{index}|{heading}|{text}".encode("utf-8")).hexdigest()[:12]
+    digest = hashlib.sha256(f"{path}|{index}|{heading}|{text}".encode("utf-8")).hexdigest()[:20]
     return f"map-{digest}"
 
 

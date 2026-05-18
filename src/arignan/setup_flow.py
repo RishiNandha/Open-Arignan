@@ -394,6 +394,23 @@ def _migrate_legacy_retrieval_defaults(settings_path: Path) -> None:
         settings_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
+def _escape_batch_argument(value: str) -> str:
+    """Escape a string for safe embedding inside a Windows batch double-quoted argument.
+
+    In CMD batch files, a literal double-quote inside a quoted string is written
+    as two consecutive double-quotes ("").  Control characters that cannot be
+    represented inside a batch argument (CR, LF, NUL) cause a ValueError so the
+    caller gets a clear error rather than a silently broken launcher.
+    """
+    for bad_char, label in (("\r", "carriage return"), ("\n", "newline"), ("\x00", "null byte")):
+        if bad_char in value:
+            raise ValueError(
+                f"App home path contains a {label} (0x{ord(bad_char):02x}) that cannot be safely "
+                "embedded in a Windows batch launcher. Please choose a different installation path."
+            )
+    return value.replace('"', '""')
+
+
 def create_launchers(root: Path | None = None, app_home: Path | None = None) -> tuple[Path, Path, Path]:
     resolved_root = (root or repo_root()).resolve()
     bin_dir = resolved_root / "bin"
@@ -404,8 +421,13 @@ def create_launchers(root: Path | None = None, app_home: Path | None = None) -> 
     # symlink all the way to the real interpreter (e.g. the Homebrew Python),
     # which lives outside the venv and doesn't have this package installed.
     python_executable = Path(sys.executable).absolute()
-    app_home_arg_windows = f' --app-home "{Path(app_home).resolve()}"' if app_home is not None else ""
-    app_home_arg_posix = f" --app-home {_quote_posix_argument(str(Path(app_home).resolve()))}" if app_home is not None else ""
+    if app_home is not None:
+        app_home_resolved = str(Path(app_home).resolve())
+        app_home_arg_windows = f' --app-home "{_escape_batch_argument(app_home_resolved)}"'
+        app_home_arg_posix = f" --app-home {_quote_posix_argument(app_home_resolved)}"
+    else:
+        app_home_arg_windows = ""
+        app_home_arg_posix = ""
     windows_launcher = bin_dir / "arignan.cmd"
     windows_launcher.write_text(
         "@echo off\r\n"

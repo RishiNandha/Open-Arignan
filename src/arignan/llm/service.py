@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -11,6 +12,27 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
+
+# Ollama model names follow the pattern: [namespace/]name[:tag]
+# Allowed characters: alphanumeric, dot, hyphen, underscore, colon, slash.
+# Max length 200 to prevent request smuggling via oversized names.
+_OLLAMA_MODEL_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._/:-]{0,199}$")
+
+
+def _validate_ollama_model_name(name: str) -> None:
+    """Reject model names that don't match the expected Ollama format.
+
+    Although the model name is passed to the Ollama REST API via JSON (not a
+    shell), an invalid name could still trigger unexpected behaviour in the
+    Ollama server or be used to craft malformed requests.  Early validation
+    gives the user a clear error instead of a cryptic downstream failure.
+    """
+    if not name or not _OLLAMA_MODEL_NAME_RE.match(name):
+        raise ValueError(
+            f"Invalid Ollama model name {name!r}. "
+            "Model names must start with an alphanumeric character and may only contain "
+            "letters, digits, '.', '_', '-', '/', and ':'."
+        )
 
 WINDOWS_OLLAMA_AMD64_ZIP_URL = "https://ollama.com/download/ollama-windows-amd64.zip"
 
@@ -144,6 +166,7 @@ def ensure_model_available(
     progress: Callable[[str], None] | None = None,
     timeout_seconds: float = 1800.0,
 ) -> None:
+    _validate_ollama_model_name(model)
     ensure_service_running(
         app_home,
         endpoint,
