@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import hashlib
+import threading
 from dataclasses import replace
 from pathlib import Path
 from typing import Protocol
@@ -33,6 +34,11 @@ class LocalDenseIndex:
         self.storage_dir.mkdir(parents=True, exist_ok=True)
         self.storage_path = self.storage_dir / "dense_index.json"
         self.collection_name = "arignan_chunks"
+        # Protects the fallback JSON index against concurrent read-modify-write
+        # from multiple threads in the same process.  Cross-process locking is
+        # handled by Qdrant when that backend is active; for the JSON fallback
+        # single-process multi-thread safety is the common case that matters.
+        self._write_lock = threading.Lock()
         self._qdrant_client = self._try_create_qdrant_client()
         if self._qdrant_client is None and not self.storage_path.exists():
             self.storage_path.write_text("[]\n", encoding="utf-8")
@@ -41,15 +47,14 @@ class LocalDenseIndex:
         if self._qdrant_client is not None:
             self._upsert_qdrant(chunks)
             return
-        existing = {chunk.chunk_id: chunk for chunk in self.all_chunks()}
-        for chunk in chunks:
-            if chunk.embedding is None:
-                raise ValueError("chunk embedding must be set before indexing")
-            existing[chunk.chunk_id] = chunk
-        payload = [chunk.to_dict() for chunk in existing.values()]
-        with self.storage_path.open("w", encoding="utf-8") as handle:
-            json.dump(payload, handle, indent=2)
-            handle.write("\n")
+        with self._write_lock:
+            existing = {chunk.chunk_id: chunk for chunk in self.all_chunks()}
+            for chunk in chunks:
+                if chunk.embedding is None:
+                    raise ValueError("chunk embedding must be set before indexing")
+                existing[chunk.chunk_id] = chunk
+            payload = [chunk.to_dict() for chunk in existing.values()]
+            self._atomic_write_json(payload)
 
     def search(self, query_embedding: list[float], limit: int) -> list[RetrievalHit]:
         if self._qdrant_client is not None:
@@ -74,10 +79,22 @@ class LocalDenseIndex:
         if self._qdrant_client is not None:
             self._delete_load_qdrant(load_id)
             return
-        remaining = [chunk for chunk in self.all_chunks() if chunk.metadata.load_id != load_id]
-        with self.storage_path.open("w", encoding="utf-8") as handle:
-            json.dump([chunk.to_dict() for chunk in remaining], handle, indent=2)
+        with self._write_lock:
+            remaining = [chunk for chunk in self.all_chunks() if chunk.metadata.load_id != load_id]
+            self._atomic_write_json([chunk.to_dict() for chunk in remaining])
+
+    def _atomic_write_json(self, payload: list[object]) -> None:
+        """Write payload to the index file atomically via a temp-file rename.
+
+        Using os.replace() (atomic on POSIX, as-atomic-as-possible on Windows)
+        ensures readers never observe a partially-written file.
+        """
+        tmp_path = self.storage_path.with_suffix(".tmp")
+        with tmp_path.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
             handle.write("\n")
+            handle.flush()
+        tmp_path.replace(self.storage_path)
 
     def all_chunks(self) -> list[ChunkRecord]:
         if self._qdrant_client is not None:
@@ -294,4 +311,4 @@ def cosine_similarity(left: list[float], right: list[float]) -> float:
 
 
 def _qdrant_id(chunk_id: str) -> int:
-    return int(hashlib.sha1(chunk_id.encode("utf-8")).hexdigest()[:15], 16)
+    return int(hashlib.sha256(chunk_id.encode("utf-8")).hexdigest()[:15], 16)

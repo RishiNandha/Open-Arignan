@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import ipaddress
 import logging
+import socket
+import urllib.parse
 from contextlib import contextmanager
 from dataclasses import dataclass
 from html.parser import HTMLParser
@@ -35,11 +38,57 @@ class PdfOcrRequired(RuntimeError):
     """Raised when a PDF lacks embedded text and should be retried with OCR enabled."""
 
 
+def _validate_fetch_url(url: str) -> None:
+    """Reject URLs that could be used for SSRF attacks.
+
+    Enforces http/https-only, resolves the hostname to an IP address at
+    validation time to prevent DNS-rebinding attacks, and blocks all private,
+    loopback, link-local, and reserved address ranges.
+    """
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except Exception as exc:
+        raise ValueError(f"Malformed URL: {exc}") from exc
+
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError(
+            f"Unsupported URL scheme {parsed.scheme!r}. Only 'http' and 'https' are permitted."
+        )
+    host = parsed.hostname
+    if not host:
+        raise ValueError("URL contains no hostname.")
+
+    try:
+        addr_infos = socket.getaddrinfo(host, None)
+    except socket.gaierror as exc:
+        raise ValueError(f"Unable to resolve hostname for URL: {exc}") from exc
+
+    for family, _type, _proto, _canonname, sockaddr in addr_infos:
+        raw_addr = sockaddr[0]
+        try:
+            addr = ipaddress.ip_address(raw_addr)
+        except ValueError:
+            continue
+        if (
+            addr.is_loopback
+            or addr.is_private
+            or addr.is_link_local
+            or addr.is_reserved
+            or addr.is_multicast
+            or addr.is_unspecified
+        ):
+            raise ValueError(
+                "Outbound requests to private, loopback, or link-local addresses are not permitted. "
+                "The URL resolves to a reserved address range."
+            )
+
+
 class HttpUrlFetcher:
     def __init__(self, timeout_seconds: float = 20.0) -> None:
         self.timeout_seconds = timeout_seconds
 
     def fetch(self, url: str) -> FetchedUrl:
+        _validate_fetch_url(url)
         response = httpx.get(url, follow_redirects=True, timeout=self.timeout_seconds)
         response.raise_for_status()
         return FetchedUrl(url=str(response.url), html=response.text)

@@ -266,8 +266,9 @@ def create_gui_app(app: ArignanApp) -> FastAPI:
         files: list[UploadFile] = File(...),
     ) -> dict[str, object]:
         upload_root = app.config.app_home / "gui_uploads"
-        upload_root.mkdir(parents=True, exist_ok=True)
+        upload_root.mkdir(parents=True, exist_ok=True, mode=0o700)
         batch_dir = Path(tempfile.mkdtemp(prefix="batch-", dir=str(upload_root)))
+        os.chmod(batch_dir, 0o700)
         try:
             written_files = await _write_uploaded_files(batch_dir, files)
         except Exception:
@@ -473,8 +474,9 @@ async def _handle_direct_load(app: ArignanApp, *, hat: str, files: list[UploadFi
     if not files:
         raise HTTPException(status_code=400, detail="No files selected.")
     upload_root = app.config.app_home / "gui_uploads"
-    upload_root.mkdir(parents=True, exist_ok=True)
+    upload_root.mkdir(parents=True, exist_ok=True, mode=0o700)
     batch_dir = Path(tempfile.mkdtemp(prefix="batch-", dir=str(upload_root)))
+    os.chmod(batch_dir, 0o700)
     try:
         written_files = await _write_uploaded_files(batch_dir, files)
         result = app.load(str(batch_dir), hat=hat)

@@ -166,7 +166,7 @@ def compose_topic_markdown(documents: list[ParsedDocument], plan: GroupingPlan) 
                     markdown_table_cell(document_title),
                     markdown_table_cell(compose_document_summary(document)),
                     markdown_table_cell(natural_join(headings[:3]) if headings else document_outline(document)),
-                    f"`{source_ref}`",
+                    f"`{_escape_code_span(source_ref)}`",
                 ]
             )
             + " |"
@@ -241,7 +241,7 @@ def compose_topic_index_markdown(
                 [
                     markdown_table_cell(document.source.title or source_name(document)),
                     markdown_table_cell(compose_document_summary(document)),
-                    f"`{source_ref}`",
+                    f"`{_escape_code_span(source_ref)}`",
                 ]
             )
             + " |"
@@ -488,11 +488,11 @@ def compose_document_lead(document: ParsedDocument) -> str:
     headings = collect_semantic_headings([document], limit=3)
     if headings:
         return (
-            f"This source is derived from `{source_ref}` and is mainly organized around {natural_join(headings)}. "
+            f"This source is derived from `{_escape_code_span(source_ref)}` and is mainly organized around {natural_join(headings)}. "
             f"The extracted notes below focus on the most readable high-signal material."
         )
     return (
-        f"This source is derived from `{source_ref}`. "
+        f"This source is derived from `{_escape_code_span(source_ref)}`. "
         f"The extracted notes below focus on the most readable high-signal material."
     )
 
@@ -687,8 +687,33 @@ def dedupe_preserve_order(values: list[str]) -> list[str]:
     return ordered
 
 
+def _escape_code_span(value: str) -> str:
+    """Remove backticks from a string that will be embedded in a Markdown inline code span.
+
+    A backtick inside a single-backtick code span terminates the span early,
+    potentially allowing an adversarial filename to inject arbitrary Markdown.
+    Stripping backticks is safe for display purposes since filenames rarely
+    contain them legitimately.
+    """
+    return value.replace("`", "")
+
+
 def markdown_table_cell(value: str) -> str:
-    return value.replace("|", "\\|").replace("\n", " ").strip() or "-"
+    # Escape characters that carry structural meaning in Markdown:
+    #   | — breaks table columns
+    #   [ — starts a link or image reference
+    #   < — starts raw HTML
+    # Escaping \[ prevents adversarial document titles from being rendered as
+    # hyperlinks or images in the generated knowledge-base markdown files.
+    return (
+        value
+        .replace("|", "\\|")
+        .replace("[", "\\[")
+        .replace("<", "&lt;")
+        .replace("\n", " ")
+        .strip()
+        or "-"
+    )
 
 
 def _meaningful_sentences(document: ParsedDocument) -> list[str]:
