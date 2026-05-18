@@ -314,7 +314,7 @@ class LLMArtifactWriter:
             component="llm",
             task=task,
             exc=exc,
-            context=context,
+            context=_sanitize_exception_context(context),
         )
 
     @staticmethod
@@ -323,6 +323,32 @@ class LLMArtifactWriter:
         if log_path is None:
             return message
         return f"{message} Log: {log_path.resolve()}"
+
+
+# Keys whose values may contain filesystem paths or partial document text that
+# could appear in shared exception logs or bug reports.
+_SENSITIVE_CONTEXT_KEYS: frozenset[str] = frozenset(
+    {"document", "text", "content", "chunk", "path", "source"}
+)
+
+
+def _sanitize_exception_context(context: dict[str, object]) -> dict[str, object]:
+    """Strip potentially-sensitive values from an exception context dictionary.
+
+    Path objects and values associated with sensitive keys are replaced with
+    a placeholder so that filesystem layout and partial document content do not
+    appear verbatim in exception log files that may be shared for debugging.
+    Non-sensitive scalars (counts, names, status strings) are kept as-is.
+    """
+    clean: dict[str, object] = {}
+    for key, value in context.items():
+        if isinstance(value, Path):
+            clean[key] = "<redacted-path>"
+        elif key in _SENSITIVE_CONTEXT_KEYS:
+            clean[key] = "<redacted>"
+        else:
+            clean[key] = value
+    return clean
 
 
 # ---------------------------------------------------------------------------

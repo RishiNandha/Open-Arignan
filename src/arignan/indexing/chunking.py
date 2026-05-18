@@ -53,12 +53,20 @@ class _SectionSpan:
     section_label: str
 
 
+_MAX_CHUNK_SIZE = 32_768
+_MAX_CHUNK_OVERLAP = 8_192
+
+
 class Chunker:
     def __init__(self, chunk_size: int = 2800, chunk_overlap: int = 160) -> None:
         if chunk_size <= 0:
             raise ValueError("chunk_size must be positive")
+        if chunk_size > _MAX_CHUNK_SIZE:
+            raise ValueError(f"chunk_size must not exceed {_MAX_CHUNK_SIZE}")
         if chunk_overlap < 0:
             raise ValueError("chunk_overlap must not be negative")
+        if chunk_overlap > _MAX_CHUNK_OVERLAP:
+            raise ValueError(f"chunk_overlap must not exceed {_MAX_CHUNK_OVERLAP}")
         if chunk_overlap >= chunk_size:
             raise ValueError("chunk_overlap must be smaller than chunk_size")
         self.chunk_size = chunk_size
@@ -359,7 +367,10 @@ class Chunker:
         piece_index: int,
         chunk_text: str,
     ) -> str:
-        digest = hashlib.sha1(
+        # SHA-256 truncated to 20 hex chars gives 80 bits of entropy, making
+        # birthday collisions negligible even at millions of chunks.
+        # (The prior SHA-1/12-char scheme gave only 48 bits.)
+        digest = hashlib.sha256(
             f"{document.load_id}|{document.source.source_uri}|{section_index}|{piece_index}|{chunk_text}".encode("utf-8")
-        ).hexdigest()[:12]
+        ).hexdigest()[:20]
         return f"chunk-{digest}"
