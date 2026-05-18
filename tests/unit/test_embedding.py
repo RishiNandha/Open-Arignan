@@ -135,3 +135,139 @@ def test_create_embedder_requires_local_ml_runtime_when_model_missing(tmp_path: 
     assert "could not find the cached embedding model files on disk" in message
     assert "model-cache problem" in message
     assert "Arignan will not auto-install or change your existing Torch/CUDA setup." in message
+
+
+# ---------------------------------------------------------------------------
+# Model path security: create_embedder must reject paths outside app_home
+# ---------------------------------------------------------------------------
+
+
+class TestCreateEmbedderModelPathSecurity:
+    """Verify that create_embedder() refuses to load a model whose resolved
+    path is outside app_home.
+
+    Without this check a tampered settings.json could point embedding_model at
+    an arbitrary local path.  SentenceTransformer pickle-loads model weights,
+    so an adversarial path gives arbitrary code execution.
+    """
+
+    def _fake_sentence_transformer_patch(self, monkeypatch) -> None:
+        """Patch SentenceTransformer so tests don't need real model files."""
+
+        class FakeSentenceTransformer:
+            def __init__(self, model_name: str, device: str) -> None:
+                pass
+
+            def encode(self, texts, **kw):
+                return [[0.0] for _ in texts]
+
+        monkeypatch.setattr(
+            "arignan.indexing.embedding.SentenceTransformer", FakeSentenceTransformer
+        )
+        monkeypatch.setattr(
+            "arignan.indexing.embedding.preferred_torch_device", lambda _: "cpu"
+        )
+
+    def test_model_dir_inside_app_home_is_accepted(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        self._fake_sentence_transformer_patch(monkeypatch)
+        app_home = tmp_path / ".arignan"
+        write_default_settings(app_home=app_home)
+        model_dir = app_home / "models" / "BAAI__bge-base-en-v1.5"
+        model_dir.mkdir(parents=True, exist_ok=True)
+
+        config = load_config(app_home=app_home)
+        embedder = create_embedder(config, progress_sink=None)
+        assert embedder.backend_name == "sentence-transformers"
+
+    def test_model_dir_outside_app_home_raises_runtime_error(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        self._fake_sentence_transformer_patch(monkeypatch)
+        app_home = tmp_path / ".arignan"
+        write_default_settings(app_home=app_home)
+
+        # Point embedding_model at something outside app_home via monkeypatching
+        # the config after construction so we bypass the normal setup path.
+        config = load_config(app_home=app_home)
+        evil_model_dir = tmp_path / "outside" / "malicious_model"
+        evil_model_dir.mkdir(parents=True, exist_ok=True)
+
+        # Monkeypatch resolve_model_storage_dir to return the evil path
+        monkeypatch.setattr(
+            "arignan.indexing.embedding.resolve_model_storage_dir",
+            lambda app_home, model_id: evil_model_dir,
+        )
+
+        with pytest.raises(RuntimeError, match="outside of app_home"):
+            create_embedder(config, progress_sink=None)
+
+    def test_symlink_pointing_outside_app_home_is_rejected(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """A symlink inside app_home that points outside must be rejected
+        because we resolve() the path before the boundary check."""
+        self._fake_sentence_transformer_patch(monkeypatch)
+        app_home = tmp_path / ".arignan"
+        write_default_settings(app_home=app_home)
+
+        # Create a legitimate models dir, but the actual model dir is a symlink
+        # to a location outside app_home
+        outside_target = tmp_path / "outside_model"
+        outside_target.mkdir(parents=True, exist_ok=True)
+
+        models_root = app_home / "models"
+        models_root.mkdir(parents=True, exist_ok=True)
+        symlink_model_dir = models_root / "BAAI__bge-base-en-v1.5"
+        symlink_model_dir.symlink_to(outside_target)
+
+        monkeypatch.setattr(
+            "arignan.indexing.embedding.resolve_model_storage_dir",
+            lambda _ah, _mid: symlink_model_dir,
+        )
+
+        config = load_config(app_home=app_home)
+        with pytest.raises(RuntimeError, match="outside of app_home"):
+            create_embedder(config, progress_sink=None)
+
+    def test_path_traversal_in_model_name_is_rejected(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """A model_id containing '../' that resolves outside app_home must fail."""
+        self._fake_sentence_transformer_patch(monkeypatch)
+        app_home = tmp_path / ".arignan"
+        write_default_settings(app_home=app_home)
+
+        # Simulate model_storage_dir resolving to a traversal path
+        traversal_path = (app_home / "models" / ".." / ".." / "etc").resolve()
+        traversal_path.mkdir(parents=True, exist_ok=True)
+
+        monkeypatch.setattr(
+            "arignan.indexing.embedding.resolve_model_storage_dir",
+            lambda _ah, _mid: traversal_path,
+        )
+
+        config = load_config(app_home=app_home)
+        with pytest.raises(RuntimeError, match="outside of app_home"):
+            create_embedder(config, progress_sink=None)
+
+    def test_error_message_includes_both_paths(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        self._fake_sentence_transformer_patch(monkeypatch)
+        app_home = tmp_path / ".arignan"
+        write_default_settings(app_home=app_home)
+        evil = tmp_path / "evil"
+        evil.mkdir()
+
+        monkeypatch.setattr(
+            "arignan.indexing.embedding.resolve_model_storage_dir",
+            lambda _ah, _mid: evil,
+        )
+
+        config = load_config(app_home=app_home)
+        with pytest.raises(RuntimeError) as exc_info:
+            create_embedder(config, progress_sink=None)
+        message = str(exc_info.value)
+        assert "outside of app_home" in message

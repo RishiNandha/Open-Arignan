@@ -769,10 +769,26 @@ def _resolve_gui_open_target(app: ArignanApp, target: str) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.touch(exist_ok=True)
         return path
-    raise HTTPException(status_code=404, detail=f"Unknown file target '{target}'.")
+    # Never echo the untrusted `target` back — it could enable reflected XSS if
+    # a future frontend renders error detail strings as HTML.
+    raise HTTPException(status_code=404, detail="Unknown file target.")
+
+
+# File extensions that are safe to hand to the OS file-opener.  Anything not in
+# this set (executables, scripts, .url files, etc.) is rejected before the OS
+# ever sees it — preventing arbitrary code execution via os.startfile / xdg-open.
+_SAFE_OPEN_EXTENSIONS: frozenset[str] = frozenset({
+    ".json", ".md", ".txt", ".log", ".yaml", ".yml", ".toml", ".ini", ".cfg",
+})
 
 
 def _open_local_path(path: Path) -> None:
+    suffix = path.suffix.lower()
+    if suffix not in _SAFE_OPEN_EXTENSIONS:
+        raise ValueError(
+            f"Refusing to open '{path.name}': extension '{suffix}' is not in the "
+            f"allowed list {sorted(_SAFE_OPEN_EXTENSIONS)}."
+        )
     if os.name == "nt":
         os.startfile(str(path))
         return

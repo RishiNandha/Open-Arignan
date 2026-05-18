@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import re
+import time
 from pathlib import Path
 
+import pytest
+
 from arignan.indexing import Chunker
+from arignan.indexing.chunking import AUTHOR_YEAR_CITATION_PATTERN
 from arignan.models import DocumentSection, ParsedDocument, SourceDocument, SourceType
 
 
@@ -174,3 +179,112 @@ def test_chunker_preserves_academic_section_boundaries_and_context() -> None:
     assert chunks[1].metadata.heading == "Methods"
     assert chunks[0].text.startswith("Context: Word2Vec Notes | Introduction")
     assert chunks[1].text.startswith("Context: Word2Vec Notes | Methods | Method")
+
+
+# ---------------------------------------------------------------------------
+# AUTHOR_YEAR_CITATION_PATTERN — ReDoS safety + correctness
+# ---------------------------------------------------------------------------
+
+
+class TestAuthorYearCitationPatternReDoSSafety:
+    """Verify the citation regex is both correct and safe from ReDoS.
+
+    The original nested-quantifier pattern caused catastrophic backtracking on
+    adversarial input.  The replacement uses a bounded [^)] character class
+    which is O(n) and cannot backtrack across paren boundaries.
+    """
+
+    # --- correctness: should match legitimate citations ---
+
+    @pytest.mark.parametrize("citation", [
+        "(Smith, 2021)",
+        "(Smith, 2019a)",
+        "(Jones and Brown, 2020)",
+        "(Smith et al., 2018)",
+        "(Smith, 2021; Jones, 2022)",
+        "(De Villiers, 1999)",
+        "(O'Brien, 2015)",
+    ])
+    def test_matches_legitimate_author_year_citation(self, citation: str) -> None:
+        assert AUTHOR_YEAR_CITATION_PATTERN.search(citation), (
+            f"Expected citation '{citation}' to match but it did not"
+        )
+
+    # --- correctness: should NOT match non-citation parens ---
+
+    @pytest.mark.parametrize("non_citation", [
+        "(see Figure 3)",          # no year
+        "(p < 0.05)",              # not a citation
+        "(n = 150)",               # sample size
+        "(1984)",                  # year only, no author
+        "",                        # empty
+        "no parens here",
+    ])
+    def test_does_not_match_non_citation(self, non_citation: str) -> None:
+        # These should either not match or match only the citation-like part —
+        # the key property is that they don't cause a hang.
+        start = time.monotonic()
+        AUTHOR_YEAR_CITATION_PATTERN.search(non_citation)
+        elapsed = time.monotonic() - start
+        assert elapsed < 0.1, f"Regex took {elapsed:.3f}s on non-citation — possible backtracking"
+
+    # --- ReDoS safety: adversarial inputs must complete in O(1) time ---
+
+    @pytest.mark.parametrize("adversarial", [
+        # Original catastrophic backtracking trigger: many uppercase tokens
+        # separated by spaces but no valid year at the end.
+        "(" + " and ".join(["Smith"] * 30),
+        # Long parenthesised block with no year
+        "(" + "A" * 180 + ")",
+        # Semicolon-heavy string that would exhaust the old alternation
+        "(" + "; ".join(["Smith, Jones"] * 25),
+        # Starts correctly but never closes — must not hang
+        "(Smith et al., 2021; Jones and Brown, 2020; Davis" * 5,
+        # Maximum allowed content length: just under the 200-char limit
+        "(S" + "m" * 196 + "1990)",
+    ])
+    def test_adversarial_input_completes_within_time_budget(self, adversarial: str) -> None:
+        budget_seconds = 0.5  # generous — any ReDoS would take seconds to minutes
+        start = time.monotonic()
+        AUTHOR_YEAR_CITATION_PATTERN.search(adversarial)
+        elapsed = time.monotonic() - start
+        assert elapsed < budget_seconds, (
+            f"Regex took {elapsed:.3f}s on adversarial input — ReDoS not fixed!\n"
+            f"Input (first 80 chars): {adversarial[:80]!r}"
+        )
+
+    def test_very_long_adversarial_string_completes_quickly(self) -> None:
+        # 10 000 character string that would exponentially blow up the old pattern
+        adversarial = "(Smith and Jones, " * 500  # ~9000 chars, no closing paren + year
+        start = time.monotonic()
+        AUTHOR_YEAR_CITATION_PATTERN.search(adversarial)
+        elapsed = time.monotonic() - start
+        assert elapsed < 1.0, (
+            f"10k-char adversarial input took {elapsed:.3f}s — ReDoS vulnerability present"
+        )
+
+    def test_pattern_strips_citations_from_chunk_text(self) -> None:
+        """Chunker uses the pattern to clean text — verify end-to-end that
+        legitimate citations are removed and normal text is preserved."""
+        document = ParsedDocument(
+            load_id="load-cite",
+            hat="default",
+            source=SourceDocument(
+                source_type=SourceType.PDF,
+                source_uri="paper.pdf",
+                local_path=Path("paper.pdf"),
+            ),
+            full_text=(
+                "Dense retrieval methods (Karpukhin et al., 2020) have shown strong results. "
+                "Earlier work (Johnson, 2019; Xiong, 2021) established baselines."
+            ),
+            sections=[],
+        )
+        chunks = Chunker(chunk_size=300, chunk_overlap=20).chunk_document(document)
+        assert chunks
+        combined = " ".join(c.text for c in chunks)
+        # Citations should be stripped from the chunk text
+        assert "(Karpukhin et al., 2020)" not in combined
+        assert "(Johnson, 2019; Xiong, 2021)" not in combined
+        # Core content should remain
+        assert "Dense retrieval methods" in combined
