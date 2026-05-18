@@ -87,6 +87,12 @@ class TestValidateFetchUrl:
             with pytest.raises(ValueError, match="private|reserved|internal"):
                 _validate_fetch_url("http://[fe80::1]/")
 
+    def test_cgnat_100_64_range_rejected(self) -> None:
+        with patch("socket.getaddrinfo") as mock_gai:
+            mock_gai.return_value = [(socket.AF_INET, socket.SOCK_STREAM, 0, "", ("100.64.0.1", 0))]
+            with pytest.raises(ValueError, match="private|reserved|internal"):
+                _validate_fetch_url("http://cgnat.isp/")
+
     def test_dns_resolution_failure_raises(self) -> None:
         with patch("socket.getaddrinfo", side_effect=socket.gaierror("Name or service not known")):
             with pytest.raises(ValueError, match="resolve|hostname"):

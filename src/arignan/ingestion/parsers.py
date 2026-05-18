@@ -38,12 +38,36 @@ class PdfOcrRequired(RuntimeError):
     """Raised when a PDF lacks embedded text and should be retried with OCR enabled."""
 
 
+# RFC 6598 Carrier-Grade NAT range (100.64.0.0/10).  Python's ipaddress
+# stdlib does not classify this as is_private in 3.11 and below, so we
+# add an explicit check.  From a server's perspective this range is
+# typically an internal ISP network and must not be reachable from a
+# user-initiated fetch.
+_CGNAT_NETWORK = ipaddress.ip_network("100.64.0.0/10")
+
+
+def _is_blocked_address(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Return True if addr must not be reached by an outbound HTTP request."""
+    if (
+        addr.is_loopback
+        or addr.is_private
+        or addr.is_link_local
+        or addr.is_reserved
+        or addr.is_multicast
+        or addr.is_unspecified
+    ):
+        return True
+    if isinstance(addr, ipaddress.IPv4Address) and addr in _CGNAT_NETWORK:
+        return True
+    return False
+
+
 def _validate_fetch_url(url: str) -> None:
     """Reject URLs that could be used for SSRF attacks.
 
     Enforces http/https-only, resolves the hostname to an IP address at
     validation time to prevent DNS-rebinding attacks, and blocks all private,
-    loopback, link-local, and reserved address ranges.
+    loopback, link-local, reserved, CGNAT, and multicast address ranges.
     """
     try:
         parsed = urllib.parse.urlparse(url)
@@ -69,17 +93,10 @@ def _validate_fetch_url(url: str) -> None:
             addr = ipaddress.ip_address(raw_addr)
         except ValueError:
             continue
-        if (
-            addr.is_loopback
-            or addr.is_private
-            or addr.is_link_local
-            or addr.is_reserved
-            or addr.is_multicast
-            or addr.is_unspecified
-        ):
+        if _is_blocked_address(addr):
             raise ValueError(
-                "Outbound requests to private, loopback, or link-local addresses are not permitted. "
-                "The URL resolves to a reserved address range."
+                "Outbound requests to private, internal, or reserved addresses are not permitted. "
+                "The URL resolves to a restricted address range."
             )
 
 
